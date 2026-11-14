@@ -1,0 +1,3 @@
+go test fuzz v1
+string("ꥥ")
+[]byte("0\x19")

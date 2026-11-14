@@ -1,0 +1,6 @@
+/db
+/i-db
+/dist/
+*.test
+.env
+.worktrees/

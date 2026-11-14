@@ -1,0 +1,20 @@
+[
+  {
+    "title": "auth accounts",
+    "conn": "auth-prod",
+    "by": ["email", "uid", "id"],
+    "sql": "select * from accounts where email = :email_enc or uid = :uid or id = :id limit 50"
+  },
+  {
+    "title": "app customers",
+    "conn": "app-prod",
+    "by": ["id", "nickname"],
+    "sql": "select * from customers where id = :id or nickname = :nickname limit 50"
+  },
+  {
+    "title": "shop orders",
+    "conn": "shop-prod",
+    "by": ["id"],
+    "sql": "select * from orders where customer_id = :id order by id desc limit 50"
+  }
+]
