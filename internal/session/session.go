@@ -59,6 +59,18 @@ type State struct {
 	// 접속 uuid → 그 접속에서 연·실행한·저장한 파일, 최근 것부터(R44)
 	Recent map[string][]Recent `json:"recent,omitempty"`
 	Panes  Panes               `json:"panes"`
+	// 최근 연 테이블 보기, 최근 것부터(R40.3). 명령 팔레트가 맨 위에 보인다
+	RecentTables []RecentTable `json:"recentTables,omitempty"`
+}
+
+// maxRecentTables 는 남길 최근 테이블 수다(R40.3)
+const maxRecentTables = 50
+
+type RecentTable struct {
+	Conn   string    `json:"conn"` // 접속 uuid
+	Schema string    `json:"schema"`
+	Table  string    `json:"table"`
+	At     time.Time `json:"at"`
 }
 
 type Recent struct {
@@ -84,6 +96,19 @@ func (s *State) Touch(conn, file string, at time.Time) {
 	list := slices.DeleteFunc(slices.Clone(s.Recent[conn]), func(r Recent) bool { return r.File == file })
 	list = slices.Insert(list, 0, Recent{File: file, At: at})
 	s.Recent[conn] = list[:min(len(list), maxRecent)]
+}
+
+// TouchTable 은 최근 테이블 맨 앞에 conn 의 schema.table 을 둔다. 같은 테이블의 이전 기록은 지우고 maxRecentTables 개만 남긴다.
+// 접속이나 테이블이 비면 남기지 않는다.
+func (s *State) TouchTable(conn, schema, table string, at time.Time) {
+	if conn == "" || table == "" {
+		return
+	}
+	list := slices.DeleteFunc(slices.Clone(s.RecentTables), func(r RecentTable) bool {
+		return r.Conn == conn && r.Schema == schema && r.Table == table
+	})
+	list = slices.Insert(list, 0, RecentTable{Conn: conn, Schema: schema, Table: table, At: at})
+	s.RecentTables = list[:min(len(list), maxRecentTables)]
 }
 
 // Path 는 세션 파일 경로다. history 와 같이 XDG_STATE_HOME 이 절대 경로일 때만 따른다.

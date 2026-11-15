@@ -194,7 +194,7 @@ var helpSections = []struct {
 		{"Ctrl+R / F5", "실행: 선택한 글 전부, 없으면 커서 문장", "ctrl+r"},
 		{"Ctrl+E", "EXPLAIN (실행하지 않음)", "ctrl+e"},
 		{"Alt+E", "EXPLAIN ANALYZE, BUFFERS (쓰기 문장은 y/N)", "alt+e"},
-		{"Ctrl+P", "명령 팔레트 (이름·키로 찾아 실행)", ""},
+		{"Ctrl+P", "명령 팔레트 (동작·테이블을 이름으로 찾아 실행·열기, 최근 테이블 먼저)", ""},
 		{"Ctrl+H", "실행 기록", "ctrl+h"},
 		{"Ctrl+N", "객체 찾기 (테이블·뷰·Redis 키)", "ctrl+n"},
 		{"Ctrl+O / Ctrl+S", "파일 열기 / 저장 (결과 편집이 있으면 제출)", "ctrl+o"},
@@ -487,6 +487,19 @@ type paletteAct struct {
 	k  tea.KeyMsg
 }
 
+// paletteTable 은 명령 팔레트의 테이블·뷰 항목이다(R40.2). quiet 면 거르기 글이 있을 때만 보인다.
+type paletteTable struct {
+	it    finder.Item
+	conn  int
+	quiet bool
+}
+
+// paletteRecent 는 빈 팔레트 맨 위에 보일 최근 테이블 수다(R40.2)
+const paletteRecent = 10
+
+// paletteEnvs 는 거를 때 최근이 아닌 테이블을 둘 환경 순서다. 쓰기 위험이 큰 prod 를 맨 뒤에 둔다
+var paletteEnvs = []string{"local", "stg", "prod"}
+
 // fkMsg 는 결과 표의 F·R(R36)로 외래 키를 읽은 결과다. db 는 읽기 시작할 때의 데이터베이스다.
 type fkMsg struct {
 	conn   int
@@ -718,7 +731,8 @@ type model struct {
 
 	overlay      overlay
 	pickerItems  []string
-	pickerConn   map[string]string // 항목 → 접속 uuid. 고르기 창에 → 접속 이름으로 보인다
+	pickerConn   map[string]string       // 항목 → 접속 uuid. 고르기 창에 → 접속 이름으로 보인다
+	pickerTables map[string]paletteTable // 명령 팔레트의 테이블 항목(R40.2). 그릴 때 [환경] 에 색을 입힌다
 	pickerCursor int
 	pickDo       func(string) tea.Cmd // nil 이면 queries 파일 열기(Ctrl+O)
 	pickDel      func(string) tea.Cmd // 즐겨찾기 고르기의 지우기(d)
@@ -1188,13 +1202,21 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 
 // openTable 은 탭 t 에 테이블 보기(R16)를 연다. where 가 있으면 그 WHERE 로 연다(R36 외래 키 따라가기).
 // 추정 행 수를 먼저 읽고, 그 결과가 오면 첫 페이지를 읽는다. 탭의 접속·테이블 보기는 확인을 다 지나 시작할 때 바꾼다.
+// 여는 길(트리·찾기·팔레트·외래 키·정의로 이동)이 모두 여기를 지나 최근 테이블(R40.3)을 여기서 남긴다.
 func (m *model) openTable(t *queryTab, conn int, ref db.TableRef, where string) tea.Cmd {
+	m.sess.TouchTable(m.conn(conn).UUID, ref.Schema, ref.Table, time.Now())
 	tv := tableview.New(ref, tableview.Options{})
 	if where != "" {
 		tv, _ = tv.ToggleWhere(where)
 	}
 	return m.guard(pendingRun{tab: t.id, conn: conn, readOnly: true, kind: rkEstimate, tx: true, retarget: true, tv: &tv, title: ref.Table,
 		exec: execScript(m.clients, script{conn: m.conn(conn), stmts: []string{tv.EstimateSQL()}})})
+}
+
+// tableLabel 은 명령 팔레트의 테이블 항목 `[환경] 접속 · 스키마.테이블` 이다(R40.2).
+func (m *model) tableLabel(conn int, schema, table string) string {
+	c := m.conn(conn)
+	return fmt.Sprintf("[%s] %s · %s.%s", c.Env(), c.Name, schema, table)
 }
 
 // keyMsgOf 는 키 이름(`ctrl+r`·`alt+e`·`F`)을 키 입력으로 바꾼다. 명령 팔레트가 도움말의 키 이름을 키 입력으로 되돌린다.
@@ -1678,7 +1700,7 @@ func copyCmd(s string) tea.Cmd {
 // openPicker 는 고르기 창(파일·데이터베이스·스키마·즐겨찾기)을 연다. do 가 nil 이면 queries 파일 열기다.
 // conn 은 항목 옆에 보일 접속 uuid, del 은 즐겨찾기 지우기다.
 func (m *model) openPicker(prompt string, items []string, conn map[string]string, do, del func(string) tea.Cmd) {
-	m.pickerItems, m.pickerConn, m.pickDo, m.pickDel = items, conn, do, del
+	m.pickerItems, m.pickerConn, m.pickDo, m.pickDel, m.pickerTables = items, conn, do, del, nil
 	m.pickerCursor = 0
 	m.input.SetValue("")
 	m.input.Prompt = prompt
@@ -3172,10 +3194,44 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ─── 명령 팔레트 (R40) ───
 		// F1 도움말 항목을 이름·키로 거르고, 고르면 그 항목의 포커스로 옮겨 키를 누른 것처럼 다시 넣는다.
 		// 지금 쓸 수 없는 동작도 그대로 눌러 그 동작의 안내가 상태 줄에 나오게 한다. 자동완성 창에서는 위로 이동이다
+		// 동작 앞에 PostgreSQL 테이블·뷰를 둔다(R40.2). 최근 연 것이 최신순으로 먼저고 빈 팔레트에는 그 앞 10개만 보인다.
+		// 거르면 Ctrl+N 과 같은 카탈로그의 나머지 테이블이 환경(local·stg·prod) 순으로 최근 것 뒤에 붙는다
 		if m.focus == fEditor && t.editor.PopupOpen() {
 			break
 		}
 		var labels []string
+		tables := map[string]paletteTable{}
+		for _, r := range m.sess.RecentTables {
+			ci, ok := m.proj.ConnIndex(r.Conn)
+			if !ok { // 지금 .idea 에 없는 접속의 기록은 빼고 보인다
+				continue
+			}
+			label := m.tableLabel(ci, r.Schema, r.Table)
+			if _, dup := tables[label]; dup {
+				continue
+			}
+			it := finder.Item{Conn: m.conn(ci).Name, Kind: finder.KindTable, Schema: r.Schema, Name: r.Table}
+			tables[label] = paletteTable{it: it, conn: ci, quiet: len(tables) >= paletteRecent}
+			labels = append(labels, label)
+		}
+		for _, env := range paletteEnvs {
+			for i, c := range m.proj.Conns {
+				cat := m.catalogs[i]
+				if cat == nil || c.Env() != env {
+					continue
+				}
+				for _, s := range cat.Schemas {
+					for _, tb := range s.Tables {
+						label := m.tableLabel(i, s.Name, tb.Name)
+						if _, dup := tables[label]; dup {
+							continue
+						}
+						tables[label] = paletteTable{it: finder.Item{Conn: c.Name, Kind: finder.KindTable, Schema: s.Name, Name: tb.Name}, conn: i, quiet: true}
+						labels = append(labels, label)
+					}
+				}
+			}
+		}
 		acts := map[string]paletteAct{}
 		for _, sec := range helpSections {
 			for _, kv := range sec.keys {
@@ -3189,6 +3245,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.openPicker("명령 ", labels, nil, func(label string) tea.Cmd {
+			// 테이블은 Ctrl+N 처럼 트리에서 골라 연다. 탭 규칙(R3.1)·접속 바꾸기·트랜잭션 확인은 트리 Enter 와 같다
+			if tb, ok := tables[label]; ok {
+				return m.reveal(tb.it)
+			}
 			a := acts[label]
 			if a.at != fKeep {
 				m.setFocus(a.at)
@@ -3196,6 +3256,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, cmd := m.Update(a.k)
 			return cmd
 		}, nil)
+		m.pickerTables = tables
 		return m, nil
 	case "ctrl+b", "f12":
 		// ─── 정의로 이동 (R26) ───
@@ -3912,6 +3973,9 @@ func (m *model) pickerMatches() []string {
 	f := strings.ToLower(m.input.Value())
 	var out []string
 	for _, p := range m.pickerItems {
+		if f == "" && m.pickerTables[p].quiet {
+			continue
+		}
 		if strings.Contains(strings.ToLower(p), f) {
 			out = append(out, p)
 		}
@@ -3952,6 +4016,11 @@ func (m *model) View() string {
 		top := max(0, m.pickerCursor-(l.bodyH-3))
 		for i := top; i < len(list) && i < top+l.bodyH-2; i++ {
 			name := textutil.Printable(list[i], false)
+			if tb, ok := m.pickerTables[list[i]]; ok && i != m.pickerCursor {
+				// 거르기는 꾸미지 않은 글로 하고 색은 그릴 때만 입힌다
+				env := "[" + m.conn(tb.conn).Env() + "]"
+				name = envStyle(m.conn(tb.conn)).Render(env) + strings.TrimPrefix(name, env)
+			}
 			if i == m.pickerCursor {
 				name = lipgloss.NewStyle().Reverse(true).Render(name)
 			}

@@ -11,6 +11,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Results grid: sort, filter, copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)`, charts, JSON tree, cell aggregates, result pinning and diff
 - In-place editing of single-table results (preview SQL before submit, undo of the last submit), paste from spreadsheets, CSV import
 - Server-side table view with WHERE, paging, exact count; follow foreign keys in both directions
+- Command palette (`Ctrl+P`) that runs any action or jumps to any table across connections, recently opened tables first
 - EXPLAIN / EXPLAIN ANALYZE as a plan tree, activity/locks/table sizes, cancel or terminate backends
 - Transactions in Auto or Manual mode, full-schema data search, schema diff between connections, run a statement on another connection and diff the results
 - Redis: key browser, value editor for every type, TTL/rename, monitor (INFO, SLOWLOG, big keys), pattern bulk delete
