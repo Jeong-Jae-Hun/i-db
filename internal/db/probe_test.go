@@ -1,11 +1,14 @@
 package db
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -189,31 +192,42 @@ func TestProbeRedis_INFO_는_필요한_네_구역만_묻는다(t *testing.T) {
 	c.UUID = "it-redis-sections"
 	cs := NewClients()
 	defer cs.Close()
-	_, err := cs.Redis(ctx(t), c) // 연결을 미리 열어 MONITOR 에 확인의 INFO 만 남게 한다
+	rc, err := cs.Redis(ctx(t), c)
 	must(t, err)
-	mon := redis.NewClient(&redis.Options{Addr: net.JoinHostPort(c.Host, strconv.Itoa(c.Port))})
-	defer mon.Close()
-	lines := make(chan string, 64)
-	cmd := mon.Monitor(ctx(t), lines)
-	cmd.Start()
-	defer cmd.Stop()
-	time.Sleep(100 * time.Millisecond) // MONITOR 가 자리 잡을 때까지
+	// MONITOR 는 go-redis 안에서 -race 경합을 내서(v9.7) 클라이언트 훅으로 보낸 명령을 본다
+	var mu sync.Mutex
+	var sent [][]any
+	rc.cl.AddHook(argsHook{record: func(args []any) { mu.Lock(); sent = append(sent, args); mu.Unlock() }})
 	if h := cs.ProbeRedis(ctx(t), c); !h.OK {
 		t.Fatalf("ProbeRedis = %+v", h)
 	}
-	for timeout := time.After(3 * time.Second); ; {
-		select {
-		case l := <-lines:
-			if strings.Contains(l, `"info"`) || strings.Contains(l, `"INFO"`) {
-				if !strings.Contains(strings.ToLower(l), `"info" "server" "clients" "memory" "keyspace"`) {
-					t.Fatalf("INFO 인자: %s", l)
-				}
-				return
+	mu.Lock()
+	defer mu.Unlock()
+	for _, a := range sent {
+		if len(a) > 0 && strings.EqualFold(fmt.Sprint(a[0]), "info") {
+			if got := strings.ToLower(fmt.Sprint(a...)); got != "info server clients memory keyspace" && got != "infoserverclientsmemorykeyspace" {
+				t.Fatalf("INFO 인자: %v", a)
 			}
-		case <-timeout:
-			t.Fatal("INFO 를 보지 못함")
+			return
 		}
 	}
+	t.Fatalf("INFO 를 보지 못함: %v", sent)
+}
+
+// argsHook 은 보낸 명령의 인자를 record 로 넘긴다.
+type argsHook struct{ record func([]any) }
+
+func (argsHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h argsHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.record(cmd.Args())
+		return next(ctx, cmd)
+	}
+}
+
+func (argsHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 // delayProxy 는 새 연결마다 delay 만큼 기다린 뒤 upstream 과 잇는다. stall 이 켜지면 서버 응답을 버린다.
