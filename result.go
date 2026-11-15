@@ -32,7 +32,7 @@ func (t *queryTab) shown() *db.Result {
 	return t.res
 }
 
-// resultLines 는 결과 표 위에 붙는 줄(결과 작은 탭·테이블 보기 줄)이다. 그리기와 마우스 좌표가 같이 쓴다.
+// resultLines 는 결과 표 위에 붙는 줄(결과 작은 탭, 테이블 보기의 WHERE·ORDER BY 줄 또는 일반 결과의 정렬·거르기 줄)이다. 그리기와 마우스 좌표가 같이 쓴다.
 func (m *model) resultLines(t *queryTab, w int) []string {
 	var lines []string
 	if len(t.subs) > 0 {
@@ -53,8 +53,11 @@ func (m *model) resultLines(t *queryTab, w int) []string {
 		}
 		lines = append(lines, truncate(strings.Join(parts, " "), w))
 	}
-	if t.tv != nil {
+	switch sum := t.grid.Summary(); {
+	case t.tv != nil:
 		lines = append(lines, t.tv.View(w))
+	case sum != "":
+		lines = append(lines, dimStyle.Render(truncate(sum, w)))
 	}
 	return lines
 }

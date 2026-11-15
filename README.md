@@ -8,9 +8,9 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 
 - Connection tree grouped like DataGrip, with schemas, tables, views, functions and Redis key namespaces
 - SQL editor with syntax highlighting, completion, live templates (`sel`, `ins`, `upd`, ...), formatting, `:name`/`$1` parameters, go-to-definition
-- Results grid: sort, filter, copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)`, charts, JSON tree, cell aggregates, result pinning and diff
+- Results grid: sort (`s` or header click), filter with `/` (`abc`, `!abc`, `col:abc`, `col=v`, `col>v`, `col=null`), copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)`, charts, JSON tree, cell aggregates, result pinning and diff
 - In-place editing of single-table results (preview SQL before submit, undo of the last submit), paste from spreadsheets, CSV import
-- Server-side table view with WHERE, paging, exact count; follow foreign keys in both directions
+- Server-side table view with a DataGrip-style WHERE / ORDER BY bar (column completion, `/` short filters), paging, exact count; follow foreign keys in both directions
 - Command palette (`Ctrl+P`) that runs any action or jumps to any table across connections, recently opened tables first
 - EXPLAIN / EXPLAIN ANALYZE as a plan tree, activity/locks/table sizes, cancel or terminate backends
 - Transactions in Auto or Manual mode, full-schema data search, schema diff between connections, run a statement on another connection and diff the results
@@ -83,7 +83,7 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `F9` / `F10` / `F11` | Auto/Manual transactions / COMMIT / ROLLBACK |
 | `Ctrl+L` | unlock writes on a prod connection for a few minutes |
 | `Ctrl+H` | history |
-| tree `Enter` on a table | table view (`w` WHERE, `[` `]` pages) |
+| tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
 
 On macOS, in terminals that speak the kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2), the same actions are bound to ⌘ keys. See SPEC R23 and R47.
 
