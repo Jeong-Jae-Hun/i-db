@@ -171,9 +171,14 @@ func LoadProject(dir string) (*Project, error) {
 	return p, nil
 }
 
+// ConnIndex 는 uuid 인 접속의 자리다. 지운 접속 자리(빈 Conn, R59)와 빈 uuid 는 맞지 않는다.
+// 매핑이 없는 파일(uuid "")이 지운 자리를 집어 그 접속에 붙지 않게 여기서 막는다.
 func (p *Project) ConnIndex(uuid string) (int, bool) {
+	if uuid == "" {
+		return -1, false
+	}
 	for i, c := range p.Conns {
-		if c.UUID == uuid {
+		if c.UUID == uuid && c.Kind != "" {
 			return i, true
 		}
 	}

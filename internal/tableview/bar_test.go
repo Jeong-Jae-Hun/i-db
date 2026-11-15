@@ -200,3 +200,64 @@ func TestIdentText_소문자_이름만_따옴표_없이_쓴다(t *testing.T) {
 		}
 	}
 }
+
+func TestWHERE_한_낱말이_아니거나_SQL_값으로_읽히는_값은_SQL_그대로_둔다(t *testing.T) {
+	cases := []struct{ in, where string }{
+		{"status>CURRENT_DATE", "status>CURRENT_DATE"},
+		{"status=true", "status=true"},
+		{"id=1+2", "id=1+2"},
+		{"id=1::int", "id=1::int"},
+		{"name=b.c", "name=b.c"},
+		{"id=abc", "id=abc"},
+		{"email=a@b.com", `"email"::text = 'a@b.com'`},
+		{"id=1.5", `"id" = 1.5`},
+	}
+	for _, c := range cases {
+		m, _ := barModel().Update(key("/"))
+		if m, _ = enter(m, c.in); m.where != c.where {
+			t.Errorf("%q: where=%q want %q", c.in, m.where, c.where)
+		}
+	}
+}
+
+func TestColumn_대소문자까지_같은_열을_먼저_고른다(t *testing.T) {
+	m := New(db.TableRef{Schema: "s", Table: "t"}, Options{}).SetColumns([]string{"note", "Note"}, []string{"text", "text"})
+	if c, ok := m.column("Note"); !ok || c != "Note" {
+		t.Fatalf("column: %q", c)
+	}
+	w, _ := m.Update(key("/"))
+	if w, _ = enter(w, "Note=x"); w.where != `"Note"::text = 'x'` {
+		t.Fatalf("짧은 꼴도 같은 열: %q", w.where)
+	}
+}
+
+func TestEnter_두_칸을_합친_문장이_하나가_아니면_거부한다(t *testing.T) {
+	m, _ := typeWhere(t, barModel(), "name = $q$")
+	if m.where != "name = $q$" {
+		t.Fatalf("WHERE 칸 하나로는 문장 하나: %q", m.where)
+	}
+	m, _ = m.Update(key("O"))
+	m, a := enter(m, "$q$; drop table t; --")
+	if a.Requery || a.Status == "" || !m.Typing() || strings.Contains(m.SQL(), "drop") {
+		t.Fatalf("합친 문장이 둘이면 거부: %+v %q", a, m.SQL())
+	}
+}
+
+func TestComplete_따옴표_글자_안이나_닫는_큰따옴표_뒤에서는_채우지_않는다(t *testing.T) {
+	tab := tea.KeyMsg{Type: tea.KeyTab}
+	for _, in := range []string{"name = 'N", `"Note"`, `"Note" = 'a b`} {
+		m, _ := barModel().Update(key("w"))
+		for m.input != "" {
+			m, _ = m.Update(key("backspace"))
+		}
+		m, _ = m.Update(key(in))
+		if m, _ = m.Update(tab); m.input != in {
+			t.Errorf("%q: 그대로여야 한다: %q", in, m.input)
+		}
+	}
+	m, _ := barModel().Update(key("w"))
+	m, _ = m.Update(key(`name = 'it''s' and "No`))
+	if m, _ = m.Update(tab); m.input != `name = 'it''s' and "Note"` {
+		t.Fatalf("닫힌 글자 뒤 여는 따옴표는 채운다: %q", m.input)
+	}
+}

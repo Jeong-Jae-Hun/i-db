@@ -15,7 +15,7 @@ import (
 func writeConnsJSON(t *testing.T, dir, body string) {
 	t.Helper()
 	must(t, os.MkdirAll(filepath.Join(dir, ".dbtui"), 0o755))
-	must(t, os.WriteFile(ConnsPath(dir), []byte(body), 0o644))
+	must(t, os.WriteFile(connsPath(dir), []byte(body), 0o644))
 }
 
 func connNames(p *Project) []string {
@@ -76,14 +76,14 @@ func TestAddConn은_json_끝에_더하고_env_를_0600으로_만든다(t *testin
 	_, err = AddConn(dir, Conn{Name: "b2", Kind: KindRedis, Host: "h2", DB: "0"})
 	must(t, err)
 	var es []connEntry
-	must(t, json.Unmarshal([]byte(readFile(t, ConnsPath(dir))), &es))
+	must(t, json.Unmarshal([]byte(readFile(t, connsPath(dir))), &es))
 	if len(es) != 2 || es[0].Name != "a1" || es[1].Name != "b2" {
 		t.Fatalf("순서: %+v", es)
 	}
-	if !strings.Contains(readFile(t, ConnsPath(dir)), "\n  {\n    \"uuid\"") {
-		t.Fatalf("2칸 들여쓰기: %s", readFile(t, ConnsPath(dir)))
+	if !strings.Contains(readFile(t, connsPath(dir)), "\n  {\n    \"uuid\"") {
+		t.Fatalf("2칸 들여쓰기: %s", readFile(t, connsPath(dir)))
 	}
-	if strings.Contains(readFile(t, ConnsPath(dir)), "p w") {
+	if strings.Contains(readFile(t, connsPath(dir)), "p w") {
 		t.Fatal("json 에 비밀번호가 들어갔다")
 	}
 	env := readFile(t, filepath.Join(dir, ".env"))
@@ -154,16 +154,69 @@ func TestUpdateConn은_이름을_바꾸면_env_키를_옮기고_다른_줄과_�
 	}
 }
 
-func TestUpdateConn_RemoveConn은_DataGrip_접속을_거절한다(t *testing.T) {
+func TestUpdateConn_RemoveConn은_db_전용_접속만_고친다(t *testing.T) {
 	dir := writeFixture(t, false)
-	if _, err := UpdateConn(dir, "app-stg", Conn{Name: "app-stg", Kind: KindPG, Host: "h"}); !errors.Is(err, ErrDataGripConn) {
-		t.Fatalf("고치기: %v", err)
+	if _, err := UpdateConn(dir, "app-stg", Conn{Name: "app-stg", Kind: KindPG, Host: "h"}); err == nil {
+		t.Fatal("DataGrip 접속 고치기는 오류")
 	}
-	if err := RemoveConn(dir, "app-stg"); !errors.Is(err, ErrDataGripConn) {
-		t.Fatalf("지우기: %v", err)
+	if err := RemoveConn(dir, "app-stg"); err == nil {
+		t.Fatal("DataGrip 접속 지우기는 오류")
 	}
-	if err := RemoveConn(dir, "nope"); err == nil || errors.Is(err, ErrDataGripConn) {
-		t.Fatalf("없는 접속: %v", err)
+}
+
+func TestLoadProject는_uuid_없는_줄과_env_키가_겹치는_뒤_줄을_빼고_경고한다(t *testing.T) {
+	dir := writeFixture(t, false)
+	writeConnsJSON(t, dir, `[{"name":"no-uuid","kind":"postgresql","host":"h"},`+
+		`{"uuid":"d-1","name":"a-b","kind":"postgresql","host":"h"},{"uuid":"d-2","name":"a_b","kind":"postgresql","host":"h"},`+
+		`{"uuid":"d-3","name":"a_b","kind":"redis","host":"h"}]`)
+	p, err := LoadProject(dir)
+	must(t, err)
+	if got := strings.Join(connNames(p), ","); got != "app-stg,app-stg-redis,a-b,a_b" {
+		t.Fatalf("남는 접속: %s", got)
+	}
+	if len(p.Warnings) != 2 || !strings.HasPrefix(p.Warnings[0], "no-uuid: missing uuid") || !strings.HasPrefix(p.Warnings[1], "a_b: same .env password key") {
+		t.Fatalf("경고: %v", p.Warnings)
+	}
+}
+
+func TestUpdateConn은_env_쓰기가_실패하면_옛_키를_남기고_ErrEnvNotUpdated_를_돌려준다(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 는 읽기 전용 폴더에도 쓴다")
+	}
+	dir := writeFixture(t, false)
+	_, err := AddConn(dir, Conn{Name: "x", Kind: KindPG, Host: "h", Password: "keep-me"})
+	must(t, err)
+	must(t, os.Chmod(dir, 0o555)) // .env 임시 파일을 못 만든다. .dbtui 폴더는 그대로 쓸 수 있다
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	_, err = UpdateConn(dir, "x", Conn{Name: "y", Kind: KindPG, Host: "h"})
+	if !errors.Is(err, ErrEnvNotUpdated) || !strings.Contains(err.Error(), "PG_X_PASSWORD to PG_Y_PASSWORD") {
+		t.Fatalf("오류: %v", err)
+	}
+	if env := readFile(t, filepath.Join(dir, ".env")); env != "PG_X_PASSWORD=keep-me\n" {
+		t.Fatalf("옛 키가 남아야 한다: %q", env)
+	}
+	if !strings.Contains(readFile(t, connsPath(dir)), `"name": "y"`) {
+		t.Fatal("접속은 저장된다")
+	}
+}
+
+func TestSetEnv는_심볼릭_링크면_가리키는_파일에_쓰고_폴더면_거절하며_CRLF_를_따른다(t *testing.T) {
+	dir, real := t.TempDir(), filepath.Join(t.TempDir(), "real.env")
+	must(t, os.WriteFile(real, []byte("A=1\r\n"), 0o600))
+	must(t, os.Symlink(real, filepath.Join(dir, ".env")))
+	must(t, setEnv(dir, []string{"B"}, "B=2"))
+	if st, err := os.Lstat(filepath.Join(dir, ".env")); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("링크는 그대로")
+	}
+	if got := readFile(t, real); got != "A=1\r\nB=2\r\n" {
+		t.Fatalf("가리키는 파일에 CRLF 로: %q", got)
+	}
+
+	dir2 := t.TempDir()
+	must(t, os.Mkdir(filepath.Join(dir2, "envdir"), 0o755))
+	must(t, os.Symlink(filepath.Join(dir2, "envdir"), filepath.Join(dir2, ".env")))
+	if err := setEnv(dir2, []string{"B"}, "B=2"); err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("폴더는 거절: %v", err)
 	}
 }
 
@@ -185,7 +238,7 @@ func TestRemoveConn은_json_줄과_env_비밀번호를_지우고_나머지는_�
 	}
 	must(t, RemoveConn(dir, "a"))
 	must(t, RemoveConn(dir, "c"))
-	if got := strings.TrimSpace(readFile(t, ConnsPath(dir))); got != "[]" {
+	if got := strings.TrimSpace(readFile(t, connsPath(dir))); got != "[]" {
 		t.Fatalf("다 지우면 빈 배열: %s", got)
 	}
 }

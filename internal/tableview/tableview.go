@@ -5,6 +5,7 @@ package tableview
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -21,6 +22,13 @@ const DefaultPageSize = 200
 
 var (
 	errWhere = errors.New("WHERE must be a single expression without a top-level ';'")
+	// plainValue 는 짧은 꼴(R14.4)의 같음·크기 비교 값으로 받는 한 낱말이다. + * / % : 같은 연산자 글자가 들면 SQL 식이다
+	plainValue = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+	// qualifiedName 은 열 참조(t.col)로 읽히는 값이다
+	qualifiedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$`)
+	// sqlValueWords 는 한 낱말이지만 SQL 값·함수로 읽히는 말이다(대소문자 무시). = null·!= null 은 ParseFilter 가 먼저 IS NULL 로 바꾼다
+	sqlValueWords = []string{"true", "false", "null", "unknown", "default", "current_date", "current_time", "current_timestamp",
+		"localtime", "localtimestamp", "current_user", "current_role", "session_user", "user", "current_schema", "current_catalog"}
 	// 한 줄 입력이라 붙여넣은 줄바꿈·탭은 보이는 대로 공백으로 바꾼다
 	pasteFlattener = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ")
 )
@@ -90,6 +98,8 @@ func New(t db.TableRef, opt Options) Model {
 }
 
 func (m Model) Typing() bool { return m.typing != fieldNone }
+
+func (m Model) Table() db.TableRef { return m.table }
 
 // SetColumns 는 지금 테이블의 열 이름·타입이다. Tab 완성, 짧은 꼴 조건, ORDER BY 읽기가 쓴다.
 func (m Model) SetColumns(cols, types []string) Model {
@@ -177,19 +187,24 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 			if err := CheckWhere(text); err != nil {
 				return m, Action{Handled: true, Status: err.Error()}
 			}
-			f := m.typing
-			m.typing, m.input = fieldNone, ""
-			if f == fieldOrder {
-				m.orders, m.orderRaw = m.parseOrder(text)
-				m.page = 0
-				return m, Action{Handled: true, Requery: true}
+			n := m
+			n.typing, n.input = fieldNone, ""
+			if m.typing == fieldOrder {
+				n.orders, n.orderRaw = n.parseOrder(text)
+				n.page = 0
+			} else {
+				cond, short := n.shortCondition(text)
+				n = n.withWhere(cond)
+				if short {
+					n.short = cond
+				}
 			}
-			cond, short := m.shortCondition(text)
-			m = m.withWhere(cond)
-			if short {
-				m.short = cond
+			// 칸마다 보면 WHERE 의 $q$ 가 ORDER BY 의 $q$ 까지 이어져 그 사이 ';' 를 가리는 식으로 두 칸이 합쳐 문장을 늘릴 수 있다.
+			// 실제로 보낼 문장 전체가 하나인지 본다
+			if len(db.SplitStatements(n.SQL())) != 1 || len(db.SplitStatements(n.CountSQL())) != 1 {
+				return m, Action{Handled: true, Status: errWhere.Error()}
 			}
-			return m, Action{Handled: true, Requery: true}
+			return n, Action{Handled: true, Requery: true}
 		}
 		return m, Action{Handled: true}
 	}
@@ -414,11 +429,14 @@ func (m Model) parseOrder(text string) ([]sortKey, string) {
 	return keys, ""
 }
 
-// column 은 입력한 이름이 가리키는 열이다. "따옴표 이름"은 그대로, 아니면 대소문자를 무시해 찾는다.
+// column 은 입력한 이름이 가리키는 열이다. "따옴표 이름"은 그대로, 아니면 대소문자까지 같은 열을 먼저, 없으면 대소문자를 무시해 찾는다.
 func (m Model) column(tok string) (string, bool) {
 	if len(tok) >= 2 && tok[0] == '"' && tok[len(tok)-1] == '"' {
 		name := strings.ReplaceAll(tok[1:len(tok)-1], `""`, `"`)
 		return name, slices.Contains(m.cols, name)
+	}
+	if slices.Contains(m.cols, tok) {
+		return tok, true
 	}
 	for _, c := range m.cols {
 		if strings.EqualFold(c, tok) {
@@ -429,16 +447,22 @@ func (m Model) column(tok string) (string, bool) {
 }
 
 // shortCondition 은 WHERE 입력이 R14.4 짧은 꼴(아는 열 + 한 낱말 값)이면 SQL 조건으로 바꾼다. 아니면 SQL 그대로다.
-// SQL 로도 읽히는 글(id = 1 AND …, name = 'x', a<>b, a::text, id = other_col)을 짧은 꼴로 잘못 바꾸지 않도록
-// 값에 따옴표·괄호가 있거나, 연산자 글자로 시작하거나, 공백이 있거나(: 제외), 열 이름이면 SQL 로 둔다.
-//   - 예: status=ACTIVE → "status"::text = 'ACTIVE'. status = 'ACTIVE' → 그대로.
+// SQL 로도 읽히는 글(id = 1 AND …, name = 'x', a<>b, a::text, id = other_col, id=1+2, created>CURRENT_DATE)을
+// 짧은 꼴로 잘못 바꾸지 않도록 값에 따옴표·괄호가 있거나 연산자 글자로 시작하면 SQL 로 둔다.
+// 같음·크기 비교는 더해서 값이 plainValue 한 낱말이고, 열 이름·열 참조(a.b)·SQL 값 낱말이 아니고,
+// 숫자 열이면 십진수일 때만 바꾼다. `:`(찾기)는 SQL 연산자가 아니라 공백이 있어도 바꾼다.
+//   - 예: status=ACTIVE → "status"::text = 'ACTIVE'. status = 'ACTIVE' → 그대로. id=1::int → 그대로.
 func (m Model) shortCondition(text string) (string, bool) {
 	f := grid.ParseFilter(text, m.cols)
 	if f.Col < 0 || strings.ContainsAny(f.Value, `'"()`) || strings.IndexAny(f.Value, "=<>!:~") == 0 {
 		return text, false
 	}
-	if _, isCol := m.column(f.Value); f.Op != grid.OpContains && (isCol || strings.ContainsAny(f.Value, " \t")) {
-		return text, false
+	if f.Op != grid.OpContains && f.Op != grid.OpNull && f.Op != grid.OpNotNull {
+		_, isCol := m.column(f.Value)
+		if !plainValue.MatchString(f.Value) || isCol || qualifiedName.MatchString(f.Value) ||
+			slices.Contains(sqlValueWords, strings.ToLower(f.Value)) || (m.numeric[f.Col] && !grid.IsDecimal(f.Value)) {
+			return text, false
+		}
 	}
 	cond, _ := f.SQL(m.numeric[f.Col])
 	return cond, true
@@ -448,11 +472,18 @@ func (m Model) shortCondition(text string) (string, bool) {
 // 다시 Tab 이면 다음 후보로 돈다.
 func (m Model) complete() Model {
 	if m.comp == nil {
+		inSingle, inDouble := quoteState(m.input)
+		if inSingle {
+			return m // 글자 값 안은 열 이름 자리가 아니다
+		}
 		start := len(m.input)
 		for start > 0 && identByte(m.input[start-1]) {
 			start--
 		}
 		if start > 0 && m.input[start-1] == '"' {
+			if !inDouble {
+				return m // 닫는 따옴표 바로 뒤다. 여는 따옴표로 보고 채우면 앞 이름을 덮는다
+			}
 			start--
 		}
 		prefix := strings.ToLower(strings.TrimPrefix(m.input[start:], `"`))
@@ -474,6 +505,20 @@ func (m Model) complete() Model {
 	}
 	m.input = m.input[:m.compAt] + m.comp[m.compIdx]
 	return m
+}
+
+// quoteState 는 s 끝이 닫히지 않은 작은따옴표 글자 또는 큰따옴표 이름 안인지다. 따옴표를 두 번 쓴 이스케이프는
+// 두 번 바뀌어 제자리다. E 문자열의 백슬래시 이스케이프는 보지 않는다(Tab 완성만 쓰는 근사다).
+func quoteState(s string) (inSingle, inDouble bool) {
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\'' && !inDouble:
+			inSingle = !inSingle
+		case s[i] == '"' && !inSingle:
+			inDouble = !inDouble
+		}
+	}
+	return inSingle, inDouble
 }
 
 // identText 는 따옴표 없이 써도 PostgreSQL 이 같은 이름으로 읽는 이름(소문자·숫자·_)은 그대로, 아니면 QuoteIdent 다.

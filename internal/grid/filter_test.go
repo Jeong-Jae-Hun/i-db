@@ -105,7 +105,7 @@ func TestFilter_연산자마다_받은_행을_거른다(t *testing.T) {
 		{"n!=null", "1,2,3"}, //
 		{"nocol>1", ""},      // 모르는 열이면 글 전체 찾기
 		{"name=", ""},        //
-		{"name:", "1,2,3,4"}, // 빈 찾기는 모두
+		{"name:", "1,2,3"},   // 빈 열 찾기는 SQL ILIKE '%%' 처럼 NULL 을 뺀다
 	}
 	for _, c := range cases {
 		g, _ := press(m, "/", c.q, "enter")
@@ -154,5 +154,14 @@ func TestCurrentCol_FocusCol_은_이름으로_커서_열을_지킨다(t *testing
 	m.FocusCol("없는열")
 	if m.CurrentCol() != "n" {
 		t.Fatal("없는 이름이면 그대로")
+	}
+}
+
+func TestParseFilter_대소문자까지_같은_열을_먼저_고른다(t *testing.T) {
+	if f := ParseFilter("Note=x", []string{"note", "Note"}); f.Col != 1 || f.Name != "Note" {
+		t.Fatalf("같은 열: %+v", f)
+	}
+	if f := ParseFilter("NOTE=x", []string{"note", "Note"}); f.Col != 0 {
+		t.Fatalf("없으면 대소문자 무시로 앞 열: %+v", f)
 	}
 }

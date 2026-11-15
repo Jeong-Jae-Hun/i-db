@@ -4,6 +4,7 @@ package grid
 
 import (
 	"cmp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -41,17 +42,19 @@ type Filter struct {
 	Value string
 }
 
-// ParseFilter 는 거르기 글을 조건으로 읽는다. 열 이름은 대소문자를 무시하고, 모르는 열이면 글 전체를 모든 열 찾기로 본다.
+// ParseFilter 는 거르기 글을 조건으로 읽는다. 열 이름은 대소문자까지 같은 열을 먼저, 없으면 대소문자를 무시해 찾고,
+// 모르는 열이면 글 전체를 모든 열 찾기로 본다.
 //   - 예: "status=ACTIVE" → status 열 OpEq "ACTIVE". "email=null" → OpNull.
 //   - 예: "!abc" → 모든 열 OpNotContains "abc". "http://x" → 열 http 가 없으면 모든 열 OpContains.
 func ParseFilter(expr string, cols []string) Filter {
 	if i, tok := filterToken(expr); i > 0 {
 		name := strings.TrimSpace(expr[:i])
-		for c, col := range cols {
-			if !strings.EqualFold(col, name) {
-				continue
-			}
-			f := Filter{Col: c, Name: col, Op: filterTokens[tok], Value: strings.TrimSpace(expr[i+len(tok):])}
+		c := slices.Index(cols, name)
+		if c < 0 {
+			c = slices.IndexFunc(cols, func(col string) bool { return strings.EqualFold(col, name) })
+		}
+		if c >= 0 {
+			f := Filter{Col: c, Name: cols[c], Op: filterTokens[tok], Value: strings.TrimSpace(expr[i+len(tok):])}
 			switch {
 			case !strings.EqualFold(f.Value, "null"):
 			case f.Op == OpEq:
@@ -102,14 +105,14 @@ func (f Filter) SQL(numeric bool) (string, bool) {
 	case OpNotNull:
 		return col + " IS NOT NULL", true
 	}
-	if numeric && isDecimal(f.Value) {
+	if numeric && IsDecimal(f.Value) {
 		return col + " " + compareSQL[f.Op] + " " + f.Value, true
 	}
 	return col + "::text " + compareSQL[f.Op] + " " + db.QuoteLiteral(f.Value), true
 }
 
-// isDecimal 은 SQL 에 그대로 실어도 되는 십진수인지 본다. ParseFloat 만으로는 Inf·NaN·0x1p4 도 통과해 글자를 제한한다.
-func isDecimal(v string) bool {
+// IsDecimal 은 SQL 에 그대로 실어도 되는 십진수인지 본다. ParseFloat 만으로는 Inf·NaN·0x1p4 도 통과해 글자를 제한한다.
+func IsDecimal(v string) bool {
 	if v == "" || strings.Trim(v, "0123456789+-.eE") != "" {
 		return false
 	}
@@ -119,12 +122,15 @@ func isDecimal(v string) bool {
 
 // matches 는 결과 행 i 가 조건에 맞는지다. 찾기는 화면 글자(소문자 사본)로, 같음·크기는 SQL 과 같은 규칙
 // (숫자 열에 십진수 값이면 숫자, 아니면 화면 글자)으로 비교하고, 같음·크기 비교에서 NULL 칸은 SQL 처럼 맞지 않는다.
+// 서버 SQL 과 다른 점: 숫자 비교는 float64 라 15자리를 넘는 numeric·bigint 는 근사이고, 글자 크기 비교는
+// 데이터베이스 정렬 규칙(collation)이 아니라 바이트 순서다. 찾기는 화면 글자라 서버의 ::text 와 꼴이 다를 수 있다.
 func (m *Model) matches(f Filter, i int) bool {
 	q := strings.ToLower(f.Value)
 	switch f.Op {
 	case OpContains, OpNotContains:
 		if q == "" {
-			return true
+			// col: 은 SQL ILIKE '%%' 처럼 NULL 칸을 뺀다. 모든 열 찾기의 빈 글은 거르기 없음이다
+			return f.Col < 0 || cellOf(m.res.Rows[i], f.Col) != nullText
 		}
 		found := false
 		for c := 0; !found && c < len(m.folded[i]); c++ {
@@ -144,7 +150,7 @@ func (m *Model) matches(f Filter, i int) bool {
 	shown := display(m.kinds[f.Col], raw)
 	var c int
 	switch a, errA := strconv.ParseFloat(raw, 64); {
-	case m.kinds[f.Col] == kindNumber && isDecimal(f.Value):
+	case m.kinds[f.Col] == kindNumber && IsDecimal(f.Value):
 		if errA != nil {
 			return false
 		}

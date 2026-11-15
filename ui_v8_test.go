@@ -142,3 +142,65 @@ func TestRecentTables_DB_RESTORE가_0이어도_세션에_남는다(t *testing.T)
 		t.Fatalf("되살린 최근 테이블: %+v", got)
 	}
 }
+
+func TestRecentTables_버릴지_묻는_확인을_거절하면_남기지_않는다(t *testing.T) {
+	m := paletteModel(t)
+	m.cur().conn = 1
+	show(m, editable())
+	m.setFocus(fResult)
+	m.Update(key("l"))
+	editCell(m, "q")
+	m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: "users"}, "")
+	if m.overlay != oConfirm {
+		t.Fatalf("보류 중인 편집이 있으면 묻는다: overlay=%v", m.overlay)
+	}
+	m.Update(key("n"))
+	if len(m.sess.RecentTables) != 0 || m.cur().tv != nil {
+		t.Fatalf("거절하면 남기지 않는다: %+v", m.sess.RecentTables)
+	}
+	m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: "users"}, "")
+	m.Update(key("y"))
+	if got := m.sess.RecentTables; len(got) != 1 || got[0].Table != "users" {
+		t.Fatalf("y 면 남긴다: %+v", got)
+	}
+}
+
+func TestPaletteTables_이름이_같은_접속도_접속마다_한_줄이고_Enter는_그_접속으로_연다(t *testing.T) {
+	m := paletteModel(t)
+	twin := m.proj.Conns[1] // x-stg 와 이름·환경이 같은 다른 접속
+	twin.UUID = "s2"
+	m.proj.Conns = append(m.proj.Conns, twin)
+	j := len(m.proj.Conns) - 1
+	m.roots = connRoots(m.proj.Conns, nil, map[string]bool{})
+	m.catalogs[j] = &complete.Catalog{Schemas: []complete.Schema{{Name: "public", Tables: []complete.Table{{Name: "channels"}}}}}
+	m.sess.TouchTable("s2", "public", "channels", time.Now())
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	typeText(m, "x-stg · public.channels")
+	got := m.pickerMatches()
+	if len(got) != 2 || m.pickerTables[got[0]].conn != j || m.pickerTables[got[1]].conn != 1 || got[0] == got[1] {
+		t.Fatalf("접속마다 한 줄: %v", got)
+	}
+	m.Update(key("esc"))
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	typeText(m, got[1])
+	m.Update(key("enter"))
+	if m.jump == nil || m.jumpConn != 1 {
+		t.Fatalf("이름이 아닌 고른 접속으로 찾는다: jump=%v conn=%d", m.jump, m.jumpConn)
+	}
+}
+
+func TestTableView_결과가_없을_때_s_는_정렬할_열이_없다고_알린다(t *testing.T) {
+	m := paletteModel(t)
+	addTable(m, 1)
+	m.setFocus(fTree)
+	m.Update(key("enter"))
+	tab := m.cur()
+	if tab.tv == nil {
+		t.Fatal("테이블 보기")
+	}
+	tab.running = nil
+	m.setFocus(fResult)
+	if _, cmd := m.Update(key("s")); cmd != nil || m.status != "정렬할 열이 없음" || strings.Contains(tab.tv.SQL(), "ORDER BY") {
+		t.Fatalf("다시 읽지 않는다: status=%q sql=%s", m.status, tab.tv.SQL())
+	}
+}

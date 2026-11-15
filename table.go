@@ -41,7 +41,12 @@ func (m *model) tableKey(k tea.KeyMsg) tea.Cmd {
 	case t.grid.Viewing() && (ks == "esc" || ks == "s" || ks == "/"):
 		return m.gridKey(k)
 	case ks == "s":
-		return m.tableAction(t.tv.HeaderClick(t.grid.CurrentCol()))
+		col := t.grid.CurrentCol()
+		if col == "" { // 아직 결과가 없으면 정렬할 열을 모른다. 빈 이름으로 ORDER BY 를 만들지 않는다
+			m.status = "정렬할 열이 없음"
+			return nil
+		}
+		return m.tableAction(t.tv.HeaderClick(col))
 	}
 	tv, a := t.tv.Update(k)
 	if !a.Handled {

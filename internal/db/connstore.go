@@ -20,6 +20,8 @@ import (
 
 // ─── db 전용 접속 (R59) ───
 // DataGrip .idea 는 고치지 않고 .dbtui/connections.json 에 접속을, .env 에 비밀번호를 둔다.
+// 파일 잠금은 하지 않는다. 화면과 CLI 가 같은 프로젝트를 동시에 고치면 읽고-고치고-쓰는 사이에 나중 쓰기가 앞 쓰기를 덮을 수 있다.
+// 한 사람이 쓰는 개발 도구라 받아들인 한계이고, 필요해지면 .dbtui/.lock 에 flock 을 잡아 읽기부터 쓰기까지 감싼다.
 
 const (
 	DefaultPGPort    = 5432
@@ -27,6 +29,17 @@ const (
 )
 
 var connNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// ValidConnName 은 db 전용 접속 이름 규칙(영숫자·-·_, R59.2)에 맞는지다.
+func ValidConnName(name string) bool { return connNameRe.MatchString(name) }
+
+// DefaultPort 는 종류의 기본 포트다.
+func DefaultPort(k Kind) int {
+	if k == KindRedis {
+		return DefaultRedisPort
+	}
+	return DefaultPGPort
+}
 
 // connEntry 는 connections.json 의 한 줄이다. 비밀번호는 넣지 않는다(.env 에 둔다).
 type connEntry struct {
@@ -40,20 +53,19 @@ type connEntry struct {
 	User  string `json:"user"`
 }
 
-// ConnsPath 는 db 전용 접속 파일 경로다.
-func ConnsPath(dir string) string { return filepath.Join(dir, ".dbtui", "connections.json") }
+func connsPath(dir string) string { return filepath.Join(dir, ".dbtui", "connections.json") }
 
 func readConnEntries(dir string) ([]connEntry, error) {
-	b, err := os.ReadFile(ConnsPath(dir))
+	b, err := os.ReadFile(connsPath(dir))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", ConnsPath(dir), err)
+		return nil, fmt.Errorf("read %s: %w", connsPath(dir), err)
 	}
 	var es []connEntry
 	if err := json.Unmarshal(b, &es); err != nil {
-		return nil, fmt.Errorf("read %s: %w", ConnsPath(dir), err)
+		return nil, fmt.Errorf("read %s: %w", connsPath(dir), err)
 	}
 	return es, nil
 }
@@ -66,14 +78,38 @@ func writeConnEntries(dir string, es []connEntry) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(ConnsPath(dir)), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(connsPath(dir)), 0o755); err != nil {
 		return err
 	}
-	perm := os.FileMode(0o644)
-	if st, err := os.Stat(ConnsPath(dir)); err == nil {
-		perm = st.Mode().Perm()
+	path, perm, err := writeTarget(connsPath(dir), 0o644)
+	if err != nil {
+		return err
 	}
-	return atomicfile.Write(ConnsPath(dir), ".connections-*.json", append(b, '\n'), perm)
+	return atomicfile.Write(path, ".connections-*.json", append(b, '\n'), perm)
+}
+
+// writeTarget 은 path 를 바꿔 끼워 쓸 실제 경로와 권한이다. 심볼릭 링크면 링크를 일반 파일로 바꾸지 않게 가리키는 파일에 쓴다
+// (.env 를 다른 곳에 두고 링크로 쓰는 경우). 실제 경로가 폴더거나 가리키는 파일이 없는 링크면 거절한다.
+// 파일이 없으면 path 에 newPerm 으로 만들고, 있으면 권한을 그대로 둔다.
+func writeTarget(path string, newPerm os.FileMode) (string, os.FileMode, error) {
+	real, err := filepath.EvalSymlinks(path)
+	if os.IsNotExist(err) {
+		if st, lerr := os.Lstat(path); lerr == nil && st.Mode()&os.ModeSymlink != 0 {
+			return "", 0, fmt.Errorf("%s is a symlink to a missing file", path)
+		}
+		return path, newPerm, nil
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	st, err := os.Stat(real)
+	if err != nil {
+		return "", 0, err
+	}
+	if st.IsDir() {
+		return "", 0, fmt.Errorf("%s is a directory", real)
+	}
+	return real, st.Mode().Perm(), nil
 }
 
 // loadDBConns 는 .idea 접속 뒤에 db 전용 접속을 붙인다. 이름·uuid 가 .idea 접속과 겹치면 빼고 경고한다(R59.1).
@@ -84,8 +120,18 @@ func (p *Project) loadDBConns(env map[string]string) error {
 	}
 	for _, e := range es {
 		c := e.conn()
+		// uuid 를 읽을 때마다 만들면 다시 읽기(R59)·매핑·세션이 같은 접속을 찾지 못해, 손으로 고쳐 uuid 를 뺀 줄은 건너뛴다
+		if c.UUID == "" {
+			p.Warnings = append(p.Warnings, fmt.Sprintf("%s: missing uuid (connections.json)", c.Name))
+			continue
+		}
 		if slices.ContainsFunc(p.Conns, func(o Conn) bool { return o.Name == c.Name || o.UUID == c.UUID }) {
 			p.Warnings = append(p.Warnings, fmt.Sprintf("%s: name or uuid already used (connections.json)", c.Name))
+			continue
+		}
+		// a-b 와 a_b 는 .env 키가 같아 비밀번호를 나눠 쓰게 되므로 뒤의 것을 뺀다(AddConn 의 checkName 과 같은 규칙)
+		if slices.ContainsFunc(p.Conns, func(o Conn) bool { return PasswordKey(o.Kind, o.Name) == PasswordKey(c.Kind, c.Name) }) {
+			p.Warnings = append(p.Warnings, fmt.Sprintf("%s: same .env password key as another connection (connections.json)", c.Name))
 			continue
 		}
 		if err := ValidateConn(c); err != nil {
@@ -109,7 +155,7 @@ func entryOf(c Conn) connEntry {
 // ValidateConn 은 저장할 접속 값을 검사한다. 이름은 영숫자·-·_ 만 받는다(R59.2). 포트 0 은 종류의 기본 포트다.
 func ValidateConn(c Conn) error {
 	switch {
-	case !connNameRe.MatchString(c.Name):
+	case !ValidConnName(c.Name):
 		return errors.New("name must be letters, digits, - or _")
 	case c.Kind != KindPG && c.Kind != KindRedis:
 		return fmt.Errorf("kind must be postgresql or redis: %q", c.Kind)
@@ -194,7 +240,7 @@ func UpdateConn(dir, oldName string, c Conn) (Conn, error) {
 	}
 	i := slices.IndexFunc(es, func(e connEntry) bool { return e.Name == oldName })
 	if i < 0 {
-		return c, dbOnlyErr(p, oldName)
+		return c, dbOnlyErr(oldName)
 	}
 	old := es[i].conn()
 	c.UUID, c.Source = old.UUID, SourceDB
@@ -203,6 +249,12 @@ func UpdateConn(dir, oldName string, c Conn) (Conn, error) {
 		all = append(all, e.conn())
 	}
 	if err := checkName(all, c, old.UUID); err != nil {
+		return c, err
+	}
+	// connections.json 을 먼저 쓴다. .env 쓰기가 실패해도 옛 키 줄은 지우지 않아(setEnv 는 바꿔 끼우기라 통째로 실패한다)
+	// 비밀번호를 잃지 않고, 무엇을 손으로 고칠지 ErrEnvNotUpdated 로 알린다
+	es[i] = entryOf(c)
+	if err := writeConnEntries(dir, es); err != nil {
 		return c, err
 	}
 	oldKey, newKey := PasswordKey(old.Kind, old.Name), PasswordKey(c.Kind, c.Name)
@@ -222,11 +274,14 @@ func UpdateConn(dir, oldName string, c Conn) (Conn, error) {
 		}
 	}
 	if err != nil {
-		return c, err
+		return c, fmt.Errorf("%w: move %s to %s by hand: %v", ErrEnvNotUpdated, oldKey, newKey, err)
 	}
-	es[i] = entryOf(c)
-	return c, writeConnEntries(dir, es)
+	return c, nil
 }
+
+// ErrEnvNotUpdated 는 UpdateConn 이 connections.json 은 썼지만 .env 비밀번호 줄을 바꾸지 못했을 때다.
+// 접속은 저장된 것이라 화면·CLI 는 저장으로 다루고 오류를 그대로 보인다.
+var ErrEnvNotUpdated = errors.New("connection saved but .env was not updated")
 
 // RemoveConn 은 db 전용 접속을 connections.json 에서 빼고 .env 비밀번호 줄을 지운다.
 func RemoveConn(dir, name string) error {
@@ -236,11 +291,7 @@ func RemoveConn(dir, name string) error {
 	}
 	i := slices.IndexFunc(es, func(e connEntry) bool { return e.Name == name })
 	if i < 0 {
-		p, err := LoadProject(dir)
-		if err != nil {
-			return err
-		}
-		return dbOnlyErr(p, name)
+		return dbOnlyErr(name)
 	}
 	key := PasswordKey(es[i].Kind, es[i].Name)
 	if err := writeConnEntries(dir, slices.Delete(es, i, i+1)); err != nil {
@@ -249,15 +300,7 @@ func RemoveConn(dir, name string) error {
 	return setEnv(dir, []string{key}, "")
 }
 
-// ErrDataGripConn 은 .idea 접속을 고치거나 지우려 할 때의 오류다. 화면·CLI 는 R59.3 안내로 바꿔 보인다.
-var ErrDataGripConn = errors.New("DataGrip connections are edited in DataGrip")
-
-func dbOnlyErr(p *Project, name string) error {
-	if slices.ContainsFunc(p.Conns, func(c Conn) bool { return c.Name == name && c.Source != SourceDB }) {
-		return ErrDataGripConn
-	}
-	return fmt.Errorf("no such db connection: %s", name)
-}
+func dbOnlyErr(name string) error { return fmt.Errorf("no such db connection: %s", name) }
 
 // newUUID 는 무작위(v4) uuid 다.
 func newUUID() string {
@@ -301,69 +344,71 @@ func envValue(dir, key string) (string, bool, error) {
 
 // setEnv 는 .env 에서 keys 의 줄을 모두 빼고, line 이 있으면 그 첫 줄 자리(없으면 끝)에 둔다. 이름을 바꿔도 비밀번호 줄이 제자리에 남는다.
 // 다른 줄·주석·순서는 그대로 둔다. 파일이 없으면 0600 으로 만들고, 있으면 권한을 그대로 둔다(R59.2).
+// 심볼릭 링크면 가리키는 파일을 고친다(writeTarget). 파일이 CRLF 줄바꿈이면 새 줄도 CRLF 로 쓴다.
 func setEnv(dir string, keys []string, line string) error {
-	path := filepath.Join(dir, ".env")
-	perm := os.FileMode(0o600)
-	b, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		st, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-		perm = st.Mode().Perm()
-	case !os.IsNotExist(err):
+	path, perm, err := writeTarget(filepath.Join(dir, ".env"), 0o600)
+	if err != nil {
 		return err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	eol := "\n"
+	if bytes.Contains(b, []byte("\r\n")) {
+		eol = "\r\n"
 	}
 	var buf bytes.Buffer
 	if len(b) > 0 {
+		// 남기는 줄은 끝의 \r 까지 그대로 쓴다
 		for _, ln := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
 			switch {
 			case !slices.Contains(keys, envKeyOf(ln)):
 				buf.WriteString(ln + "\n")
 			case line != "":
-				buf.WriteString(line + "\n")
+				buf.WriteString(line + eol)
 				line = ""
 			}
 		}
 	}
 	if line != "" {
-		buf.WriteString(line + "\n")
+		buf.WriteString(line + eol)
 	}
 	return atomicfile.Write(path, ".env-*", buf.Bytes(), perm)
 }
 
 // ─── URL·시험 ───
 
-// ErrConnURL 은 접속 URL 을 읽지 못했을 때다. URL 에 비밀번호가 들 수 있어 원문을 싣지 않는다.
-var ErrConnURL = errors.New("invalid connection url (postgres://user:pw@host:5432/db, redis://:pw@host:6379/0)")
+// errConnURL 은 접속 URL 을 읽지 못했을 때다. URL 에 비밀번호가 들 수 있어 원문을 싣지 않는다.
+var errConnURL = errors.New("invalid connection url (postgres://user:pw@host:5432/db, redis://:pw@host:6379/0)")
 
 // ParseConnURL 은 postgres(ql)://·redis://·rediss:// URL 을 접속 값과 비밀번호로 나눈다. 포트가 없으면 종류의 기본 포트다.
 // rediss 의 TLS 는 따로 두지 않는다. Redis 는 평문 응답이 없으면 TLS 로 다시 붙는다(R4.3).
 func ParseConnURL(raw string) (Conn, string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || u.Hostname() == "" || u.Opaque != "" {
-		return Conn{}, "", ErrConnURL
+		return Conn{}, "", errConnURL
 	}
 	c := Conn{Host: u.Hostname(), User: u.User.Username(), DB: strings.TrimPrefix(u.Path, "/")}
-	switch u.Scheme {
+	switch u.Scheme { // url.Parse 가 스킴을 소문자로 바꾼다
 	case "postgres", "postgresql":
-		c.Kind, c.Port = KindPG, DefaultPGPort
+		c.Kind = KindPG
 	case "redis", "rediss":
-		c.Kind, c.Port = KindRedis, DefaultRedisPort
+		c.Kind = KindRedis
 	default:
-		return Conn{}, "", ErrConnURL
+		return Conn{}, "", errConnURL
 	}
+	c.Port = DefaultPort(c.Kind)
 	if ps := u.Port(); ps != "" {
 		n, err := strconv.Atoi(ps)
 		if err != nil || n < 1 || n > 65535 {
-			return Conn{}, "", ErrConnURL
+			return Conn{}, "", errConnURL
 		}
 		c.Port = n
 	}
 	if c.Kind == KindRedis && c.DB != "" {
 		if _, err := strconv.Atoi(c.DB); err != nil {
-			return Conn{}, "", ErrConnURL
+			return Conn{}, "", errConnURL
 		}
 	}
 	pw, _ := u.User.Password()

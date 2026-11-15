@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 )
 
 const connCLIPw = "Cli-Sekrit-42"
@@ -43,7 +41,7 @@ func TestConnCLI_add_는_시험이_실패하면_force_없이_저장하지_않는
 		t.Fatalf("code=%d err=%q", code, errw)
 	}
 	noSecret(t, connCLIPw, out, errw)
-	if _, err := os.Stat(db.ConnsPath(dir)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, ".dbtui", "connections.json")); !os.IsNotExist(err) {
 		t.Fatal("저장하지 않는다")
 	}
 
@@ -208,5 +206,23 @@ func TestConnCLI_로컬_컨테이너에_추가하고_시험한다(t *testing.T) 
 	}
 	if env := readEnvFile(t, dir); !strings.Contains(env, "PG_LOCAL_PG_PASSWORD="+url.QueryEscape(pw)) {
 		t.Fatalf("그대로: %q", env)
+	}
+}
+
+func TestConnCLI_이름_자리의_URL_은_찾거나_되풀이하기_전에_거절한다(t *testing.T) {
+	dir := connCLIProject(t)
+	u := "postgres://u:" + connCLIPw + "@127.0.0.1:1/d"
+	for _, sub := range []string{"test", "edit", "rm", "add"} {
+		code, out, errw := runCLITest(t, "", "conn", sub, u, "-p", dir)
+		if code != exitUsage || !strings.Contains(errw, "접속 이름은 영숫자·-·_ 만 받음") {
+			t.Errorf("%s: code=%d err=%q", sub, code, errw)
+		}
+		noSecret(t, connCLIPw, out, errw)
+		if strings.Contains(out+errw, "127.0.0.1") {
+			t.Errorf("%s: URL 을 되풀이한다: %q", sub, errw)
+		}
+	}
+	if code, out, errw := runCLITest(t, "", "conn", u); code != exitUsage || strings.Contains(out+errw, connCLIPw) {
+		t.Fatalf("하위 명령 자리: %d %q", code, errw)
 	}
 }

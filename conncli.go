@@ -91,6 +91,10 @@ func runConnCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bo
 		fs.StringVar(&o.url, "url", "", "저장하지 않고 시험할 URL")
 		fs.BoolVar(&o.prod, "prod", false, "prod 접속 허용")
 	default:
+		// 이름 자리에 URL(비밀번호)을 잘못 넣었을 수 있어 이름 꼴이 아니면 되풀이하지 않는다
+		if !db.ValidConnName(sub) {
+			sub = "(가림)"
+		}
 		fmt.Fprintf(stderr, "db conn: 알 수 없는 하위 명령: %s\n\n%s", sub, connUsage)
 		return exitUsage
 	}
@@ -134,6 +138,10 @@ func connCommand(ctx context.Context, sub string, o connCLIOpts, pos []string, s
 		return usageErr("접속 이름 하나가 필요함 (db help conn)")
 	}
 	name := pos[0]
+	// 이름 자리에 URL 을 넣으면 비밀번호가 오류에 찍힐 수 있어 찾거나 되풀이하기 전에 거른다
+	if !db.ValidConnName(name) {
+		return usageErr("접속 이름은 영숫자·-·_ 만 받음")
+	}
 	proj, err := loadProject(o.dir)
 	if err != nil {
 		return err
@@ -149,8 +157,8 @@ func connCommand(ctx context.Context, sub string, o connCLIOpts, pos []string, s
 		return usageErr("접속 없음: %s (db conns)", name)
 	case sub == "test":
 		return connTest(ctx, o, proj.Conns[i], stdout)
-	case proj.Conns[i].Source != db.SourceDB:
-		return usageErr("%s", dataGripRefusal)
+	case editRefusal(proj.Conns[i]) != "":
+		return usageErr("%s", editRefusal(proj.Conns[i]))
 	case sub == "edit":
 		return connSave(ctx, o, proj, i, name, stdin, stdinTTY, stdout, stderr)
 	}
@@ -253,11 +261,12 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 	} else {
 		c, err = db.AddConn(proj.Dir, c)
 	}
-	if err != nil {
+	// ErrEnvNotUpdated 면 접속은 저장됐다. 저장을 알리고 손볼 .env 키는 오류로 내 종료 코드 1이다
+	if err != nil && !errors.Is(err, db.ErrEnvNotUpdated) {
 		return err
 	}
 	fmt.Fprintf(stdout, "%s: %s · %s%s\n", verb, connLabel(c), connSummary(c), note)
-	return nil
+	return err
 }
 
 func connTest(ctx context.Context, o connCLIOpts, c db.Conn, stdout io.Writer) error {

@@ -137,7 +137,9 @@ type cliResult struct {
 }
 
 // runCLI 는 `db <명령> …` 을 실행하고 종료 코드를 돌려준다. stdin 이 nil 이면(터미널) 표준 입력에서 SQL 을 읽지 않는다.
-func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, tty bool) (code int) {
+// stdinTTY 면 표준 입력이 터미널이다. conn 은 rm 확인·--password-stdin 에 그대로 읽고(R59.4),
+// 나머지 명령은 SQL 을 기다리며 멈추지 않게 읽지 않는다. tty 는 표준 출력이 터미널인지다(기본 출력 형식).
+func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, stdout, stderr io.Writer, tty bool) (code int) {
 	// 패닉 값과 스택에는 SQL·서버 응답이 섞여 비밀번호가 나올 수 있어 찍지 않는다
 	defer func() {
 		if recover() != nil {
@@ -150,8 +152,10 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	case "help":
 		return cliHelp(args[1:], stdout, stderr)
 	case "conn":
-		// main 은 표준 입력이 터미널인지 알려 주려고 runConnCLI 를 바로 부른다. 여기서는 터미널이 아닌 것으로 본다
-		return runConnCLI(ctx, args[1:], stdin, false, stdout, stderr)
+		return runConnCLI(ctx, args[1:], stdin, stdinTTY, stdout, stderr)
+	}
+	if stdinTTY {
+		stdin = nil
 	}
 	o, err := parseCLI(cmd, args[1:], tty, stderr)
 	switch {

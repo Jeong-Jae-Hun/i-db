@@ -738,6 +738,7 @@ type model struct {
 
 	overlay      overlay
 	pickerItems  []string
+	pickerLower  []string                // pickerItems 의 소문자 사본. 거를 때마다(키·그리기) 다시 만들지 않게 열 때 한 번 만든다
 	pickerConn   map[string]string       // 항목 → 접속 uuid. 고르기 창에 → 접속 이름으로 보인다
 	pickerTables map[string]paletteTable // 명령 팔레트의 테이블 항목(R40.2). 그릴 때 [환경] 에 색을 입힌다
 	pickerCursor int
@@ -752,10 +753,12 @@ type model struct {
 	txAsk        *txPrompt
 	finder       finder.Model
 	jump         *finder.Item // 찾기에서 고른 객체. 부모를 읽는 중이면 읽은 뒤 다시 찾는다
+	jumpConn     int          // jump 의 접속 인덱스
 	importNode   *node        // CSV 가져오기 대상 테이블
 	revealTab    int          // 찾기를 이어 가는 대상이 정의로 이동(R26)이면 요청한 탭 id(0 은 아님). 테이블 보기 대신 그 탭에 구조를 연다
 
 	dbOver   map[int]string // 접속별로 B 로 바꾼 데이터베이스(R27.1). .idea 는 고치지 않는다
+	dbOrig   map[int]string // 처음 B 로 바꾸기 전 접속 파일의 DB. 접속을 다시 읽을 때 파일의 DB 를 고쳤는지 가린다(R59)
 	schemaOf map[int]string // 접속별로 F6 으로 고른 스키마(R27.2)
 	export   *exportJob     // 진행 중인 전체 내보내기
 	// 데이터베이스를 바꾸는 중(R27.1). 끝나기 전의 두 번째 B 는 막는다
@@ -801,7 +804,7 @@ func newModel(p *db.Project) *model {
 	life, stop := context.WithCancel(context.Background())
 	m := &model{proj: p, clients: db.NewClients(), life: life, stop: stop, input: textinput.New(),
 		patterns: map[int]string{}, inTx: map[int]bool{}, catalogs: map[int]*complete.Catalog{}, catGen: map[int]int{},
-		manual: map[int]bool{}, txSince: map[int]time.Time{}, dbOver: map[int]string{}, schemaOf: map[int]string{},
+		manual: map[int]bool{}, txSince: map[int]time.Time{}, dbOver: map[int]string{}, dbOrig: map[int]string{}, schemaOf: map[int]string{},
 		treeW: defaultTreeWidth, mac: keys.MacStyle(false),
 		prodLock: true, unlocked: map[int]time.Time{}, enums: map[int]map[string][]string{}}
 	m.roots = connRoots(p.Conns, nil, nil)
@@ -885,11 +888,18 @@ func (t *queryTab) bound() bool {
 	return t.tv != nil || t.redis != nil || t.grid.Pending() > 0
 }
 
+// staleViewDB 는 결과를 만든 접속을 고치거나 지웠다는 viewDB 표시다(R59). 어느 데이터베이스 이름과도 같지 않다.
+const staleViewDB = "\x00"
+
 // staleView 는 보이는 결과·테이블 보기·값 편집기를 만든 접속이 탭 접속과 다르거나 그 뒤 데이터베이스를 바꿨으면(B) 알리고 참이다.
 // 다른 접속·DB 의 pid·편집·키를 지금 접속(prod 일 수 있다)에 보내지 않게 쓰기·다시 읽기 앞에서 부른다.
 func (m *model) staleView(t *queryTab) bool {
 	if t.viewConn < 0 {
 		return false
+	}
+	if t.viewDB == staleViewDB {
+		m.status = "보이는 결과는 접속을 고치기 전의 것이라 막음 (다시 실행하거나 새로 여세요)"
+		return true
 	}
 	if t.viewConn == t.conn {
 		if t.viewDB == m.conn(t.conn).DB {
@@ -1203,9 +1213,8 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 
 // openTable 은 탭 t 에 테이블 보기(R16)를 연다. where 가 있으면 그 WHERE 로 연다(R36 외래 키 따라가기).
 // 추정 행 수를 먼저 읽고, 그 결과가 오면 첫 페이지를 읽는다. 탭의 접속·테이블 보기는 확인을 다 지나 시작할 때 바꾼다.
-// 여는 길(트리·찾기·팔레트·외래 키·정의로 이동)이 모두 여기를 지나 최근 테이블(R40.3)을 여기서 남긴다.
+// 여는 길(트리·찾기·팔레트·외래 키·정의로 이동)이 모두 여기를 지난다. 최근 테이블(R40.3)은 확인을 지나 보기가 시작될 때(start) 남긴다.
 func (m *model) openTable(t *queryTab, conn int, ref db.TableRef, where string) tea.Cmd {
-	m.sess.TouchTable(m.conn(conn).UUID, ref.Schema, ref.Table, time.Now())
 	tv := tableview.New(ref, tableview.Options{})
 	if where != "" {
 		tv, _ = tv.ToggleWhere(where)
@@ -1475,6 +1484,8 @@ func (m *model) start(p pendingRun) tea.Cmd {
 	}
 	if p.tv != nil {
 		t.tv, t.title, t.viewConn, t.viewDB = p.tv, p.title, p.conn, m.conn(p.conn).DB
+		ref := p.tv.Table()
+		m.sess.TouchTable(m.conn(p.conn).UUID, ref.Schema, ref.Table, time.Now())
 	}
 	prevWrite := t.running != nil && !t.runningReadOnly
 	if t.running != nil {
@@ -1702,6 +1713,10 @@ func copyCmd(s string) tea.Cmd {
 // conn 은 항목 옆에 보일 접속 uuid, del 은 즐겨찾기 지우기다.
 func (m *model) openPicker(prompt string, items []string, conn map[string]string, do, del func(string) tea.Cmd) {
 	m.pickerItems, m.pickerConn, m.pickDo, m.pickDel, m.pickerTables = items, conn, do, del, nil
+	m.pickerLower = make([]string, len(items))
+	for i, it := range items {
+		m.pickerLower[i] = strings.ToLower(it)
+	}
 	m.pickerCursor = 0
 	m.input.SetValue("")
 	m.input.Prompt = prompt
@@ -1864,7 +1879,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rebuild()
 		if m.jump != nil {
-			return m, m.reveal(*m.jump)
+			return m, m.reveal(m.jumpConn, *m.jump)
 		}
 		return m, nil
 	case catalogMsg:
@@ -1928,7 +1943,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}})
 		}
 		m.revealTab = t.id
-		return m, m.reveal(finder.Item{Conn: c.Name, Kind: finder.KindTable, Schema: obj.Schema, Name: obj.Name})
+		return m, m.reveal(msg.conn, finder.Item{Conn: c.Name, Kind: finder.KindTable, Schema: obj.Schema, Name: obj.Name})
 	case pickListMsg:
 		if msg.err != nil {
 			m.status = "목록 읽기 실패: " + m.errText(msg.conn, msg.err)
@@ -1961,6 +1976,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		// 새 세션은 트랜잭션 밖이고 고른 search_path 도 옛 DB 의 것이다
+		if m.dbOver[msg.conn] == "" {
+			m.dbOrig[msg.conn] = msg.prev
+		}
 		m.dbOver[msg.conn] = msg.db
 		m.inTx[msg.conn] = false
 		delete(m.schemaOf, msg.conn)
@@ -2882,7 +2900,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.revealTab = 0
-		return m, m.reveal(*a.Chosen)
+		return m, m.reveal(connByName(m.proj, a.Chosen.Conn), *a.Chosen)
 	case oFilter:
 		switch ks {
 		case "esc":
@@ -3224,14 +3242,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var labels []string
 		tables := map[string]paletteTable{}
+		// 같은 테이블은 접속 인덱스로 하나로 합친다. 이름이 같은 접속(DataGrip 은 막지 않는다)의 줄은 글이 겹치면 #자리를 붙여 가른다
+		type tableKey struct {
+			conn          int
+			schema, table string
+		}
+		seen := map[tableKey]bool{}
 		for _, r := range m.sess.RecentTables {
 			ci, ok := m.proj.ConnIndex(r.Conn)
-			if !ok { // 지금 .idea 에 없는 접속의 기록은 빼고 보인다
+			if !ok || seen[tableKey{ci, r.Schema, r.Table}] { // 지금 .idea 에 없는 접속의 기록은 빼고 보인다
 				continue
 			}
+			seen[tableKey{ci, r.Schema, r.Table}] = true
 			label := m.tableLabel(ci, r.Schema, r.Table)
 			if _, dup := tables[label]; dup {
-				continue
+				label += fmt.Sprintf(" #%d", ci+1)
 			}
 			it := finder.Item{Conn: m.conn(ci).Name, Kind: finder.KindTable, Schema: r.Schema, Name: r.Table}
 			tables[label] = paletteTable{it: it, conn: ci, quiet: len(tables) >= paletteRecent}
@@ -3245,9 +3270,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				for _, s := range cat.Schemas {
 					for _, tb := range s.Tables {
+						if seen[tableKey{i, s.Name, tb.Name}] {
+							continue
+						}
+						seen[tableKey{i, s.Name, tb.Name}] = true
 						label := m.tableLabel(i, s.Name, tb.Name)
 						if _, dup := tables[label]; dup {
-							continue
+							label += fmt.Sprintf(" #%d", i+1)
 						}
 						tables[label] = paletteTable{it: finder.Item{Conn: c.Name, Kind: finder.KindTable, Schema: s.Name, Name: tb.Name}, conn: i, quiet: true}
 						labels = append(labels, label)
@@ -3270,7 +3299,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.openPicker("명령 ", labels, nil, func(label string) tea.Cmd {
 			// 테이블은 Ctrl+N 처럼 트리에서 골라 연다. 탭 규칙(R3.1)·접속 바꾸기·트랜잭션 확인은 트리 Enter 와 같다
 			if tb, ok := tables[label]; ok {
-				return m.reveal(tb.it)
+				return m.reveal(tb.conn, tb.it)
 			}
 			a := acts[label]
 			if a.at != fKeep {
@@ -3371,7 +3400,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			nt.title = f.Name
 			nt.editor.SetValue(f.SQL)
 			var cmd tea.Cmd
-			if i, ok := m.proj.ConnIndex(f.Conn); ok && f.Conn != "" {
+			if i, ok := m.proj.ConnIndex(f.Conn); ok {
 				cmd = m.setConn(nt, i)
 			}
 			m.setFocus(fEditor)
@@ -4007,11 +4036,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) pickerMatches() []string {
 	f := strings.ToLower(m.input.Value())
 	var out []string
-	for _, p := range m.pickerItems {
+	for i, p := range m.pickerItems {
 		if f == "" && m.pickerTables[p].quiet {
 			continue
 		}
-		if strings.Contains(strings.ToLower(p), f) {
+		if strings.Contains(m.pickerLower[i], f) {
 			out = append(out, p)
 		}
 	}
@@ -4061,7 +4090,7 @@ func (m *model) View() string {
 			if i == m.pickerCursor {
 				name = lipgloss.NewStyle().Reverse(true).Render(name)
 			}
-			if ci, ok := m.proj.ConnIndex(m.pickerConn[list[i]]); ok && m.pickerConn[list[i]] != "" {
+			if ci, ok := m.proj.ConnIndex(m.pickerConn[list[i]]); ok {
 				name += "  " + envStyle(m.conn(ci)).Render("→ "+textutil.Printable(m.conn(ci).Name, false))
 			}
 			b.WriteString(truncate(name, m.w) + "\n")

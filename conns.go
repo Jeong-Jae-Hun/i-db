@@ -41,7 +41,7 @@ const (
 var (
 	connFieldLabels = [cfCount]string{"이름", "그룹", "종류", "호스트", "포트", "DB", "사용자", "비밀번호"}
 	// 이름 칸 끝에 붙인 접속 URL. 앞의 글은 이름으로 남긴다
-	connURLRe = regexp.MustCompile(`(?:postgres|postgresql|redis|rediss)://\S*$`)
+	connURLRe = regexp.MustCompile(`(?i)(?:postgres|postgresql|redis|rediss)://\S*$`)
 )
 
 // connForm 은 접속 창이다. inputs[cfKind] 는 쓰지 않고 kind 를 space·←→ 로 바꾼다.
@@ -62,6 +62,14 @@ type connTestMsg struct {
 	save    bool
 	version string
 	err     error
+}
+
+// editRefusal 은 접속 c 를 고치거나 지울 수 없는 이유다(R59.3). 비면 db 전용 접속이라 된다. 화면과 CLI 가 같이 쓴다.
+func editRefusal(c db.Conn) string {
+	if c.Source != db.SourceDB {
+		return dataGripRefusal
+	}
+	return ""
 }
 
 // connLabel 은 트리·팔레트·CLI 에 보일 접속 이름이다. db 전용 접속은 (db) 를 붙인다(R59.1).
@@ -121,8 +129,8 @@ func (m *model) openConnForm(n *node, edit bool) {
 			return
 		}
 		c := m.conn(n.conn)
-		if c.Source != db.SourceDB {
-			m.status = dataGripRefusal
+		if why := editRefusal(c); why != "" {
+			m.status = why
 			return
 		}
 		f.edit, f.kind = n.conn, c.Kind
@@ -133,8 +141,8 @@ func (m *model) openConnForm(n *node, edit bool) {
 			f.inputs[cfPort].SetValue(strconv.Itoa(c.Port))
 		}
 		// B 로 바꾼 데이터베이스는 메모리에만 있다. 파일에는 원래 DB 를 남긴다
-		if m.dbOver[n.conn] != "" {
-			f.inputs[cfDB].SetValue(m.fileConnDB(n.conn))
+		if orig, ok := m.dbOrig[n.conn]; ok {
+			f.inputs[cfDB].SetValue(orig)
 		}
 		f.inputs[cfPassword].Placeholder = "비우면 그대로"
 	} else if n != nil {
@@ -155,16 +163,6 @@ func (m *model) openConnForm(n *node, edit bool) {
 	f.setFocus(cfName)
 	m.connForm = f
 	m.overlay = oConn
-}
-
-// fileConnDB 는 접속 파일에 적힌 DB 다. B(R27.1)로 바꾼 값이 아닌 원래 값을 다시 읽는다. 못 읽으면 지금 값이다.
-func (m *model) fileConnDB(i int) string {
-	if p, err := db.LoadProject(m.proj.Dir); err == nil {
-		if j, ok := p.ConnIndex(m.conn(i).UUID); ok {
-			return p.Conns[j].DB
-		}
-	}
-	return m.conn(i).DB
 }
 
 func (f *connForm) setFocus(i int) {
@@ -205,10 +203,7 @@ func (f *connForm) conn() (db.Conn, error) {
 		v[i] = strings.TrimSpace(f.inputs[i].Value())
 	}
 	c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, Host: v[cfHost], DB: v[cfDB], User: v[cfUser],
-		Password: f.inputs[cfPassword].Value(), Port: db.DefaultPGPort}
-	if f.kind == db.KindRedis {
-		c.Port = db.DefaultRedisPort
-	}
+		Password: f.inputs[cfPassword].Value(), Port: db.DefaultPort(f.kind)}
 	if p := v[cfPort]; p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 {
@@ -261,7 +256,11 @@ func (m *model) connFormKey(k tea.KeyMsg) tea.Cmd {
 	if f.focus == cfKind {
 		if ks == " " || ks == "left" || ks == "right" || ks == "h" || ks == "l" {
 			port := f.inputs[cfPort].Value()
-			f.kind = map[db.Kind]db.Kind{db.KindPG: db.KindRedis, db.KindRedis: db.KindPG}[f.kind]
+			if f.kind == db.KindPG {
+				f.kind = db.KindRedis
+			} else {
+				f.kind = db.KindPG
+			}
 			// 기본 포트를 그대로 두었으면 새 종류의 기본 포트로 바꾼다
 			if port == strconv.Itoa(db.DefaultPGPort) || port == strconv.Itoa(db.DefaultRedisPort) {
 				f.inputs[cfPort].SetValue("")
@@ -352,7 +351,9 @@ func (m *model) saveConnForm() tea.Cmd {
 	} else {
 		c, err = db.AddConn(m.proj.Dir, c)
 	}
-	if err != nil {
+	// ErrEnvNotUpdated 는 접속은 저장됐고 .env 만 못 고친 것이라 저장으로 다루고 손볼 키를 보인다
+	partial := errors.Is(err, db.ErrEnvNotUpdated)
+	if err != nil && !partial {
 		f.status, f.failed = "저장하지 못함: "+err.Error(), true
 		return nil
 	}
@@ -364,6 +365,9 @@ func (m *model) saveConnForm() tea.Cmd {
 		}
 	}
 	m.status = strings.TrimPrefix(m.status+" · 접속 저장함: "+connLabel(c), " · ")
+	if partial {
+		m.status += " · " + err.Error()
+	}
 	return cmd
 }
 
@@ -372,8 +376,8 @@ func (m *model) saveConnForm() tea.Cmd {
 // removeConnAsk 는 db 전용 접속 i 를 지울지 묻는다(R59.3). DataGrip 접속은 안내만 한다.
 func (m *model) removeConnAsk(i int) tea.Cmd {
 	c := m.conn(i)
-	if c.Source != db.SourceDB {
-		m.status = dataGripRefusal
+	if why := editRefusal(c); why != "" {
+		m.status = why
 		return nil
 	}
 	if why := m.connBusy(i); why != "" {
@@ -384,7 +388,7 @@ func (m *model) removeConnAsk(i int) tea.Cmd {
 	m.confirm(fmt.Sprintf("%s 접속을 지울까요(.env 비밀번호도)", c.Name), func() tea.Cmd {
 		// 묻는 사이 목록이 바뀌었을 수 있어 uuid 로 다시 찾는다
 		j, ok := m.proj.ConnIndex(uuid)
-		if !ok || uuid == "" {
+		if !ok {
 			m.status = "접속이 이미 없음"
 			return nil
 		}
@@ -452,8 +456,9 @@ func (m *model) reloadConns() tea.Cmd {
 		}
 		seen[i] = true
 		same := c
-		if m.dbOver[i] != "" {
-			same.DB = conns[i].DB // B 로 바꾼 DB 는 메모리에만 있어 비교에서 뺀다
+		// B 로 바꾼 DB 는 메모리에만 있어 비교에서 뺀다. 단 파일의 DB 자체를 고쳤으면 바뀐 접속이다(B 는 풀린다)
+		if orig, ok := m.dbOrig[i]; ok && m.dbOver[i] != "" && c.DB == orig {
+			same.DB = conns[i].DB
 		}
 		if same != conns[i] {
 			forget = append(forget, conns[i].UUID)
@@ -496,6 +501,7 @@ func (m *model) reloadConns() tea.Cmd {
 		delete(m.enums, i)
 		delete(m.schemaOf, i)
 		delete(m.dbOver, i)
+		delete(m.dbOrig, i)
 		delete(m.inTx, i)
 		delete(m.txSince, i)
 		delete(m.unlocked, i)
@@ -503,6 +509,11 @@ func (m *model) reloadConns() tea.Cmd {
 		for _, t := range m.tabs {
 			if t.exportConn == i {
 				t.exportSQL = ""
+			}
+			// 옛 호스트·DB 에서 낸 제출 묶음과 결과를 고친 접속(같은 인덱스)에 보내지 않는다
+			t.undo = slices.DeleteFunc(t.undo, func(e *undoEntry) bool { return e.conn == i })
+			if t.viewConn == i {
+				t.viewDB = staleViewDB
 			}
 			if t.conn != i {
 				continue
@@ -560,7 +571,7 @@ func (m *model) connFormView() string {
 			}
 		case cfPort:
 			if f.inputs[i].Value() == "" {
-				f.inputs[i].Placeholder = strconv.Itoa(map[db.Kind]int{db.KindPG: db.DefaultPGPort, db.KindRedis: db.DefaultRedisPort}[f.kind])
+				f.inputs[i].Placeholder = strconv.Itoa(db.DefaultPort(f.kind))
 			}
 			v = f.inputs[i].View()
 		default:

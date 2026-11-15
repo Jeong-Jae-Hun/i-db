@@ -122,7 +122,7 @@ func TestConnForm_CtrlT_는_저장하지_않고_비동기로_시험해_상태를
 	if f.testing || f.status != "접속됨 (PostgreSQL 16.4)" || !strings.Contains(ansi.Strip(m.View()), "접속됨 (PostgreSQL 16.4)") {
 		t.Fatalf("성공 상태: %q", f.status)
 	}
-	if _, err := os.Stat(db.ConnsPath(m.proj.Dir)); err != nil {
+	if _, err := os.Stat(filepath.Join(m.proj.Dir, ".dbtui", "connections.json")); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.proj.Conns) != 4 {
@@ -328,5 +328,71 @@ func TestConnForm_실행_중인_접속은_고치거나_지우지_않는다(t *te
 	m.Update(key("X"))
 	if m.overlay != oNone || !strings.Contains(m.status, "트랜잭션") {
 		t.Fatalf("열린 트랜잭션: %q", m.status)
+	}
+}
+
+func TestReloadConns_지운_접속_자리는_매핑_없는_쿼리_파일에_붙지_않는다(t *testing.T) {
+	m := connTestModel(t)
+	i := m.selectConn(t, "mine-stg")
+	m.Update(key("X"))
+	m.Update(key("y"))
+	must(t, os.MkdirAll(filepath.Join(m.proj.Dir, "queries"), 0o755))
+	must(t, os.WriteFile(filepath.Join(m.proj.Dir, "queries", "loose.sql"), []byte("select 1"), 0o644))
+	m.refreshQueries()
+	if len(m.qfiles[i]) != 0 || len(m.qfiles[-1]) != 1 {
+		t.Fatalf("매핑 없는 파일은 접속 없음: %v", m.qfiles)
+	}
+	m.openFile("queries/loose.sql")
+	if m.cur().file != "queries/loose.sql" || m.cur().conn != -1 {
+		t.Fatalf("지운 자리에 붙으면 안 된다: conn=%d", m.cur().conn)
+	}
+}
+
+func TestReloadConns_고친_접속의_되돌리기_묶음을_비우고_보이는_결과는_막는다(t *testing.T) {
+	m := connTestModel(t)
+	i, other := connByName(m.proj, "mine-stg"), connByName(m.proj, "dg-stg")
+	tab := m.cur()
+	tab.conn, tab.viewConn, tab.viewDB = i, i, m.conn(i).DB
+	keep := &undoEntry{conn: other}
+	tab.undo = []*undoEntry{{conn: i}, keep}
+	c := m.conn(i)
+	c.Host, c.Password = "127.0.0.2", ""
+	_, err := db.UpdateConn(m.proj.Dir, c.Name, c)
+	must(t, err)
+	m.reloadConns()
+	if len(tab.undo) != 1 || tab.undo[0] != keep {
+		t.Fatalf("고친 접속의 묶음만 뺀다: %d", len(tab.undo))
+	}
+	if tab.conn != i || !m.staleView(tab) || !strings.Contains(m.status, "접속을 고치기 전") {
+		t.Fatalf("옛 결과로 쓰지 않는다: conn=%d status=%q", tab.conn, m.status)
+	}
+}
+
+func TestReloadConns_B_로_바꾼_접속도_파일의_DB_를_고치면_그_값을_쓴다(t *testing.T) {
+	m := connTestModel(t)
+	i := connByName(m.proj, "mine-stg")
+	m.proj.Conns[i].DB = "other" // B(R27.1)가 바꾼 자리
+	m.Update(dbSwitchMsg{conn: i, db: "other", prev: "app"})
+	m.reloadConns()
+	if m.conn(i).DB != "other" || m.dbOver[i] != "other" {
+		t.Fatalf("파일이 그대로면 B 를 지킨다: %q", m.conn(i).DB)
+	}
+	c := m.conn(i)
+	c.DB, c.Password = "app2", ""
+	_, err := db.UpdateConn(m.proj.Dir, c.Name, c)
+	must(t, err)
+	m.reloadConns()
+	if m.conn(i).DB != "app2" || m.dbOver[i] != "" {
+		t.Fatalf("파일의 DB 를 고치면 그 값: %q over=%q", m.conn(i).DB, m.dbOver[i])
+	}
+}
+
+func TestConnForm_대문자_URL_도_칸을_채운다(t *testing.T) {
+	m := connTestModel(t)
+	m.openConnForm(nil, false)
+	m.Update(paste("POSTGRES://u:pw@db.example.internal:6543/app"))
+	f := m.connForm
+	if f.inputs[cfHost].Value() != "db.example.internal" || f.inputs[cfPort].Value() != "6543" || f.kind != db.KindPG {
+		t.Fatalf("채운 칸: host=%q status=%q", f.inputs[cfHost].Value(), f.status)
 	}
 }
