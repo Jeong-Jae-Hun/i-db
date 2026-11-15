@@ -503,6 +503,17 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: `search`의 `건너뛴 테이블:` 줄도 오류와 같이 가리고 제어 문자를 바꾼다. 내부 패닉은 값 없이 stderr `internal error`로 1이다.
   - 단, `user360`은 조회 대상이 prod라 늘 `--prod`가 필요하다. `schema-diff`는 두 접속 중 prod가 있으면 필요하다.
 
+### R59 접속 추가·수정·삭제
+
+- R59.1 접속은 DataGrip `.idea`에 더해 db 전용 파일 `.dbtui/connections.json`에서도 읽는다. 형식: `[{"uuid":"…","name":"app-stg2","group":"app","kind":"postgresql","host":"db.stg.example.internal","port":5432,"db":"app","user":"app_ro"}]`(`kind`는 `postgresql`·`redis`). 비밀번호는 지금처럼 `.env`의 `PG_<이름>_PASSWORD`·`REDIS_<이름>_PASSWORD`(URL 인코딩)에 둔다. 이름이 `.idea` 접속과 겹치면 db 전용 접속을 빼고 경고한다. `.idea`는 고치지 않는다.
+  - 예: 트리·`db conns`·팔레트에서 db 전용 접속은 이름 뒤에 `(db)`가 붙는다. 환경 판정(R6.2)은 같다.
+- R59.2 트리의 그룹·접속 줄 `N`(또는 팔레트 `새 접속`)은 접속 창을 연다. 칸: 이름·그룹·종류·호스트·포트·DB(Redis는 번호)·사용자·비밀번호. 첫 칸에 `postgres://user:pw@host:5432/db`·`redis://:pw@host:6379/0`·`rediss://…` 같은 URL을 붙이면 나머지 칸을 채운다. `Ctrl+T`는 저장하지 않고 접속을 시험해 `접속됨 (PostgreSQL 16.4)`·오류를 보이고, `Enter`(저장)는 먼저 시험한 뒤 성공하면 저장한다. 시험이 실패해도 `저장할까요? y/N`으로 저장할 수 있다.
+  - 예: 비밀번호는 화면에 `•`로만 보이고 `.env`에 URL 인코딩해 쓴다(파일 권한 0600 유지, 없으면 0600으로 만듦). 이름은 영숫자·`-`·`_`만 받는다.
+- R59.3 db 전용 접속 줄에서 `E`는 같은 창으로 고치고, `X`는 `<이름> 접속을 지울까요(.env 비밀번호도) y/N`을 물은 뒤 지운다. DataGrip 접속에서는 `E`·`X`가 `DataGrip 접속은 DataGrip 에서 고침`을 보인다. 이름을 바꾸면 `.env` 키도 옮긴다. 열린 탭·세션이 그 접속을 쓰고 있으면 고치기 전에 연결을 닫는다(R27.1 `Forget`).
+  - 단, Redis 접속 줄의 `X`는 R42 패턴 삭제다. db 전용 Redis 접속 삭제는 팔레트 `접속 지우기`로 한다.
+- R59.4 CLI: `db conn add <이름> --url <URL> [--group g] [--kind postgresql|redis]`, `db conn edit <이름> [--url …|--host …|--port …|--db …|--user …|--password-stdin]`, `db conn rm <이름> [--yes]`, `db conn test <이름|--url URL>`. 비밀번호는 `--url` 또는 `--password-stdin`으로만 받고 출력하지 않는다. `add`·`edit`는 시험이 실패하면 `--force` 없이는 저장하지 않는다(종료 코드 1).
+  - 예: `db conn add app-stg2 --url 'postgres://app_ro:pw@db.stg.example.internal:5432/app' --group app` → `.dbtui/connections.json`에 한 줄, `.env`에 `PG_APP_STG2_PASSWORD`.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |
