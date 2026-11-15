@@ -21,6 +21,12 @@ var (
 const (
 	KindPG    Kind = "postgresql"
 	KindRedis Kind = "redis"
+	// R60~R63 읽기 전용 저장소. db 전용 접속 파일(R59)에서만 정의한다
+	KindOpenSearch Kind = "opensearch"
+	KindLoki       Kind = "loki"
+	KindPrometheus Kind = "prometheus"
+	KindGrafana    Kind = "grafana"
+	KindDynamoDB   Kind = "dynamodb"
 )
 
 type Kind string
@@ -35,6 +41,12 @@ type Conn struct {
 	DB       string
 	User     string
 	Password string
+	// URL·Auth·Region·Profile 은 R60~R63 저장소용이다. Auth 는 "basic"·"sigv4"·"token"·"" 이고,
+	// AWS 자격 증명은 저장하지 않고 Profile(없으면 표준 체인)로 받는다
+	URL     string
+	Auth    string
+	Region  string
+	Profile string
 	// Source 는 접속을 읽은 곳이다. SourceDB 면 .dbtui/connections.json(R59), 비면 DataGrip .idea 다
 	Source string
 }

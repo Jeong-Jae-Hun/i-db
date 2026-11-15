@@ -542,6 +542,31 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: `rm`은 터미널에서 묻고, 표준 입력이 터미널이 아니면 `--yes`가 없을 때 2다. prod 접속(R6.2)에 붙는 `add`·`edit`·`test`는 `--prod`가 없으면 3이다(R58.2).
   - 단, `rediss://`의 TLS는 따로 저장하지 않는다. Redis는 평문 응답이 없으면 TLS로 다시 붙는다(R4.3).
 
+### R60 읽기 전용 저장소 공통
+
+- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
+  - 예: `{"name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"}`.
+- R60.2 이 저장소들은 읽기 전용이다. 쓰기로 보이는 질의는 보내기 전에 거절한다(`읽기 전용 저장소라 보내지 않음`). 비싼 질의(DynamoDB 전체 스캔, OpenSearch `size` 1만 초과, Loki·Prometheus 범위 7일 초과)는 확인을 받는다(CLI는 `--force`). prod 판정(R6.2)과 CLI `--prod`(R58.2)는 같다.
+- R60.3 트리·편집기·결과 표·CLI(`db query -c`)는 PostgreSQL과 같은 자리에서 쓴다. 결과는 표(`db.Result`)이고 중첩 값은 JSON 칸이라 값 보기(R32)로 연다. 실행 기록(R8)·알림(R30)은 같다. 표 편집(R15)·트랜잭션(R17)·테이블 보기(R16)는 없다.
+
+### R61 OpenSearch
+
+- R61.1 트리는 인덱스(별칭은 `→ 인덱스`)와 그 아래 매핑 필드(`이름 타입`, 중첩은 `a.b`)다. 인덱스 `Enter`는 최근 문서 50개(`sort: _doc desc`가 아니라 `match_all`, `size: 50`)를 연다. 인증은 `basic`(user·비밀번호) 또는 `sigv4`(서비스 `es`).
+- R61.2 편집기는 두 꼴을 받는다. `SELECT …`(대소문자 무시)는 SQL 플러그인(`POST _plugins/_sql`)으로, `GET <인덱스>/_search`·`GET <인덱스>/_count`·`GET _cat/…`·`GET <인덱스>/_mapping` 첫 줄 뒤 JSON 본문은 REST로 보낸다. 다른 메서드·경로는 R60.2로 거절한다(`_search`의 POST는 받음). 결과 열은 `_index`·`_id`·`_score`와 `_source` 최상위 필드(첫 1,000건의 필드 합집합)이고 집계(`aggregations`)는 JSON 칸 한 줄로 보인다.
+  - 예: `GET logs-*/_search` + `{"query":{"match":{"status":500}},"size":20}` → 20행.
+
+### R62 Loki·Prometheus·Grafana
+
+- R62.1 Loki 트리는 라벨 이름 → 값(최근 1시간), 값 `Enter`는 `{라벨="값"}` 최근 100줄이다. Prometheus 트리는 지표 이름(앞 1,000개)이고 `Enter`는 그 지표의 즉시값이다. Grafana 접속은 Loki·Prometheus 데이터 소스 목록을 보이고 그 아래는 같은 트리다(`/api/datasources/proxy/uid/<uid>/…`로 보냄, 토큰 `Authorization: Bearer`).
+- R62.2 편집기는 Loki면 LogQL, Prometheus면 PromQL이다. 편집기 위 한 줄에 범위(`최근 1h`)를 보이고 `Ctrl+]`로 `15m·1h·6h·24h·7d`를 돈다(CLI `--since`·`--until`). 로그 결과 열은 `time`(KST)·스트림 라벨·`line`, 지표 결과는 `time`·라벨·`value`이고 범위 질의는 차트(R28)로 볼 수 있다. 한도는 `--max-rows`(기본 1,000, Loki 서버 상한 5,000).
+  - 예: `{app="api"} |= "error"` → 최근 1시간 로그. `sum by (status) (rate(http_requests_total[5m]))` → 범위 질의 표.
+
+### R63 DynamoDB
+
+- R63.1 트리는 테이블(`항목 수≈`) → 키(`PK`·`SK` 이름·타입)와 GSI·LSI다. 테이블 `Enter`는 앞 50개 항목(스캔이라 R60.2 확인).
+- R63.2 편집기는 PartiQL `SELECT`만 받는다(`ExecuteStatement`, 페이지를 이어 `--max-rows`까지). `WHERE`에 파티션 키 조건이 없으면 전체 스캔이라 확인을 받는다. 결과 열은 키 열 먼저, 나머지 속성 이름순이고 값은 DynamoDB JSON을 풀어 보인다(`M`·`L`은 JSON 칸, 숫자는 원문).
+  - 예: `SELECT * FROM "orders" WHERE "pk" = 'u#42'` → 그 파티션 항목. `SELECT * FROM "orders"` → `전체 스캔: y/N`.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |
