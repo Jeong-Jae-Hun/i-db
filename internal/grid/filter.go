@@ -173,3 +173,97 @@ func (m *Model) matches(f Filter, i int) bool {
 	}
 	return c <= 0
 }
+
+// ─── 서버로 다시 읽기 (R14.5) ───
+
+// Query 는 결과 표의 정렬·거르기다. 서버에서 다시 읽은 결과에 되돌려 붙인다.
+type Query struct {
+	SortCol string // 정렬 열 이름. 비면 정렬 없음
+	Desc    bool
+	Filter  string
+}
+
+// Query 는 지금 정렬·거르기다.
+func (m Model) Query() Query {
+	q := Query{Filter: m.filter}
+	if m.res != nil && m.sortDir != sortNone && m.sortCol < len(m.res.Cols) {
+		q.SortCol, q.Desc = m.res.Cols[m.sortCol], m.sortDir == sortDesc
+	}
+	return q
+}
+
+// SetQuery 는 정렬·거르기를 q 로 둔다. 열 이름이 결과에 없으면 정렬은 없다.
+// server 면 행이 이미 서버에서 그렇게 읽은 것이라 받은 행 거르기·정렬을 다시 하지 않는다.
+func (m *Model) SetQuery(q Query, server bool) {
+	if m.res == nil {
+		return
+	}
+	m.filter, m.sortDir, m.server = q.Filter, sortNone, server
+	if i := slices.Index(m.res.Cols, q.SortCol); q.SortCol != "" && i >= 0 {
+		m.sortCol, m.sortDir = i, sortAsc
+		if q.Desc {
+			m.sortDir = sortDesc
+		}
+	}
+	m.rebuild()
+}
+
+// FilterTyping 은 거르기 글을 치는 중인지다. 치는 동안은 받은 행 안에서만 거르고 확정 때 서버로 다시 읽는다.
+func (m Model) FilterTyping() bool { return m.typing }
+
+// ResumeTyping 은 다시 읽은 결과가 오는 사이 치던 거르기 입력을 이어 간다.
+func (m *Model) ResumeTyping() { m.typing = true }
+
+// UniqueCols 는 열 이름이 겹치지 않는지다. 겹치면 서브쿼리 바깥에서 열을 가리킬 수 없어 서버로 다시 읽지 않는다.
+func (m Model) UniqueCols() bool {
+	if m.res == nil {
+		return false
+	}
+	// _q 열이 있으면 모든 열 찾기의 _q::text 가 행이 아닌 그 열을 가리킨다
+	seen := map[string]bool{"_q": true}
+	for _, c := range m.res.Cols {
+		if seen[c] {
+			return false
+		}
+		seen[c] = true
+	}
+	return true
+}
+
+// ServerSQL 은 읽기 문장 base 를 감싸 지금 정렬·거르기를 서버에서 하는 SELECT 다. 둘 다 없으면 base 그대로다.
+// base 끝의 줄 주석이 닫는 괄호를 삼키지 않게 괄호 앞에 줄을 바꾼다. NULL 은 받은 행 정렬(R14.3)처럼 늘 뒤다.
+//   - 예: SELECT * FROM (\nselect …\n) AS _q WHERE "status"::text = 'PAID' ORDER BY "amount" DESC NULLS LAST
+func (m Model) ServerSQL(base string) string {
+	if m.res == nil {
+		return base
+	}
+	var where, order string
+	f := ParseFilter(m.filter, m.res.Cols)
+	switch {
+	case f.Col >= 0:
+		where, _ = f.SQL(m.kinds[f.Col] == kindNumber)
+	case f.Value == "":
+	case f.Op == OpNotContains:
+		where = "NOT (_q::text ILIKE " + db.QuoteLiteral("%"+likeEscaper.Replace(f.Value)+"%") + ")"
+	default:
+		where = "_q::text ILIKE " + db.QuoteLiteral("%"+likeEscaper.Replace(f.Value)+"%")
+	}
+	if q := m.Query(); q.SortCol != "" {
+		dir := "ASC"
+		if q.Desc {
+			dir = "DESC"
+		}
+		order = db.QuoteIdent(q.SortCol) + " " + dir + " NULLS LAST"
+	}
+	if where == "" && order == "" {
+		return base
+	}
+	s := "SELECT * FROM (\n" + base + "\n) AS _q"
+	if where != "" {
+		s += " WHERE " + where
+	}
+	if order != "" {
+		s += " ORDER BY " + order
+	}
+	return s
+}

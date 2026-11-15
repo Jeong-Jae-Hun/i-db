@@ -407,6 +407,7 @@ type resultMsg struct {
 	undo    *undoEntry        // rkSubmit: 되돌리기로 낸 묶음. 성공하면 탭에서 뺀다
 	params  map[string]string // 파라미터 실행의 이름 → 값. 성공하면 기억한다(R55)
 	retry   *pendingRun       // 읽기 전용 저장소의 비싼 질의를 확인 뒤 다시 보낼 실행(R60.2)
+	keep    *grid.Query       // pendingRun.keep
 }
 
 // redisValueMsg 는 값 편집기에 넣을 키 하나를 읽은 결과다.
@@ -600,6 +601,7 @@ type pendingRun struct {
 	estimate string            // 확인 창에 같이 보일 영향 행 수 추정(R39). 못 받았으면 비어 있다
 	note     string            // 시작할 때 상태 줄 앞에 붙일 글(enc() 확장, R52)
 	changes  *db.ChangeSet     // rkSubmit 이 낸 묶음(R50)
+	keep     *grid.Query       // 정렬·거르기 다시 읽기(R14.5). 결과에 다시 붙이고 실패하면 보던 결과를 둔다
 	undo     *undoEntry        // rkSubmit 이 되돌리기 묶음을 낸다(R50)
 	params   map[string]string // 파라미터 실행의 이름 → 값(R55)
 	// 읽기 전용 저장소가 ErrNeedsConfirm 을 돌려주면 확인 뒤 대신 시작할 실행(Force, R60.2)
@@ -684,6 +686,13 @@ type queryTab struct {
 	// 지금 표를 채운 성공한 실행의 문장과 접속. 전체 내보내기(R33.1)가 다시 보낸다. 쓰기 문장도 남겨 F7 이 거절하게 한다
 	exportSQL  string
 	exportConn int
+	// baseSQL 은 사용자가 실행한 원래 문장이다. 정렬·거르기를 서버로 다시 읽을 때 감싼다(R14.5). fetched 는 지금 결과를 만든 정렬·거르기다
+	baseSQL string
+	fetched grid.Query
+	// requerying 은 돌고 있는 실행이 정렬·거르기 다시 읽기라는 뜻이다. 그 사이 또 바꾸면 이전 것을 취소하고 새로 보낸다.
+	// requeryLast 는 그 실행이 성공하면 t.last(제출 뒤 새로고침)로 올릴 실행이다. 실패한 감싼 문장을 다시 보내지 않게 한다
+	requerying  bool
+	requeryLast *pendingRun
 	// 연 파일을 마지막으로 읽거나 쓴 내용과 편집 판(R45.2). 디스크가 이 내용과 달라지면 autoStop 으로 자동 저장을 멈춘다
 	diskText string
 	editRev  int
@@ -1535,9 +1544,14 @@ func (m *model) start(p pendingRun) tea.Cmd {
 	if t.running != nil {
 		t.running()
 	}
+	t.requerying, t.requeryLast = p.keep != nil, nil
 	if p.readOnly && (p.kind == rkGrid || p.kind == rkPlan) {
 		last := p
-		t.last = &last
+		if p.keep != nil {
+			t.requeryLast = &last
+		} else {
+			t.last = &last
+		}
 	}
 	exec := p.exec
 	// Manual 모드는 편집기 세션 실행 앞에 BEGIN 을 보낸다. 이미 열려 있으면 서버가 경고만 하고 넘어간다
@@ -1571,7 +1585,7 @@ func (m *model) start(p pendingRun) tea.Cmd {
 		defer cancel()
 		res, err := exec(ctx)
 		msg := resultMsg{tab: id, seq: seq, conn: p.conn, sql: p.sql, stmts: p.stmts, res: res, err: err, kind: p.kind, key: p.key, old: p.old,
-			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params, retry: p.retry}
+			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params, retry: p.retry, keep: p.keep}
 		if p.all != nil {
 			msg.all = *p.all
 		}
@@ -2299,6 +2313,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inTx[msg.conn] = msg.res.InTx
 			tick = m.tick()
 		}
+		requeryLast := t.requeryLast
+		t.requerying, t.requeryLast = false, nil
+		// 정렬·거르기 다시 읽기가 실패·취소되면 보던 결과와 정렬·거르기를 그대로 둔다(R14.5)
+		if msg.keep != nil && (msg.err != nil || t.cancelled) {
+			m.status = "다시 읽지 못함"
+			if msg.err != nil {
+				m.status += ": " + m.errText(msg.conn, msg.err)
+			}
+			return m, tea.Batch(save, tick)
+		}
 		// 표를 바꾸는 결과(편집기 실행·테이블 보기·실행 계획)는 탭의 결과로 붙인다
 		if replacesGrid[msg.kind] {
 			// 실행하는 사이 고친 편집은 버릴지 물은 적이 없으므로 결과로 덮지 않는다
@@ -2337,6 +2361,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.kind == rkGrid && msg.err == nil && !t.cancelled && c.Kind == db.KindPG {
 				t.exportSQL = msg.sql
 			}
+			if msg.keep == nil {
+				t.baseSQL = t.exportSQL
+			}
 			if msg.kind != rkTable {
 				t.tv = nil
 			} else if res != nil && t.tv != nil {
@@ -2358,8 +2385,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					t.subs = append(t.subs, subResult{title: fmt.Sprintf("문장 %d", i+1), res: r})
 				}
 			}
-			keepCol := t.grid.CurrentCol()
+			keepCol, now, typing := t.grid.CurrentCol(), t.grid.Query(), t.grid.FilterTyping()
 			t.grid.SetResult(t.res)
+			if msg.keep != nil {
+				if requeryLast != nil {
+					t.last = requeryLast
+				}
+				t.grid.SetQuery(*msg.keep, true)
+				t.fetched = *msg.keep
+				// 오는 사이 정렬·거르기를 또 바꿨으면 그것을 받은 행에 다시 걸고, 치던 거르기는 이어 간다. 확정되면 다시 읽는다
+				if now != *msg.keep {
+					t.grid.SetQuery(now, false)
+					if typing {
+						t.grid.ResumeTyping()
+					} else {
+						tick = tea.Batch(tick, m.requery(t))
+					}
+				}
+				t.grid.FocusCol(keepCol)
+			} else {
+				t.fetched = t.grid.Query()
+			}
 			// 테이블 보기는 정렬·페이지를 바꿔 다시 읽어도 커서 열을 지켜 s 를 거듭 누르면 같은 열이 돈다
 			if msg.kind == rkTable {
 				t.grid.FocusCol(keepCol)
@@ -2707,6 +2753,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.tableAction(t.tv.HeaderClick(col))
 			default:
 				t.grid.CycleSort()
+				return m, m.requery(t)
 			}
 		}
 		return m, nil
@@ -3064,7 +3111,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case t.redis != nil && t.redis.Editing():
 			return m, m.redisEditKey(k)
 		case t.grid.Typing():
-			return m, m.gridKey(k)
+			return m, tea.Batch(m.gridKey(k), m.requery(t))
 		case t.tv != nil && t.tv.Typing():
 			return m, m.tableKey(k)
 		case t.planOn && planKeys[ks]:
@@ -3814,7 +3861,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if t.tv != nil {
 			return m, m.tableKey(k)
 		}
-		return m, m.gridKey(k)
+		return m, tea.Batch(m.gridKey(k), m.requery(t))
 	}
 
 	// ─── 트리 ───

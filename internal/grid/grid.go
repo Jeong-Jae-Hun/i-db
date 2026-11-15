@@ -130,6 +130,9 @@ type Model struct {
 	sortDir sortDir
 	filter  string
 	typing  bool
+	// server 면 행이 이미 서버에서 정렬·거른 것이다(R14.5). 근사인 받은 행 거르기·정렬(R14.4)을 다시 돌리면
+	// 큰 정수·모든 열 찾기·글자 순서가 서버와 어긋나 맞는 행이 사라질 수 있어 건너뛴다. 정렬·거르기를 바꾸면 꺼진다
+	server bool
 	// 거르기용 소문자 칸. 64KiB 칸 1000개를 키마다 소문자로 바꾸면 100ms 넘게 걸려 결과마다 한 번만 만든다(E63).
 	// 대문자가 든 칸만 사본이 생겨 결과 크기만큼 메모리를 더 쓸 수 있다. 커지면 접두어만 두는 방식으로 바꾼다
 	folded [][]string
@@ -540,10 +543,11 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 		case "s":
 			m.CycleSort()
 		case "/":
-			m.typing = true
+			m.typing, m.server = true, false
+			m.rebuild()
 		case "esc":
 			if m.filter != "" {
-				m.filter = ""
+				m.filter, m.server = "", false
 				m.rebuild()
 			}
 		case "v":
@@ -867,6 +871,7 @@ func (m *Model) CycleSort() {
 	if m.res == nil {
 		return
 	}
+	m.server = false
 	if m.sortCol != m.col {
 		m.sortCol, m.sortDir = m.col, sortAsc
 	} else {
@@ -948,6 +953,9 @@ func (m *Model) rebuild() {
 		return
 	}
 	f := ParseFilter(m.filter, r.Cols)
+	if m.server {
+		f = Filter{Col: -1}
+	}
 	if (f.Op == OpContains || f.Op == OpNotContains) && f.Value != "" && m.folded == nil {
 		m.folded = make([][]string, len(r.Rows))
 		for i, row := range r.Rows {
@@ -963,7 +971,7 @@ func (m *Model) rebuild() {
 			view = append(view, i)
 		}
 	}
-	if m.sortDir != sortNone && m.sortCol < len(r.Cols) {
+	if m.sortDir != sortNone && m.sortCol < len(r.Cols) && !m.server {
 		o := rowOrder{idx: view, cells: make([]string, len(r.Rows)), numeric: m.kinds[m.sortCol] == kindNumber, desc: m.sortDir == sortDesc}
 		if o.numeric {
 			o.nums, o.isNum = make([]float64, len(r.Rows)), make([]bool, len(r.Rows))
