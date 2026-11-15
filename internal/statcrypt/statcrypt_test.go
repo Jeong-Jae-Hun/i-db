@@ -143,7 +143,7 @@ func TestEncrypt_Decrypt_무작위_글과_키를_pgcrypto_staticEncrypt_와_대�
 				plain.WriteByte(chars[rng.IntN(len(chars))])
 			}
 		}
-		// examples/crypto.sql 의 staticEncrypt 본문과 같은 식이다
+		// pgcrypto encrypt_iv 로 만드는 정적 암호화(staticEncrypt 관례)와 같은 식이다
 		var enc string
 		err := conn.QueryRow(ctx, `select encode(decode($3, 'hex'), 'hex') || '^|^' ||
 			encode(encrypt_iv(convert_to($1, 'UTF-8')::bytea, $2::text::bytea, decode($3, 'hex'), 'aes'), 'hex')`,

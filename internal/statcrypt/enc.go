@@ -9,7 +9,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 )
 
-// serverFunc 는 키·IV 가 없을 때 enc 를 바꿔 쓸 서버 함수다(examples/crypto.sql)
+// serverFunc 는 키·IV 가 없을 때 enc 를 바꿔 쓸 서버 함수다. db 는 만들지 않고 DB 에 이미 있을 때만 동작한다
 const serverFunc = "staticEncrypt"
 
 // ExpandEnc 는 문자열·주석·$태그$ 밖의 enc('<글>') 호출을 그 글의 staticEncrypt 암호문 리터럴로 바꾼다(명세 R52).

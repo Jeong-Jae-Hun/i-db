@@ -15,7 +15,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Transactions in Auto or Manual mode, full-schema data search, schema diff between connections, run a statement on another connection and diff the results
 - Redis: key browser, value editor for every type, TTL/rename, monitor (INFO, SLOWLOG, big keys), pattern bulk delete
 - `queries/` folder integration: files are attached to connections via DataGrip's `data_source_mapping.xml`, auto-save, session restore
-- Optional decryption view and `enc('...')` expansion for values produced by a pgcrypto-based static encryption helper (see [examples/crypto.sql](examples/crypto.sql))
+- Optional client-side decryption view and `enc('...')` expansion for AES-CBC values stored as `<iv hex>^|^<ciphertext hex>` (pgcrypto `encrypt_iv` compatible). Keys come from `.env` (`<GROUP>_AES_KEY`, `<GROUP>_AES_IV`); nothing is installed in your database. Without a key/IV, `enc(...)` is sent as a call to an existing `staticEncrypt(...)` function, so it only works if your database already has one
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
 ## Install

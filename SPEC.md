@@ -306,7 +306,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R37 staticEncrypt 복호화 보기
 
-- R37.1 결과 영역에서 `D`는 화면의 `<hex>^|^<hex>` 꼴 칸을 그 접속 그룹의 키(`.env`의 `<그룹>_AES_KEY`, 예: `app` → `APP_AES_KEY`, `auth` → `AUTH_AES_KEY`)로 풀어 보이고 다시 `D`로 원래 값으로 돌아간다. 푼 칸은 다른 색으로 보인다. 복호화는 db 안에서 한다(서버 `staticDecrypt` 함수를 부르지 않음). 알고리즘은 pgcrypto 기반 정적 암호화 함수(`examples/crypto.sql`)와 같은 AES-CBC(키는 텍스트 바이트, PKCS#7, 앞 hex가 IV)다.
+- R37.1 결과 영역에서 `D`는 화면의 `<hex>^|^<hex>` 꼴 칸을 그 접속 그룹의 키(`.env`의 `<그룹>_AES_KEY`, 예: `app` → `APP_AES_KEY`, `auth` → `AUTH_AES_KEY`)로 풀어 보이고 다시 `D`로 원래 값으로 돌아간다. 푼 칸은 다른 색으로 보인다. 복호화는 db 안에서 한다(서버 `staticDecrypt` 함수를 부르지 않음). 알고리즘은 pgcrypto `encrypt_iv`·`decrypt_iv`(`aes`)와 같은 AES-CBC(키는 텍스트 바이트, PKCS#7, 앞 hex가 IV)다. db는 DB에 함수를 만들지 않는다.
   - 예: 키가 없으면 `<그룹>_AES_KEY 가 .env 에 없음`. 접속에 그룹이 없으면 `접속 그룹을 몰라 복호화 키를 고를 수 없음`. 키 값은 상태 줄·오류·기록 어디에도 내지 않는다. 풀지 못한 칸은 원래 값 그대로 두고 상태 줄에 `N칸 풀지 못함`.
   - 단, 푼 값은 화면에만 있다. 실행 기록·MCP·알림·내보내기(R14·R33)·IN 목록 복사·결과 비교에는 원래 값이 쓰인다. 복사(`y`·`Y`)는 화면에 보이는 값(푼 값)을 복사한다.
 

@@ -1,4 +1,4 @@
-// Package statcrypt 는 pgcrypto 기반 정적 암호화 함수 staticEncrypt(서버에 사용자가 정의한다, examples/crypto.sql)가 만든 `<ivhex>^|^<datahex>` 값을
+// Package statcrypt 는 pgcrypto encrypt_iv 와 같은 방식의 정적 암호화(서버 함수 이름 관례상 staticEncrypt)가 만든 `<ivhex>^|^<datahex>` 값을
 // 서버 함수를 부르지 않고 풀고(명세 R37) 만든다(R52). pgcrypto decrypt_iv(data, key::bytea, iv, 'aes') 와 같은 결과를 낸다.
 package statcrypt
 
@@ -104,7 +104,7 @@ func newBlock(key string) (cipher.Block, error) {
 }
 
 // byteaKey 는 PostgreSQL byteain 과 같다. `\x` 로 시작하면 hex, 아니면 `\\` 는 백슬래시, `\ooo` 는 8진 바이트,
-// 그 밖의 글자는 그대로다. crypto.sql 이 키를 '<key>'::bytea 로 넘겨서 키에 백슬래시가 있으면 이 규칙이 적용된다.
+// 그 밖의 글자는 그대로다. 서버 함수는 흔히 키를 '<key>'::bytea 로 넘겨서 키에 백슬래시가 있으면 이 규칙이 적용된다.
 func byteaKey(key string) ([]byte, error) {
 	if rest, ok := strings.CutPrefix(key, `\x`); ok {
 		// byteain 은 hex 자리 사이 공백을 허용한다
