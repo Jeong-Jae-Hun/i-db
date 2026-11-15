@@ -378,4 +378,3 @@ func toJSON(v types.AttributeValue) string {
 	}
 	return strings.TrimSuffix(buf.String(), "\n")
 }
-

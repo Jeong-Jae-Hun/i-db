@@ -439,8 +439,13 @@ func TestSource_접속을_고치면_열린_Backend_를_닫는다(t *testing.T) {
 
 func TestTestConn_저장소는_Children_로_시험하고_오류에서_비밀값을_지운다(t *testing.T) {
 	c := db.Conn{Name: "graf", Kind: db.KindGrafana, URL: "https://g", Auth: "token", Password: "glsa_secret"}
-	if _, err := testConn(context.Background(), c); err == nil || !strings.Contains(err.Error(), "not built in") {
-		t.Fatalf("등록 안 된 종류: %v", err)
+	// 등록 안 된 종류는 실제 Grafana 생성기를 잠시 빼서 본다(네트워크에 나가지 않게)
+	saved := openSource[db.KindGrafana]
+	delete(openSource, db.KindGrafana)
+	_, err0 := testConn(context.Background(), c)
+	openSource[db.KindGrafana] = saved
+	if err0 == nil || !strings.Contains(err0.Error(), "not built in") {
+		t.Fatalf("등록 안 된 종류: %v", err0)
 	}
 	f := newFake()
 	registerFake(t, f)
