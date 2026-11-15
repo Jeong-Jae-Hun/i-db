@@ -116,7 +116,7 @@ func TestColumnKinds_타입이_있으면_타입으로_없으면_값으로_고른
 	}
 }
 
-func TestSort_숫자_열은_크기순이고_NULL은_오름차순_끝_내림차순_앞이다(t *testing.T) {
+func TestSort_숫자_열은_크기순이고_NULL은_오름차순_내림차순_모두_맨_뒤다(t *testing.T) {
 	r := &db.Result{Cols: []string{"n"}, Types: []string{"int4"}, Rows: [][]string{{"10"}, {"2"}, {"NULL"}, {"1"}, {"-3"}}}
 	m := newGrid(r, [2]int{40, 10})
 	m, _ = press(m, "s")
@@ -124,7 +124,7 @@ func TestSort_숫자_열은_크기순이고_NULL은_오름차순_끝_내림차�
 		t.Fatalf("asc: %s", got)
 	}
 	m, _ = press(m, "s")
-	if got := strings.Join(viewed(m, 0), ","); got != "NULL,10,2,1,-3" {
+	if got := strings.Join(viewed(m, 0), ","); got != "10,2,1,-3,NULL" {
 		t.Fatalf("desc: %s", got)
 	}
 	m, _ = press(m, "s")

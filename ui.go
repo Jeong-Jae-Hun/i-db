@@ -280,11 +280,12 @@ var helpSections = []struct {
 		{"PgUp / PgDn · g / G", "쪽 이동 · 처음 / 끝", "pgdown"},
 		{"0 / $", "첫 열 / 끝 열", "0"},
 		{"Enter / v", "셀 전체 값 / 레코드 세로 보기", "enter"},
-		{"s · /", "정렬 · 거르기", "s"},
+		{"s · /", "정렬(오름→내림→없음) · 거르기 abc !abc col:abc col=v col>v col=null", "s"},
 		{"y / Y", "셀 / 행 복사", "y"},
 		{"e / E", "CSV / JSON 내보내기", "e"},
 		{"< / >", "열 폭", ">"},
-		{"w", "텍스트 줄바꿈 (테이블 보기는 WHERE)", "w"},
+		{"w", "텍스트 줄바꿈 (테이블 보기는 WHERE, / 도 같음)", "w"},
+		{"O", "테이블 보기 ORDER BY 입력 (Tab 열 이름 완성)", "O"},
 		{"Enter·F2 / esc", "칸 고치기 / 취소 (Ctrl+N 은 NULL)", "f2"},
 		{"a · Ctrl+D · d · u", "행 추가 · 복제 · 삭제 표시 · 되돌리기", "a"},
 		{"Ctrl+S", "변경 미리 보기 뒤 제출", "ctrl+s"},
@@ -324,7 +325,8 @@ var helpSections = []struct {
 		{"휠", "트리 · 편집기 · 결과 스크롤", ""},
 		{"+ 클릭", "새 탭", ""},
 		{"경계 끌기", "트리 폭 · 편집기 높이 (다음에도 그 크기)", ""},
-		{"열 머리 클릭", "테이블 보기 정렬 (Shift 는 정렬 열 더하기)", ""},
+		{"열 머리 클릭", "정렬 (테이블 보기는 서버 정렬, Shift 는 정렬 열 더하기)", ""},
+		{"WHERE · ORDER BY 칸 클릭", "테이블 보기 조건·정렬 입력", ""},
 	}},
 }
 
@@ -2247,6 +2249,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.kind != rkTable {
 				t.tv = nil
 			} else if res != nil && t.tv != nil {
+				*t.tv = t.tv.SetColumns(res.Cols, res.Types)
 				if off, size := t.tv.Page(); len(res.Rows) < size {
 					*t.tv = t.tv.SetTotal(int64(off+len(res.Rows)), true)
 				}
@@ -2264,7 +2267,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					t.subs = append(t.subs, subResult{title: fmt.Sprintf("문장 %d", i+1), res: r})
 				}
 			}
+			keepCol := t.grid.CurrentCol()
 			t.grid.SetResult(t.res)
+			// 테이블 보기는 정렬·페이지를 바꿔 다시 읽어도 커서 열을 지켜 s 를 거듭 누르면 같은 열이 돈다
+			if msg.kind == rkTable {
+				t.grid.FocusCol(keepCol)
+			}
 			// enum 열은 고르기 창으로 고친다(R49.2). 모르는 사용자 타입만 읽는다
 			tick = tea.Batch(tick, m.loadEnums(t, msg.conn, t.res))
 			switch {
@@ -2584,13 +2592,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			gm := msg
 			gm.X, gm.Y = msg.X-rightX-1, msg.Y-l.edH-5-len(m.resultLines(t, l.rightW))
 			t.grid.HandleMouse(gm)
-			// 테이블 보기에서 열 머리 클릭은 서버 정렬이다(shift 는 정렬 열 더하기)
-			if col, ok := t.grid.HeaderAt(gm.X, gm.Y); ok && t.tv != nil && t.redis == nil && !t.planOn && !wheel {
-				tv, a := t.tv.HeaderClick(col)
-				if msg.Shift {
-					tv, a = t.tv.HeaderClickAdd(col)
+			if t.redis != nil || t.planOn || wheel {
+				return m, nil
+			}
+			// 테이블 보기 바로 위 줄은 WHERE·ORDER BY 칸이다. 누른 칸의 입력을 연다(R16.4)
+			if t.tv != nil && gm.Y == -1 {
+				if tv, a := t.tv.BarClick(gm.X, l.rightW); a.Handled {
+					return m, m.tableAction(tv, a)
 				}
-				return m, m.tableAction(tv, a)
+			}
+			// 열 머리 클릭은 s 와 같은 정렬이다. 테이블 보기는 서버 정렬(shift 는 정렬 열 더하기), 아니면 받은 행 정렬(R14.3)
+			col, ok := t.grid.HeaderAt(gm.X, gm.Y)
+			switch {
+			case !ok:
+			case t.tv != nil && msg.Shift:
+				return m, m.tableAction(t.tv.HeaderClickAdd(col))
+			case t.tv != nil:
+				return m, m.tableAction(t.tv.HeaderClick(col))
+			default:
+				t.grid.CycleSort()
 			}
 		}
 		return m, nil

@@ -31,9 +31,19 @@ func (m *model) encExec(conn int, q string) func(ctx context.Context) (*db.Resul
 	return execScript(m.clients, script{conn: m.conn(conn), stmts: []string{sent}, readOnlyTx: m.prodLocked(conn)})
 }
 
-// tableKey 는 테이블 보기 키(WHERE·페이지·개수)를 먼저 보고, 쓰지 않은 키는 결과 표로 넘긴다.
+// tableKey 는 테이블 보기 키(WHERE·ORDER BY·페이지·개수)를 먼저 보고, 쓰지 않은 키는 결과 표로 넘긴다.
+// s 는 받은 페이지만 정렬하지 않고 커서 열 머리 클릭처럼 서버 ORDER BY 로 다시 읽는다(R14.3).
+// 레코드·값 보기나 사각형 선택 중이면 esc·s·/ 는 그 화면이 쓴다.
 func (m *model) tableKey(k tea.KeyMsg) tea.Cmd {
-	tv, a := m.cur().tv.Update(k)
+	t, ks := m.cur(), k.String()
+	switch {
+	case t.tv.Typing():
+	case t.grid.Viewing() && (ks == "esc" || ks == "s" || ks == "/"):
+		return m.gridKey(k)
+	case ks == "s":
+		return m.tableAction(t.tv.HeaderClick(t.grid.CurrentCol()))
+	}
+	tv, a := t.tv.Update(k)
 	if !a.Handled {
 		return m.gridKey(k)
 	}

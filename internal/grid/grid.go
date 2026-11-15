@@ -70,7 +70,8 @@ const (
 )
 
 var (
-	jsonTypes = map[string]bool{"json": true, "jsonb": true}
+	jsonTypes  = map[string]bool{"json": true, "jsonb": true}
+	sortArrows = map[sortDir]string{sortAsc: "↑", sortDesc: "↓"}
 	// 붙여넣은 거르기 입력의 줄바꿈·탭은 한 줄 입력에서 보이지 않으므로 공백으로 바꾼다
 	pasteFlattener = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ")
 )
@@ -537,12 +538,7 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 			m.widths[m.col] = min(maxColWidth, max(minColWidth, m.widths[m.col]+delta))
 			a.Status = fmt.Sprintf("열 폭 %d", m.widths[m.col])
 		case "s":
-			if m.sortCol != m.col {
-				m.sortCol, m.sortDir = m.col, sortAsc
-			} else {
-				m.sortDir = (m.sortDir + 1) % 3
-			}
-			m.rebuild()
+			m.CycleSort()
 		case "/":
 			m.typing = true
 		case "esc":
@@ -866,7 +862,55 @@ func (m *Model) HandleMouse(msg tea.MouseMsg) {
 	m.follow()
 }
 
-// HeaderAt 은 grid 영역 기준 좌표가 표 머리(열 이름·타입 줄)의 어느 열 위인지 알린다. 서버 정렬(테이블 보기)이 쓴다.
+// CycleSort 는 커서 열 정렬을 오름 → 내림 → 없음으로 돌린다(s·열 머리 클릭, R14.3). 다른 열이면 그 열 오름차순이다.
+func (m *Model) CycleSort() {
+	if m.res == nil {
+		return
+	}
+	if m.sortCol != m.col {
+		m.sortCol, m.sortDir = m.col, sortAsc
+	} else {
+		m.sortDir = (m.sortDir + 1) % 3
+	}
+	m.rebuild()
+}
+
+// CurrentCol 은 커서 열 이름이다. 테이블 보기는 s 를 이 열의 서버 정렬로 바꾼다.
+func (m Model) CurrentCol() string {
+	if m.res == nil || m.col >= len(m.res.Cols) {
+		return ""
+	}
+	return m.res.Cols[m.col]
+}
+
+// FocusCol 은 커서를 이름이 같은 열로 옮긴다. 테이블 보기가 페이지를 다시 읽어도 커서 열을 지키게 한다.
+func (m *Model) FocusCol(name string) {
+	if m.res == nil {
+		return
+	}
+	if i := slices.Index(m.res.Cols, name); i >= 0 {
+		m.col = i
+		m.follow()
+	}
+}
+
+// Summary 는 표 위에 보일 정렬·거르기 줄이다. 둘 다 없으면 빈 글이다.
+//   - 예: "정렬 name ↑ · 거르기 status=ACTIVE · 12/200행 · esc 해제".
+func (m Model) Summary() string {
+	if m.res == nil || len(m.res.Cols) == 0 {
+		return ""
+	}
+	var parts []string
+	if m.sortDir != sortNone && m.sortCol < len(m.res.Cols) {
+		parts = append(parts, "정렬 "+textutil.Printable(m.res.Cols[m.sortCol], false)+" "+sortArrows[m.sortDir])
+	}
+	if m.filter != "" {
+		parts = append(parts, fmt.Sprintf("거르기 %s · %d/%d행 · esc 해제", textutil.Printable(m.filter, false), len(m.view), len(m.res.Rows)))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// HeaderAt 은 grid 영역 기준 좌표가 표 머리(열 이름·타입 줄)의 어느 열 위인지 알린다. 열 머리 클릭 정렬이 쓴다.
 func (m Model) HeaderAt(x, y int) (string, bool) {
 	if m.res == nil || m.mode != modeTable || len(m.res.Cols) == 0 {
 		return "", false
@@ -903,16 +947,8 @@ func (m *Model) rebuild() {
 	if r == nil || len(r.Cols) == 0 {
 		return
 	}
-	col, q := -1, strings.ToLower(m.filter)
-	if name, v, ok := strings.Cut(m.filter, ":"); ok {
-		for i, c := range r.Cols {
-			if strings.EqualFold(c, strings.TrimSpace(name)) {
-				col, q = i, strings.ToLower(strings.TrimSpace(v))
-				break
-			}
-		}
-	}
-	if q != "" && m.folded == nil {
+	f := ParseFilter(m.filter, r.Cols)
+	if (f.Op == OpContains || f.Op == OpNotContains) && f.Value != "" && m.folded == nil {
 		m.folded = make([][]string, len(r.Rows))
 		for i, row := range r.Rows {
 			m.folded[i] = make([]string, min(len(row), len(m.kinds)))
@@ -923,14 +959,7 @@ func (m *Model) rebuild() {
 	}
 	view := make([]int, 0, len(r.Rows))
 	for i := range r.Rows {
-		if m.gone[i] {
-			continue
-		}
-		match := q == ""
-		for c := 0; !match && c < len(m.folded[i]); c++ {
-			match = (col < 0 || c == col) && strings.Contains(m.folded[i][c], q)
-		}
-		if match {
+		if !m.gone[i] && m.matches(f, i) {
 			view = append(view, i)
 		}
 	}
@@ -1124,19 +1153,19 @@ func (m Model) export(format string) Action {
 func (o rowOrder) Len() int      { return len(o.idx) }
 func (o rowOrder) Swap(i, j int) { o.idx[i], o.idx[j] = o.idx[j], o.idx[i] }
 
-// Less 는 PostgreSQL 기본값처럼 NULL 을 가장 큰 값으로 본다(ASC NULLS LAST, DESC NULLS FIRST).
+// Less 는 NULL 을 방향과 무관하게 맨 뒤에 둔다(R14.3). 숫자로 못 읽는 값도 방향과 무관하게 숫자 뒤다.
 // 숫자는 float64 로 비교하므로 15자리를 넘는 numeric 은 근사 순서다.
 func (o rowOrder) Less(i, j int) bool {
 	a, b := o.idx[i], o.idx[j]
-	na, nb := o.cells[a] == nullText, o.cells[b] == nullText
+	if na, nb := o.cells[a] == nullText, o.cells[b] == nullText; na || nb {
+		return !na && nb
+	}
 	var c int
 	switch {
-	case na || nb:
-		c = cmp.Compare(b2i(na), b2i(nb))
 	case o.numeric && o.isNum[a] && o.isNum[b]:
 		c = cmp.Compare(o.nums[a], o.nums[b])
 	case o.numeric && o.isNum[a] != o.isNum[b]:
-		c = cmp.Compare(b2i(o.isNum[b]), b2i(o.isNum[a]))
+		return o.isNum[a]
 	default:
 		c = strings.Compare(o.cells[a], o.cells[b])
 	}
