@@ -292,6 +292,12 @@ func TestRedisVersion은_Valkey_를_먼저_본다(t *testing.T) {
 	}
 }
 
+func TestRedisVersion은_버전_필드가_없으면_이름만_보인다(t *testing.T) {
+	if got := redisVersion("# Server\r\nconnected_clients:1\r\n"); got != "Redis" {
+		t.Fatalf("%q", got)
+	}
+}
+
 func TestTestConn은_오류에_비밀번호를_싣지_않는다(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

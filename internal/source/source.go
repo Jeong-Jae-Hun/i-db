@@ -40,6 +40,12 @@ type Backend interface {
 	Close() error
 }
 
+// Prober 는 대시보드(R64.2)용 가벼운 확인을 하는 Backend 다. 읽기 전용 메타데이터만 묻고, 오류는 비밀값을 지운
+// db.Health{OK: false} 로 돌려준다. 제한 시간은 호출부가 ctx 에 건다(db.ProbeTimeout, main 의 probeAny).
+type Prober interface {
+	Probe(ctx context.Context) db.Health
+}
+
 var (
 	// ErrWrite 는 읽기 전용 저장소에 쓰기로 보이는 질의를 보냈을 때다
 	ErrWrite = errors.New("read-only source: write requests are not sent")

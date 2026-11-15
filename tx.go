@@ -129,6 +129,9 @@ func (m *model) dropTab(t *queryTab, note string) {
 		}
 		note = strings.TrimPrefix(note+" · "+s, " · ")
 	}
+	if t.dash != nil {
+		t.dash.stop()
+	}
 	if note != "" {
 		m.status = note
 	}

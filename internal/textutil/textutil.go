@@ -41,3 +41,34 @@ func GroupDigits(n int64) string {
 	}
 	return s
 }
+
+// koreanUnits 는 만·억·조 단위다. 큰 단위부터 본다.
+var koreanUnits = []struct {
+	name string
+	size uint64
+}{{"조", 1e12}, {"억", 1e8}, {"만", 1e4}}
+
+// KoreanCount 는 개수를 만·억·조 단위로 줄인다(대시보드 R64). 1만 미만은 쉼표 꼴이고, 단위로 10 미만이면
+// 소수 한 자리(.0 은 뗌), 10 이상이면 정수다. 올리면 단위 경계를 넘을 수 있어(9.99만 → 10.0만) 버린다.
+// 크기는 uint64 로 센다. int64 로 부호를 뒤집으면 MinInt64 가 넘쳐 자기 자신이 된다.
+//   - 예: 37 → "37", 12000 → "1.2만", 1200000 → "120만", 150000000 → "1.5억"
+func KoreanCount(n int64) string {
+	sign, u := "", uint64(n)
+	if n < 0 {
+		sign, u = "-", -u
+	}
+	for _, unit := range koreanUnits {
+		if u < unit.size {
+			continue
+		}
+		if whole := u / unit.size; whole >= 10 {
+			return sign + GroupDigits(int64(whole)) + unit.name // whole ≤ 2^63/1e4 라 int64 에 든다
+		}
+		tenths := u * 10 / unit.size // u < 10*unit.size 라 넘치지 않는다
+		if tenths%10 == 0 {
+			return fmt.Sprintf("%s%d%s", sign, tenths/10, unit.name)
+		}
+		return fmt.Sprintf("%s%d.%d%s", sign, tenths/10, tenths%10, unit.name)
+	}
+	return sign + GroupDigits(int64(u))
+}
