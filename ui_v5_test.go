@@ -666,8 +666,9 @@ func TestRedisDelete_이름공간은_패턴을_채우고_PostgreSQL에서는_하
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 
+	// PostgreSQL 접속 줄의 X 는 접속 지우기라 DataGrip 접속이면 안내만 한다(R59.3)
 	m.selectNode(m.roots[0].children[0])
-	if m.Update(key("X")); m.overlay != oNone || !strings.HasPrefix(m.status, "X(키 일괄 삭제)는 Redis") {
+	if m.Update(key("X")); m.overlay != oNone || m.status != dataGripRefusal {
 		t.Fatalf("PostgreSQL 접속: %q", m.status)
 	}
 }

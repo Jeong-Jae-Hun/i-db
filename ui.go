@@ -116,6 +116,7 @@ const (
 	oFinder
 	oPrompt // 한 줄 입력(즐겨찾기 이름·데이터 검색 글). Enter 면 promptDo 를 부른다
 	oLong   // 칸 값 전체 화면 편집기(R49.3)
+	oConn   // 접속 추가·고치기 창(R59.2)
 )
 
 // runKind 는 실행 결과를 받는 방법이다. 표를 바꾸는 종류만 보류 중인 편집을 버릴지 먼저 묻는다.
@@ -177,7 +178,7 @@ var (
 )
 
 var focusHints = map[focus]string{
-	fTree:   "Enter 열기 · d 구조 · D DDL · I CSV · A/L/S 운영 · B DB · F 검색 · X 키 삭제 · / 거르기 · ? 도움말",
+	fTree:   "Enter 열기 · d 구조 · D DDL · I CSV · A/L/S 운영 · B DB · F 검색 · X 키 삭제 · N 새 접속 · / 거르기 · ? 도움말",
 	fEditor: "Ctrl+R 실행 · Ctrl+E 계획 · Ctrl+B 정의 · F8 정렬 · F9 Auto/Manual · F3/F4 즐겨찾기 · Ctrl+P 팔레트",
 	fResult: "F2 고치기 · Ctrl+S 제출 · p 고정 · C IN · F/R 외래 키 · D 복호화 · +/- 거르기 · o 값 · F1 도움말",
 }
@@ -268,6 +269,10 @@ var helpSections = []struct {
 		{"B", "데이터베이스 바꾸기 (PostgreSQL 접속)", "B"},
 		{"F", "데이터 검색 (PostgreSQL 접속·스키마)", "F"},
 		{"X", "패턴 맞는 키 일괄 삭제 (Redis 접속·이름공간, esc 멈춤)", "X"},
+		{"N", "새 접속 (URL 붙여넣기 · Ctrl+T 시험, .dbtui/connections.json)", "N"},
+		{"E", "접속 고치기 (db 전용 접속)", "E"},
+		{"X (PostgreSQL 접속)", "접속 지우기 (db 전용 접속, .env 비밀번호도)", ""},
+		{"Alt+X", "접속 지우기 (db 전용 접속, Redis 포함)", "alt+X"},
 		{"=", "다른 접속과 스키마 비교 (PostgreSQL 접속·스키마)", "="},
 		{"/", "거르기 (Redis 키는 SCAN 패턴)", "/"},
 		{"esc", "거르기 해제", "esc"},
@@ -761,6 +766,8 @@ type model struct {
 	// 접속별 사용자 타입(OID 숫자) → enum 값(R49.2). enum 이 아니면 빈 목록, 읽는 중이면 nil 이다
 	enums map[int]map[string][]string
 	long  *longEdit // 칸 값 전체 화면 편집기(R49.3)
+	// 접속 추가·고치기 창(R59.2)
+	connForm *connForm
 
 	treeW     int
 	edH       int // 편집기 높이(줄). 0 이면 본문의 defaultEditorRatio%
@@ -781,15 +788,7 @@ func newModel(p *db.Project) *model {
 		manual: map[int]bool{}, txSince: map[int]time.Time{}, dbOver: map[int]string{}, schemaOf: map[int]string{},
 		treeW: defaultTreeWidth, mac: keys.MacStyle(false),
 		prodLock: true, unlocked: map[int]time.Time{}, enums: map[int]map[string][]string{}}
-	for _, g := range p.Groups() {
-		gn := &node{kind: nGroup, label: g, conn: -1, expanded: true, loaded: true}
-		for i, c := range p.Conns {
-			if db.GroupOf(c) == g {
-				gn.children = append(gn.children, &node{kind: nConn, label: c.Name, conn: i, parent: gn})
-			}
-		}
-		m.roots = append(m.roots, gn)
-	}
+	m.roots = connRoots(p.Conns, nil, nil)
 	if len(p.Warnings) > 0 {
 		m.status = "건너뜀: " + strings.Join(p.Warnings, ", ")
 	}
@@ -1869,6 +1868,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.status = string(msg)
 		return m, nil
+	case connTestMsg:
+		return m, m.connTested(msg)
 	case defMsg:
 		// ─── 정의로 이동 결과 (R26) ───
 		// 테이블·뷰는 트리에서 고르고 구조를 열고, 함수는 정의를 텍스트 결과로 연다.
@@ -2635,6 +2636,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.overlay {
 	case oLong:
 		return m, m.longKey(k)
+	case oConn:
+		return m, m.connFormKey(k)
 	case oHelp:
 		m.overlay = oNone
 		return m, nil
@@ -3846,7 +3849,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		})
 		return m, nil
+	case "N":
+		m.openConnForm(n, false)
+		return m, nil
+	case "E":
+		m.openConnForm(n, true)
+		return m, nil
+	case "alt+X":
+		return m, m.removeConnKey(n)
 	case "X":
+		// PostgreSQL 접속 줄의 X 는 db 전용 접속 지우기다(R59.3). Redis 접속 줄은 아래 패턴 삭제다
+		if n != nil && n.kind == nConn && m.conn(n.conn).Kind == db.KindPG {
+			return m, m.removeConnAsk(n.conn)
+		}
 		// ─── Redis 패턴 일괄 삭제 (R42) ───
 		// 패턴(이름공간이면 `<이름공간>:*`)을 받아 SCAN 으로 센 뒤 keyScanMsg 에서 미리 보이고 묻는다. PostgreSQL 에서는 하지 않는다.
 		if n == nil || (n.kind != nConn && n.kind != nFolder) || m.conn(n.conn).Kind != db.KindRedis {
@@ -3941,6 +3956,8 @@ func (m *model) View() string {
 	switch m.overlay {
 	case oLong:
 		return m.longView()
+	case oConn:
+		return m.connFormView()
 	case oPicker:
 		list := m.pickerMatches()
 		var b strings.Builder
@@ -4070,6 +4087,9 @@ func (m *model) View() string {
 			style = envStyle(c)
 			if d := m.dbOver[n.conn]; d != "" {
 				label += "/" + textutil.Printable(d, false)
+			}
+			if c.Source == db.SourceDB {
+				label += " (db)" // R59.1
 			}
 			if n.conn == t.conn {
 				label = "● " + label

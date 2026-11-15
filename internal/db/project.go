@@ -35,7 +35,12 @@ type Conn struct {
 	DB       string
 	User     string
 	Password string
+	// Source 는 접속을 읽은 곳이다. SourceDB 면 .dbtui/connections.json(R59), 비면 DataGrip .idea 다
+	Source string
 }
+
+// SourceDB 는 db 전용 접속 파일에서 읽은 접속 표시다(R59.1).
+const SourceDB = "db"
 
 type Project struct {
 	Dir      string
@@ -149,17 +154,11 @@ func LoadProject(dir string) (*Project, error) {
 			}
 			port = n
 		}
-		// .env 값은 URL 인코딩돼 있다(.lazysql.toml 시절 형식). 인코딩이 아닌 원문이면 그대로 쓴다.
-		prefix := "PG_"
-		if kind == KindRedis {
-			prefix = "REDIS_"
-		}
-		pw := env[prefix+EnvName(s.Name)+"_PASSWORD"]
-		if dec, err := url.QueryUnescape(pw); err == nil {
-			pw = dec
-		}
 		p.Conns = append(p.Conns, Conn{Name: s.Name, UUID: s.UUID, Group: s.Group, Kind: kind,
-			Host: m[1], Port: port, DB: m[3], User: users[s.UUID], Password: pw})
+			Host: m[1], Port: port, DB: m[3], User: users[s.UUID], Password: envPassword(env, kind, s.Name)})
+	}
+	if err := p.loadDBConns(env); err != nil {
+		return nil, err
 	}
 
 	var mp xmlMapping
@@ -210,6 +209,24 @@ func GroupOf(c Conn) string {
 		return "기타"
 	}
 	return c.Group
+}
+
+// PasswordKey 는 접속 비밀번호를 두는 .env 키다(PG_<이름>_PASSWORD·REDIS_<이름>_PASSWORD).
+func PasswordKey(kind Kind, name string) string {
+	prefix := "PG_"
+	if kind == KindRedis {
+		prefix = "REDIS_"
+	}
+	return prefix + EnvName(name) + "_PASSWORD"
+}
+
+// envPassword 는 .env 의 접속 비밀번호다. 값은 URL 인코딩돼 있다(.lazysql.toml 시절 형식). 인코딩이 아닌 원문이면 그대로 쓴다.
+func envPassword(env map[string]string, kind Kind, name string) string {
+	pw := env[PasswordKey(kind, name)]
+	if dec, err := url.QueryUnescape(pw); err == nil {
+		pw = dec
+	}
+	return pw
 }
 
 func EnvName(name string) string {

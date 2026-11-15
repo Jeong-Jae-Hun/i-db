@@ -299,7 +299,7 @@ func (cs *Clients) Close() {
 	}
 }
 
-// Forget 은 PostgreSQL 접속 uuid 의 풀과 편집기 세션을 닫고 칸을 비운다. 다음 PG 는 넘긴 Conn(바꾼 DB 등)으로 새로 연다(명세 R27.1).
+// Forget 은 접속 uuid 의 풀과 편집기 세션을 닫고 칸을 비운다. 다음 PG·Redis 는 넘긴 Conn(바꾼 DB, 고친 접속 등)으로 새로 연다(명세 R27.1·R59.3).
 // 칸 자체는 map 에 남긴다. lock 을 기다리던 호출이 지운 칸을 잡고 그 칸에 연결을 채우면 아무도 닫지 못해서다.
 // 실행 중인 문장이 ctx 안에 끝나지 않으면 아무것도 닫지 않고 오류를 돌려준다. 호출부는 실행을 먼저 취소한다.
 // 옛 PGConn 은 이후 편집기 실행이 errClosed, 풀 조회가 closed pool 오류로 끝난다. 고른 search_path 도 같이 버린다.
@@ -309,6 +309,18 @@ func (cs *Clients) Forget(ctx context.Context, uuid string) error {
 		return err
 	}
 	defer unlock()
+	if s.redis != nil {
+		if err := acquire(ctx, s.redis.sess.sem); err != nil {
+			return fmt.Errorf("editor session is busy: %w", err)
+		}
+		s.redis.sess.closed.Store(true)
+		if s.redis.sess.cl != nil {
+			_ = s.redis.sess.cl.Close() // 버리는 연결이라 닫기 오류로 할 일이 없다
+		}
+		_ = s.redis.cl.Close()
+		<-s.redis.sess.sem
+		s.redis = nil
+	}
 	if s.pg == nil {
 		return nil
 	}
