@@ -1210,7 +1210,7 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 		return m.openTable(t, n.conn, db.TableRef{Schema: n.schema, Table: n.label}, "")
 	}
 	if n.kind == nSource && n.openable && toggle {
-		return m.openSource(t, n)
+		return m.openSourceNode(t, n)
 	}
 	if n.kind == nKey && other && t.bound() {
 		t = m.newTab()

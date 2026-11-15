@@ -2,6 +2,7 @@ package obs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -49,7 +50,7 @@ func (p *prom) Children(ctx context.Context, path string) ([]source.Node, error)
 // Open 은 지표의 즉시값(vector)이다.
 func (p *prom) Open(ctx context.Context, path string, limit int) (*db.Result, error) {
 	if path == "" {
-		return nil, fmt.Errorf("prometheus: open needs a metric name")
+		return nil, errors.New("prometheus: open needs a metric name")
 	}
 	return p.query(ctx, "/api/v1/query", url.Values{"query": {path}, "time": {secs(p.now())}}, limitOf(limit, db.MaxRows, 0))
 }

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
@@ -90,6 +91,23 @@ func TestAllowedPath_읽기_경로만_허용한다(t *testing.T) {
 		{"GET", "_doc/_search", "", false},
 		{"GET", "logs", "", false},
 		{"GET", "/_search", "", false},
+		// 경로 우회: 빈 마디·./..·인코딩·제어 문자·시스템 인덱스
+		{"GET", "_cat/a/../..", "", false},
+		{"GET", "_cat/indices/../../_cluster", "", false},
+		{"GET", "_cat/indices/foo/bar", "", false},
+		{"GET", "_cat/in-dices", "", false},
+		{"GET", "../_search", "", false},
+		{"GET", "./_search", "", false},
+		{"GET", "logs//_search", "", false},
+		{"GET", ".opendistro_security/_search", "", false},
+		{"GET", "logs,.opendistro_security/_search", "", false},
+		{"GET", "_cat/indices/.kibana", "", false},
+		{"GET", "%2e%2e/_search", "", false},
+		{"GET", "logs%2F_doc/_search", "", false},
+		{"GET", "lo\tgs/_search", "", false},
+		{"GET", "lo\x00gs/_search", "", false},
+		{"GET", "lo\\gs/_search", "", false},
+		{"GET", "logs,-old/_search", "_search", true},
 	}
 	for _, c := range cases {
 		endpoint, ok := allowedPath(c.method, c.path)
@@ -387,5 +405,97 @@ func TestCell_큰_칸은_IsCappedCell_꼴로_자른다(t *testing.T) {
 	raw, _ := json.Marshal(strings.Repeat("가", db.MaxCellBytes))
 	if s := cell(raw); !db.IsCappedCell(s) {
 		t.Fatalf("잘린 칸으로 알아보지 못한다: len=%d", len(s))
+	}
+}
+
+func TestRun_size_from_은_문자열_실수_지수_중복까지_읽어_확인을_받는다(t *testing.T) {
+	srv, got := fakeServer(t, map[string]string{"GET /logs/_search": searchResp})
+	b := newBackend(t, db.Conn{URL: srv.URL})
+	need := map[string]string{
+		"GET logs/_search\n{\"size\":\"20000\"}":           "size 1만 초과",
+		"GET logs/_search\n{\"size\":1e5}":                 "size 1만 초과",
+		"GET logs/_search\n{\"size\":10000.5}":             "size 1만 초과",
+		"GET logs/_search\n{\"from\":\"9999\",\"size\":2}": "size 1만 초과",
+		"GET logs/_search?size=20&size=20000":              "읽을 수 없음",
+		"GET logs/_search?size=abc":                        "읽을 수 없음",
+		"GET logs/_search\n{\"size\":10,\"size\":20000}":   "읽을 수 없음",
+		"GET logs/_search?size=20\n{\"size\":20}":          "읽을 수 없음",
+		"GET logs/_search\n{\"size\":\"many\"}":            "읽을 수 없음",
+		"GET logs/_search\n{\"size\":\"NaN\"}":             "읽을 수 없음",
+		"GET logs/_search\n[1]":                            "읽을 수 없음",
+	}
+	for text, reason := range need {
+		_, err := b.Run(context.Background(), source.Query{Text: text})
+		if !errors.Is(err, source.ErrNeedsConfirm) || !strings.Contains(source.ConfirmReason(err), reason) {
+			t.Errorf("%q: err = %v, want ErrNeedsConfirm(%s)", text, err, reason)
+		}
+	}
+	if n := len(got()); n != 0 {
+		t.Fatalf("확인 전 %d번 나갔다", n)
+	}
+	for _, text := range []string{"GET logs/_search\n{\"size\":\"20\"}", "GET logs/_search\n{\"size\":2e3}", "GET logs/_search?size=100&from=10"} {
+		if _, err := b.Run(context.Background(), source.Query{Text: text}); err != nil {
+			t.Errorf("%q: %v, want 바로 보냄", text, err)
+		}
+	}
+}
+
+func TestRun_SQL_은_끝_세미콜론_뒤_다른_문장이나_쓰기_낱말을_거절한다(t *testing.T) {
+	srv, got := fakeServer(t, map[string]string{"POST /_plugins/_sql": `{"schema":[{"name":"a"}],"datarows":[[1]]}`})
+	b := newBackend(t, db.Conn{URL: srv.URL})
+	for _, text := range []string{
+		"SELECT * FROM logs; DELETE FROM logs",
+		"SELECT * FROM logs;; SELECT 1",
+		"SELECT * FROM (DELETE FROM logs)",
+		"select a from logs where b in (select c from x); drop table x",
+		"SELECT * FROM logs WHERE 1=1 /* x */ ; update logs set a=1",
+	} {
+		if _, err := b.Run(context.Background(), source.Query{Text: text}); !errors.Is(err, source.ErrWrite) {
+			t.Errorf("%q: err = %v, want ErrWrite", text, err)
+		}
+	}
+	if n := len(got()); n != 0 {
+		t.Fatalf("거절한 SQL 이 %d번 나갔다", n)
+	}
+	for _, text := range []string{
+		"SELECT * FROM logs WHERE msg = 'a; delete from x';",
+		"SELECT * FROM logs -- ; drop table x\n;",
+		"SELECT updated_at FROM logs ;  ",
+	} {
+		if _, err := b.Run(context.Background(), source.Query{Text: text}); err != nil {
+			t.Errorf("%q: %v, want 보냄", text, err)
+		}
+	}
+	if q := got()[1].body; strings.Contains(q, ";") {
+		t.Errorf("끝 ;·주석은 떼고 보내야 한다: %s", q)
+	}
+}
+
+func TestRedirect_를_따라가지_않고_오류로_본다(t *testing.T) {
+	var second, leaked int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&second, 1)
+		if r.Header.Get("Authorization") != "" {
+			atomic.AddInt32(&leaked, 1)
+		}
+	}))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/logs/_search" {
+			http.Redirect(w, r, "/_all/_delete_by_query", http.StatusFound) // 같은 호스트 다른 경로
+			return
+		}
+		http.Redirect(w, r, target.URL+"/x", http.StatusFound)
+	}))
+	defer srv.Close()
+	b := newBackend(t, db.Conn{URL: srv.URL, Auth: "basic", User: "reader", Password: "pw"})
+	for _, text := range []string{"GET logs/_search", "GET logs/_count"} {
+		_, err := b.Run(context.Background(), source.Query{Text: text})
+		if err == nil || !strings.Contains(err.Error(), "redirect not followed: 302") {
+			t.Errorf("%q: err = %v, want redirect not followed", text, err)
+		}
+	}
+	if atomic.LoadInt32(&second) != 0 || atomic.LoadInt32(&leaked) != 0 {
+		t.Fatalf("리다이렉트를 따라갔다: 두 번째 요청 %d, 인증 헤더 %d", second, leaked)
 	}
 }

@@ -139,7 +139,7 @@ func connCommand(ctx context.Context, sub string, o connCLIOpts, pos []string, s
 			return usageErr("%v", err)
 		}
 		c.Password = pw
-		return connTest(ctx, o, c, stdout)
+		return connTest(ctx, o, c, stdout, stderr)
 	}
 	if len(pos) != 1 {
 		return usageErr("접속 이름 하나가 필요함 (db help conn)")
@@ -163,7 +163,7 @@ func connCommand(ctx context.Context, sub string, o connCLIOpts, pos []string, s
 	case i < 0:
 		return usageErr("접속 없음: %s (db conns)", name)
 	case sub == "test":
-		return connTest(ctx, o, proj.Conns[i], stdout)
+		return connTest(ctx, o, proj.Conns[i], stdout, stderr)
 	case editRefusal(proj.Conns[i]) != "":
 		return usageErr("%s", editRefusal(proj.Conns[i]))
 	case sub == "edit":
@@ -277,6 +277,9 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 	if test.Password == "" {
 		test.Password = keep
 	}
+	if w := connWarning(c); w != "" {
+		fmt.Fprintln(stderr, "경고: "+w)
+	}
 	note := ""
 	if v, err := testConn(ctx, test); err != nil {
 		if !o.force {
@@ -302,9 +305,12 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 	return err
 }
 
-func connTest(ctx context.Context, o connCLIOpts, c db.Conn, stdout io.Writer) error {
+func connTest(ctx context.Context, o connCLIOpts, c db.Conn, stdout, stderr io.Writer) error {
 	if c.Env() == "prod" && !o.prod {
 		return refused("prod 접속은 --prod 가 필요함")
+	}
+	if w := connWarning(c); w != "" {
+		fmt.Fprintln(stderr, "경고: "+w)
 	}
 	v, err := testConn(ctx, c)
 	if err != nil {

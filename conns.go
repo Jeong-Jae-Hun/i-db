@@ -72,6 +72,7 @@ type connTestMsg struct {
 	seq     int
 	save    bool
 	version string
+	warn    string // connWarning(R60.1)
 	err     error
 }
 
@@ -414,13 +415,13 @@ func (m *model) testConnForm(save bool) tea.Cmd {
 		c.Password = m.conn(f.edit).Password
 	}
 	f.testSeq++
-	seq, life := f.testSeq, m.life
+	seq, life, warn := f.testSeq, m.life, connWarning(c)
 	f.testing, f.status, f.failed = true, "접속 시험 중…", false
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(life, connTestTimeout)
 		defer cancel()
 		v, err := testConn(ctx, c)
-		return connTestMsg{seq: seq, save: save, version: v, err: err}
+		return connTestMsg{seq: seq, save: save, version: v, warn: warn, err: err}
 	}
 }
 
@@ -430,14 +431,22 @@ func (m *model) connTested(msg connTestMsg) tea.Cmd {
 		return nil
 	}
 	f.testing = false
+	warn := ""
+	if msg.warn != "" {
+		warn = " · 경고: " + msg.warn
+	}
 	if msg.err != nil {
-		f.status, f.failed = "접속 실패: "+msg.err.Error(), true
+		f.status, f.failed = "접속 실패: "+msg.err.Error()+warn, true
 		f.askSave = msg.save
 		return nil
 	}
-	f.status, f.failed = "접속됨 ("+msg.version+")", false
+	f.status, f.failed = "접속됨 ("+msg.version+")"+warn, false
 	if msg.save {
-		return m.saveConnForm()
+		cmd := m.saveConnForm()
+		if msg.warn != "" && m.connForm == nil { // 저장하면 창이 닫혀 경고를 상태 줄로 옮긴다
+			m.status += " · 경고: " + msg.warn
+		}
+		return cmd
 	}
 	return nil
 }

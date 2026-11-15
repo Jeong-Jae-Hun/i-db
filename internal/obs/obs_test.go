@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -406,6 +407,7 @@ func TestAuth_지원하지_않는_인증과_잘못된_주소는_만들지_않는
 		{URL: "http://x", Auth: "sigv4"},
 		{URL: "localhost:3100"},
 		{URL: ""},
+		{URL: "http://mon:p@ss@x:3100"}, // 인증 없음인데 주소에 user:pass 를 조용히 버리지 않는다
 	} {
 		if _, err := NewLoki(c); err == nil {
 			t.Errorf("NewLoki(%q, %q) succeeded", c.URL, c.Auth)
@@ -514,5 +516,23 @@ func TestSplitDirective_첫_비어_있지_않은_줄만_지시로_본다(t *test
 		if key != tc.key || rest != tc.rest {
 			t.Errorf("splitDirective(%q) = %q, %q; want %q, %q", tc.in, key, rest, tc.key, tc.rest)
 		}
+	}
+}
+
+func TestRedirect_를_따라가지_않고_토큰을_다시_보내지_않는다(t *testing.T) {
+	var second atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { second.Add(1) }))
+	defer target.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer srv.Close()
+	p := newPromAt(t, srv.URL, db.Conn{Auth: "token", Password: "glsa_secret"})
+	_, err := p.Children(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "redirect not followed: 302") || strings.Contains(err.Error(), "glsa_secret") {
+		t.Fatalf("err = %v, want redirect not followed", err)
+	}
+	if n := second.Load(); n != 0 {
+		t.Fatalf("리다이렉트를 따라 %d번 더 보냈다", n)
 	}
 }

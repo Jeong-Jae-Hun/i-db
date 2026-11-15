@@ -81,8 +81,8 @@ func registerFake(t *testing.T, f *fakeSource) {
 	t.Helper()
 	old := map[db.Kind]func(context.Context, db.Conn) (source.Backend, error){}
 	for _, k := range db.SourceKinds {
-		old[k] = openSource[k]
-		openSource[k] = func(_ context.Context, c db.Conn) (source.Backend, error) {
+		old[k] = sourceOpeners[k]
+		sourceOpeners[k] = func(_ context.Context, c db.Conn) (source.Backend, error) {
 			f.mu.Lock()
 			f.news++
 			f.conn = c
@@ -93,9 +93,9 @@ func registerFake(t *testing.T, f *fakeSource) {
 	t.Cleanup(func() {
 		for k, fn := range old {
 			if fn == nil {
-				delete(openSource, k)
+				delete(sourceOpeners, k)
 			} else {
-				openSource[k] = fn
+				sourceOpeners[k] = fn
 			}
 		}
 	})
@@ -440,10 +440,10 @@ func TestSource_접속을_고치면_열린_Backend_를_닫는다(t *testing.T) {
 func TestTestConn_저장소는_Children_로_시험하고_오류에서_비밀값을_지운다(t *testing.T) {
 	c := db.Conn{Name: "graf", Kind: db.KindGrafana, URL: "https://g", Auth: "token", Password: "glsa_secret"}
 	// 등록 안 된 종류는 실제 Grafana 생성기를 잠시 빼서 본다(네트워크에 나가지 않게)
-	saved := openSource[db.KindGrafana]
-	delete(openSource, db.KindGrafana)
+	saved := sourceOpeners[db.KindGrafana]
+	delete(sourceOpeners, db.KindGrafana)
 	_, err0 := testConn(context.Background(), c)
-	openSource[db.KindGrafana] = saved
+	sourceOpeners[db.KindGrafana] = saved
 	if err0 == nil || !strings.Contains(err0.Error(), "not built in") {
 		t.Fatalf("등록 안 된 종류: %v", err0)
 	}
@@ -781,5 +781,125 @@ func TestConnCLI_저장소_접속을_더하고_시험한다(t *testing.T) {
 	out.Reset()
 	if code := runConnCLI(context.Background(), []string{"test", "graf", "-p", dir}, nil, false, &out, &errw); code != exitOK || !strings.Contains(out.String(), "접속됨 (Grafana · 2개)") {
 		t.Fatalf("test: %d %q", code, out.String())
+	}
+}
+
+// ─── 리뷰 반영 ───
+
+func TestSource_편집기_비싼_질의_확인은_까닭을_보인다(t *testing.T) {
+	f := newFake()
+	f.run = func(q source.Query) (*db.Result, error) {
+		if !q.Force {
+			return nil, source.NeedsConfirm("전체 스캔")
+		}
+		return &db.Result{Cols: []string{"pk"}, Rows: [][]string{{"x"}}}, nil
+	}
+	registerFake(t, f)
+	m := sourceModel(t)
+	m.setConn(m.cur(), 3)
+	editorRun(m, `SELECT * FROM "orders"`)
+	if m.overlay != oConfirm || m.yes == nil || m.yes.q != "비싼 질의: 전체 스캔" {
+		t.Fatalf("확인 글: overlay=%v yes=%+v", m.overlay, m.yes)
+	}
+}
+
+func TestCLI_저장소_비싼_질의_거절은_까닭을_싣는다(t *testing.T) {
+	f := newFake()
+	f.run = func(source.Query) (*db.Result, error) { return nil, source.NeedsConfirm("범위 7일 초과") }
+	registerFake(t, f)
+	dir := sourceCLIProject(t)
+	if code, _, errw := runCLITest(t, "", "logs", "-p", dir, "-c", "logs-stg", `{a="b"}`, "--since", "8d"); code != exitRefused ||
+		!strings.Contains(errw, "비싼 질의: 범위 7일 초과 (--force)") {
+		t.Fatalf("%d %q", code, errw)
+	}
+}
+
+func TestCLI_since_날짜는_3650일까지만_받는다(t *testing.T) {
+	var d durFlag
+	if err := d.Set("3650d"); err != nil || time.Duration(d) != 3650*24*time.Hour {
+		t.Fatalf("3650d: %v %v", err, time.Duration(d))
+	}
+	for _, s := range []string{"3651d", "200000d", "-1d"} {
+		if err := d.Set(s); err == nil {
+			t.Errorf("%s 는 오류여야 한다 (%v)", s, time.Duration(d))
+		}
+	}
+}
+
+func TestCLI_AWS_프로필이_prod_면_prod_플래그가_필요하다(t *testing.T) {
+	f := newFake()
+	registerFake(t, f)
+	dir := sourceCLIProject(t)
+	if _, err := db.AddConn(dir, db.Conn{Name: "orders", Kind: db.KindDynamoDB, Region: "ap-northeast-2", Profile: "prod-admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errw := runCLITest(t, "", "query", "-p", dir, "-c", "orders", `SELECT * FROM "t" WHERE pk = 'a'`); code != exitRefused || !strings.Contains(errw, "--prod") {
+		t.Fatalf("prod 프로필: %d %q", code, errw)
+	}
+	if f.news != 0 {
+		t.Fatal("prod 거절은 접속을 열기 전이다")
+	}
+}
+
+func TestSourcePool_접속_값이_바뀌면_닫고_다시_연다(t *testing.T) {
+	f := newFake()
+	registerFake(t, f)
+	p := newSourcePool()
+	defer p.close()
+	c := db.Conn{Name: "search", UUID: "u1", Kind: db.KindOpenSearch, URL: "https://s", Auth: "basic", User: "ro", Password: "old"}
+	for range 2 {
+		if _, err := p.get(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.news != 1 || f.closed != 0 {
+		t.Fatalf("같은 값은 다시 쓴다: news=%d closed=%d", f.news, f.closed)
+	}
+	c.Password = "new"
+	if _, err := p.get(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if f.news != 2 || f.closed != 1 || f.conn.Password != "new" {
+		t.Fatalf("비밀값이 바뀌면 새로 연다: news=%d closed=%d pw=%q", f.news, f.closed, f.conn.Password)
+	}
+}
+
+func TestConnWarning_평문_http_비밀번호와_AWS_밖_서명을_알린다(t *testing.T) {
+	cases := []struct {
+		c    db.Conn
+		want string
+	}{
+		{db.Conn{Kind: db.KindOpenSearch, URL: "http://search:9200", Auth: "basic"}, msgPlainHTTP},
+		{db.Conn{Kind: db.KindLoki, URL: "http://loki:3100", Auth: "token"}, msgPlainHTTP},
+		{db.Conn{Kind: db.KindGrafana, URL: "http://grafana"}, msgPlainHTTP},
+		{db.Conn{Kind: db.KindOpenSearch, URL: "https://search", Auth: "basic"}, ""},
+		{db.Conn{Kind: db.KindOpenSearch, URL: "http://search", Auth: "sigv4"}, ""},
+		{db.Conn{Kind: db.KindLoki, URL: "http://loki:3100"}, ""},
+		{db.Conn{Kind: db.KindDynamoDB, URL: "https://ddb.example.com"}, msgForeignSigV4},
+		{db.Conn{Kind: db.KindDynamoDB, URL: "https://dynamodb.evil-amazonaws.com"}, msgForeignSigV4},
+		{db.Conn{Kind: db.KindDynamoDB, URL: "http://localhost:8000"}, ""},
+		{db.Conn{Kind: db.KindDynamoDB, URL: "https://dynamodb.ap-northeast-2.amazonaws.com"}, ""},
+		{db.Conn{Kind: db.KindDynamoDB}, ""},
+	}
+	for _, c := range cases {
+		if got := connWarning(c.c); got != c.want {
+			t.Errorf("%s %s %s: %q, want %q", c.c.Kind, c.c.URL, c.c.Auth, got, c.want)
+		}
+	}
+}
+
+func TestConnCLI_평문_http_basic_은_경고를_찍는다(t *testing.T) {
+	registerFake(t, newFake())
+	dir := fakeCLIProject(t)
+	var out, errw strings.Builder
+	code := runConnCLI(context.Background(), []string{"add", "search", "-p", dir, "--kind", "opensearch", "--url", "http://ro:pw@search.internal"},
+		nil, false, &out, &errw)
+	if code != exitOK || !strings.Contains(errw.String(), "경고: "+msgPlainHTTP) {
+		t.Fatalf("add: %d %q %q", code, out.String(), errw.String())
+	}
+	errw.Reset()
+	if code := runConnCLI(context.Background(), []string{"test", "search", "-p", dir}, nil, false, &out, &errw); code != exitOK ||
+		!strings.Contains(errw.String(), msgPlainHTTP) {
+		t.Fatalf("test: %d %q", code, errw.String())
 	}
 }

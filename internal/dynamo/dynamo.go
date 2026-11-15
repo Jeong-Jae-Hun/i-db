@@ -26,13 +26,26 @@ import (
 
 // Backend 는 DynamoDB 접속 하나다.
 //
-// 테이블 Enter(Open)는 스캔이라 늘 source.ErrNeedsConfirm 을 돌려준다(R63.1). Open 에는 Force 가 없으므로
-// 확인받은 통합은 OpenForce 로 다시 부른다. source 패키지에 맞춘 선택 인터페이스로 꺼내 쓴다:
-//
-//	if f, ok := b.(interface{ OpenForce(context.Context, string, int) (*db.Result, error) }); ok { … }
+// 테이블 Enter(Open)는 스캔이라 늘 source.ErrNeedsConfirm 을 돌려준다(R63.1). 확인받은 통합은
+// `SELECT * FROM "테이블"` 을 Force 로 Run 한다.
 type Backend struct {
-	cl *dynamodb.Client
+	cl api
 }
+
+// api 는 Backend 가 부르는 DynamoDB 작업이다. 시험은 가짜로 페이지 이어 받기를 본다.
+type api interface {
+	dynamodb.ListTablesAPIClient
+	DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
+	ExecuteStatement(context.Context, *dynamodb.ExecuteStatementInput, ...func(*dynamodb.Options)) (*dynamodb.ExecuteStatementOutput, error)
+}
+
+// Run 이 이어 받는 상한이다. 거르기(WHERE 의 키 밖 조건)가 있으면 한 페이지(1MB 읽기)에 맞는 항목이 거의 없어도
+// NextToken 이 이어지므로, 행 상한만으로는 큰 테이블을 끝까지 읽는다. 페이지 수와 시간으로 함께 끊고 잘림으로 알린다.
+// 더 읽어야 하면 키 조건으로 좁히는 것이 답이다. 상한을 접속 설정으로 올리는 것은 필요할 때 한다.
+const (
+	maxPages   = 50
+	runTimeout = 60 * time.Second // ctx 에 기한이 없을 때만
+)
 
 // New 는 접속을 만든다. 자격 증명은 저장하지 않고 Profile(없으면 표준 체인)로 받는다(R60.1).
 // URL 이 있으면 그 주소로 보낸다(DynamoDB Local 등). 실제 연결은 첫 호출 때 한다.
@@ -52,6 +65,7 @@ func New(ctx context.Context, c db.Conn) (source.Backend, error) {
 		if c.URL != "" {
 			o.BaseEndpoint = aws.String(c.URL)
 		}
+		o.HTTPClient = source.HTTPClient() // 리다이렉트를 따라가지 않는다(3xx 는 SDK 가 오류로 낸다)
 	})
 	return &Backend{cl: cl}, nil
 }
@@ -122,40 +136,12 @@ func indexNode(table, kind, name string, ks []types.KeySchemaElement) source.Nod
 
 // ─── 실행 ───
 
-// Open 은 테이블 미리 보기다. 스캔이라 확인 없이는 보내지 않는다(R63.1). 확인 뒤에는 OpenForce.
-func (b *Backend) Open(_ context.Context, path string, _ int) (*db.Result, error) {
-	return nil, fmt.Errorf("%w: scan of table %q", source.ErrNeedsConfirm, path)
+// Open 은 테이블 미리 보기다. 스캔이라 확인 없이는 보내지 않는다(R63.1).
+func (b *Backend) Open(context.Context, string, int) (*db.Result, error) {
+	return nil, source.NeedsConfirm(fullScan)
 }
 
-// OpenForce 는 확인받은 테이블 미리 보기다. Scan 으로 앞 limit 개를 읽는다(0 이면 50).
-func (b *Backend) OpenForce(ctx context.Context, path string, limit int) (*db.Result, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	start := time.Now()
-	d, err := b.describe(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	var items []map[string]types.AttributeValue
-	in := &dynamodb.ScanInput{TableName: aws.String(path)}
-	for {
-		in.Limit = aws.Int32(int32(limit - len(items) + 1)) // 하나 더 받아 잘림을 가른다
-		out, err := b.cl.Scan(ctx, in)
-		if err != nil {
-			return nil, wrap("Scan", err)
-		}
-		items = append(items, out.Items...)
-		if len(items) > limit || out.LastEvaluatedKey == nil {
-			break
-		}
-		in.ExclusiveStartKey = out.LastEvaluatedKey
-	}
-	hash, rng := keyNames(d.KeySchema)
-	res := toResult(items, limit, []string{hash, rng})
-	res.Elapsed = time.Since(start)
-	return res, nil
-}
+const fullScan = "전체 스캔"
 
 // Run 은 PartiQL SELECT 만 보낸다. 다른 문장은 ErrWrite, 파티션 키 조건이 없으면 전체 스캔이라
 // Force 없이는 ErrNeedsConfirm 이다(R63.2). NextToken 을 이어 q.Limit(0 이면 1,000)행까지 받는다.
@@ -190,25 +176,47 @@ func (b *Backend) Run(ctx context.Context, q source.Query) (*db.Result, error) {
 		ok = hasKeyCondition(toks, pk)
 	}
 	if !ok && !q.Force {
-		return nil, fmt.Errorf("%w: no partition key condition (full scan)", source.ErrNeedsConfirm)
+		return nil, source.NeedsConfirm(fullScan)
 	}
-	var items []map[string]types.AttributeValue
-	in := &dynamodb.ExecuteStatementInput{Statement: aws.String(q.Text)}
-	for {
+	if _, has := ctx.Deadline(); !has {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, runTimeout)
+		defer cancel()
+	}
+	items, stop, err := b.pages(ctx, q.Text, limit)
+	if err != nil {
+		return nil, err
+	}
+	res := toResult(items, limit, keys)
+	if stop != "" {
+		res.Truncated, res.Text = true, stop
+	}
+	res.Elapsed = time.Since(start)
+	return res, nil
+}
+
+// pages 는 NextToken 을 이어 limit+1 개(잘림 가르기)까지 받는다. maxPages 나 ctx 기한에 닿으면 받은 데까지 돌려주고
+// stop 에 까닭을 싣는다. 받은 것이 없는데 기한이 지났으면 오류다.
+func (b *Backend) pages(ctx context.Context, stmt string, limit int) (items []map[string]types.AttributeValue, stop string, err error) {
+	in := &dynamodb.ExecuteStatementInput{Statement: aws.String(stmt)}
+	for page := 0; ; page++ {
+		if page == maxPages {
+			return items, fmt.Sprintf("페이지 %d개에서 멈춤 (키 조건으로 좁히세요)", maxPages), nil
+		}
 		in.Limit = aws.Int32(int32(limit - len(items) + 1))
 		out, err := b.cl.ExecuteStatement(ctx, in)
 		if err != nil {
-			return nil, wrap("ExecuteStatement", err)
+			if len(items) > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return items, "시간 초과로 멈춤 (키 조건으로 좁히세요)", nil
+			}
+			return nil, "", wrap("ExecuteStatement", err)
 		}
 		items = append(items, out.Items...)
 		if len(items) > limit || out.NextToken == nil {
-			break
+			return items, "", nil
 		}
 		in.NextToken = out.NextToken
 	}
-	res := toResult(items, limit, keys)
-	res.Elapsed = time.Since(start)
-	return res, nil
 }
 
 func (b *Backend) describe(ctx context.Context, table string) (*types.TableDescription, error) {

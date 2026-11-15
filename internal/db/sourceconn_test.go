@@ -93,6 +93,18 @@ func TestEnv는_저장소_URL_호스트의_prod_마디도_본다(t *testing.T) {
 	}
 }
 
+func TestEnv는_AWS_프로필의_prod_도_본다(t *testing.T) {
+	cases := map[string]string{"prod-admin": "prod", "PRD": "prod", "billing_production": "prod", "stg": "local", "": "local"}
+	for profile, want := range cases {
+		if e := (Conn{Name: "orders", Kind: KindDynamoDB, Region: "ap-northeast-2", Profile: profile}).Env(); e != want {
+			t.Errorf("profile %q: %s, want %s", profile, e, want)
+		}
+	}
+	if e := (Conn{Name: "orders-stg", Kind: KindDynamoDB, Profile: "prod-admin"}).Env(); e != "prod" {
+		t.Errorf("이름이 stg 여도 프로필이 prod 면 prod: %s", e)
+	}
+}
+
 func TestAddConn_UpdateConn_RemoveConn은_저장소_비밀값을_종류별_키로_쓰고_옮긴다(t *testing.T) {
 	dir := writeFixture(t, false)
 	envPath := filepath.Join(dir, ".env")

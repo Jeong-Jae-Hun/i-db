@@ -119,15 +119,17 @@ func (c Conn) hostOf() string {
 // GoString 은 %#v 도 막는다.
 func (c Conn) GoString() string { return c.String() }
 
-// Env 는 접속 환경이다(R2.2·R6). 이름에 prod·prd 가 들거나 호스트의 . - 로 나눈 마디가 prod·prd 면 prod 다.
-// 호스트까지 보는 까닭: 이름에 환경이 없는 접속(redis01.prod.… 같은)도 prod 로 막아야 안전하다.
+// Env 는 접속 환경이다(R2.2·R6). 이름·AWS 프로필에 prod·prd 가 들거나 호스트의 . - 로 나눈 마디가 prod·prd 면 prod 다.
+// 호스트·프로필까지 보는 까닭: 이름에 환경이 없는 접속(redis01.prod.…, 프로필 prod-admin 인 DynamoDB)도 prod 로 막아야 안전하다.
+// 셋 가운데 하나라도 prod 면 prod 다.
 func (c Conn) Env() string {
 	// Shop-PROD 도 prod 로 본다(R6.1 안전 쪽). live 는 서비스 이름으로 흔히 쓰여 환경 토큰으로 넣지 않는다
-	name := strings.ToLower(c.Name)
+	name, profile := strings.ToLower(c.Name), strings.ToLower(c.Profile)
 	hostProd := slices.ContainsFunc(strings.FieldsFunc(strings.ToLower(c.hostOf()), func(r rune) bool { return r == '.' || r == '-' }),
 		func(t string) bool { return t == "prod" || t == "prd" })
 	switch {
-	case strings.Contains(name, "prod"), strings.Contains(name, "prd"), hostProd:
+	case strings.Contains(name, "prod"), strings.Contains(name, "prd"), hostProd,
+		strings.Contains(profile, "prod"), strings.Contains(profile, "prd"):
 		return "prod"
 	case strings.Contains(name, "stg"):
 		return "stg"

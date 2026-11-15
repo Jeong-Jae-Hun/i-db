@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,13 +30,8 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 )
 
-const (
-	openLimit = 50 // 트리 Enter 미리 보기 문서 수(R61.1)
-	// maxWindow 는 OpenSearch 기본 index.max_result_window 다. 넘는 size·from+size 는 확인을 받는다(R60.2)
-	maxWindow = 10000
-	// maxBody 는 응답 본문 상한이다. 결과 표는 MaxRows 행이라 이보다 큰 응답은 질의가 잘못된 것으로 본다
-	maxBody = 64 << 20
-)
+// maxWindow 는 OpenSearch 기본 index.max_result_window 다. 넘는 size·from+size 는 확인을 받는다(R60.2)
+const maxWindow = 10000
 
 type backend struct {
 	base     *url.URL
@@ -54,7 +51,7 @@ func New(c db.Conn) (source.Backend, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("opensearch: invalid url %q (need http(s)://host)", c.URL)
 	}
-	b := &backend{base: u, hc: &http.Client{Timeout: 2 * time.Minute}}
+	b := &backend{base: u, hc: source.HTTPClient()}
 	switch c.Auth {
 	case "":
 	case "basic":
@@ -122,12 +119,15 @@ func (b *backend) do(ctx context.Context, method, path string, body []byte) ([]b
 		return nil, fmt.Errorf("opensearch: %s", db.Redact(err.Error(), b.password))
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err := source.RedirectError(resp); err != nil {
+		return nil, fmt.Errorf("opensearch: %w", err)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, source.MaxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("opensearch: read response: %s", db.Redact(err.Error(), b.password))
 	}
-	if len(data) > maxBody {
-		return nil, fmt.Errorf("opensearch: response over %d bytes, narrow the query", maxBody)
+	if len(data) > source.MaxBody {
+		return nil, fmt.Errorf("opensearch: response over %d MiB, narrow the query", source.MaxBody>>20)
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("opensearch %d: %s", resp.StatusCode, db.Redact(errorText(data), b.password))
@@ -282,7 +282,7 @@ func flatten(out map[string]string, prefix string, props map[string]mappingProps
 
 func (b *backend) Open(ctx context.Context, path string, limit int) (*db.Result, error) {
 	if limit <= 0 {
-		limit = openLimit
+		limit = source.OpenLimit
 	}
 	index, _, _ := strings.Cut(path, "/")
 	start := time.Now()
@@ -324,9 +324,13 @@ func (b *backend) Run(ctx context.Context, q source.Query) (*db.Result, error) {
 }
 
 func (b *backend) runSQL(ctx context.Context, text string, limit int) (*db.Result, error) {
+	stmt, err := sqlStatement(text)
+	if err != nil {
+		return nil, err
+	}
 	// fetch_size 를 주면 플러그인 기본 상한(plugins.query.size_limit, 200행) 대신 첫 페이지로 limit 행까지 돌려준다.
 	// 다음 페이지 커서는 따라가지 않는다(행 상한이 곧 첫 페이지 크기다)
-	body, err := json.Marshal(map[string]any{"query": strings.TrimRight(strings.TrimSpace(text), "; \t\r\n"), "fetch_size": min(limit, maxWindow)})
+	body, err := json.Marshal(map[string]any{"query": stmt, "fetch_size": min(limit, maxWindow)})
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +367,29 @@ func (b *backend) runSQL(ctx context.Context, text string, limit int) (*db.Resul
 		res.Rows = append(res.Rows, row)
 	}
 	return res, nil
+}
+
+// sqlWriteWords 는 SQL 플러그인에 보내지 않을 쓰기 낱말이다. 문자열·주석 밖이면 어디 있든(하위 질의 포함) 거절한다.
+// 백틱 이름(`delete`)도 걸리지만 안전 쪽이다.
+var sqlWriteWords = []string{"delete", "update", "insert", "drop", "create", "alter", "truncate", "replace"}
+
+// sqlStatement 는 SELECT 한 문장을 보낼 글로 다듬는다. 끝의 ;·공백·주석은 떼고, 그 뒤에도 문자열·주석 밖에 ; 가 남거나
+// 쓰기 낱말이 있으면 source.ErrWrite 다(R61.2). 어휘는 db.MaskSQL(따옴표·주석 가리기)로 읽는다.
+// 단, MaskSQL 은 PostgreSQL 의 $태그$ 도 문자열로 본다. OpenSearch SQL 에는 없는 꼴이라 그 안에 숨긴 글은 플러그인이 문법 오류로 거절한다.
+func sqlStatement(text string) (string, error) {
+	masked := db.MaskSQL(text)
+	n := len(strings.TrimRight(masked, "; \t\r\n\f\v"))
+	masked = masked[:n]
+	if strings.Contains(masked, ";") {
+		return "", fmt.Errorf("%w: multiple statements", source.ErrWrite)
+	}
+	words := strings.FieldsFunc(strings.ToLower(masked), func(r rune) bool { return r > 0x7f || !db.IsIdentByte(byte(r)) })
+	for _, w := range words {
+		if slices.Contains(sqlWriteWords, w) {
+			return "", fmt.Errorf("%w: %s", source.ErrWrite, w)
+		}
+	}
+	return strings.TrimSpace(text[:n]), nil
 }
 
 // searchEndpoints 는 `<인덱스>/<끝>` 꼴로 GET 할 수 있는 읽기 끝점이다. POST 는 _search 만 받는다.
@@ -457,54 +484,93 @@ func parseRequest(text string) (method, path, body string, ok bool) {
 }
 
 // allowedPath 는 읽기로 허용한 경로인지와 결과 꼴을 가를 끝점 이름을 돌려준다.
-// GET: `_search`, `_cat/…`, `<인덱스>/_search|_count|_mapping`. POST: `_search`, `<인덱스>/_search`.
-// 인덱스 자리는 `_` 로 시작하면 안 된다(`_all` 만 받음). `_doc`·`_update`·`_bulk` 같은 API 를 인덱스로 착각하지 않게 한다.
+// GET: `_search`, `_cat/<이름>[/<인덱스>]`, `<인덱스>/_search|_count|_mapping`. POST: `_search`, `<인덱스>/_search`.
+// 마디는 비거나 `.`·`..`·`%`·제어 문자를 가질 수 없다(서버·프록시가 경로를 다시 풀어 다른 API 로 가는 것을 막는다).
 func allowedPath(method, p string) (string, bool) {
 	segs := strings.Split(p, "/")
-	if method != http.MethodGet && method != http.MethodPost {
+	if method != http.MethodGet && method != http.MethodPost || slices.ContainsFunc(segs, badSegment) {
 		return "", false
 	}
-	if len(segs) == 1 && segs[0] == "_search" {
+	switch {
+	case len(segs) == 1 && segs[0] == "_search":
 		return "_search", true
-	}
-	if method == http.MethodGet && len(segs) >= 2 && segs[0] == "_cat" && segs[1] != "" {
-		return "_cat", true
-	}
-	if len(segs) != 2 || segs[0] == "" || (strings.HasPrefix(segs[0], "_") && segs[0] != "_all") {
+	case segs[0] == "_cat":
+		ok := method == http.MethodGet && len(segs) <= 3 && len(segs) >= 2 && catName.MatchString(segs[1]) &&
+			(len(segs) == 2 || indexOK(segs[2]))
+		return "_cat", ok
+	case len(segs) != 2 || !indexOK(segs[0]):
 		return "", false
-	}
-	if method == http.MethodPost {
+	case method == http.MethodPost:
 		return "_search", segs[1] == "_search"
 	}
 	return segs[1], slices.Contains(searchEndpoints, segs[1])
 }
 
+var catName = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+func badSegment(s string) bool {
+	return s == "" || s == "." || s == ".." || strings.ContainsAny(s, "%\\") ||
+		strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f })
+}
+
+// indexOK 는 인덱스 자리(쉼표 목록)인지 본다. `_` 로 시작하면 안 되고(`_all` 만 받음) `_doc`·`_bulk` 같은 API 를
+// 인덱스로 착각하지 않게 한다. `.` 으로 시작하는 시스템 인덱스(`.opendistro_security` 등)는 받지 않는다(R61.2).
+func indexOK(s string) bool {
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimPrefix(part, "-") // 빼기 꼴(-logs-old)도 같은 규칙
+		if part == "" || strings.HasPrefix(part, ".") || strings.HasPrefix(part, "_") && part != "_all" {
+			return false
+		}
+	}
+	return true
+}
+
 // checkWindow 는 본문·질의 문자열의 size·from 이 maxWindow 를 넘으면 source.ErrNeedsConfirm 이다.
+// 숫자는 문자열("20")·실수(2e4)도 OpenSearch 가 받으므로 같이 읽는다. 읽을 수 없거나 같은 키가 둘이면
+// 서버가 어느 값을 쓸지 몰라 확인을 받는다(안전 쪽).
 func checkWindow(body string, params url.Values) error {
-	var w struct {
-		Size *int `json:"size"`
-		From *int `json:"from"`
-	}
+	vals := map[string][]string{}
 	if body != "" {
-		_ = json.Unmarshal([]byte(body), &w) // 본문이 객체가 아니면 서버가 오류를 낸다
+		keys, raws, err := orderedObject(json.RawMessage(body))
+		if err != nil {
+			return source.NeedsConfirm(unreadableWindow)
+		}
+		for i, k := range keys {
+			if k == "size" || k == "from" {
+				vals[k] = append(vals[k], jsonScalar(raws[i]))
+			}
+		}
 	}
-	size, from := 0, 0
-	if w.Size != nil {
-		size = *w.Size
+	window := map[string]float64{}
+	for _, k := range []string{"size", "from"} {
+		all := append(vals[k], params[k]...)
+		if len(all) > 1 {
+			return source.NeedsConfirm(unreadableWindow)
+		}
+		if len(all) == 0 {
+			continue
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(all[0]), 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+			return source.NeedsConfirm(unreadableWindow)
+		}
+		window[k] = v
 	}
-	if w.From != nil {
-		from = *w.From
-	}
-	if v, err := strconv.Atoi(params.Get("size")); err == nil {
-		size = v
-	}
-	if v, err := strconv.Atoi(params.Get("from")); err == nil {
-		from = v
-	}
-	if size > maxWindow || from+size > maxWindow {
-		return fmt.Errorf("%w: from+size %d exceeds %d", source.ErrNeedsConfirm, from+size, maxWindow)
+	if window["size"] > maxWindow || window["from"]+window["size"] > maxWindow {
+		return source.NeedsConfirm("size 1만 초과")
 	}
 	return nil
+}
+
+const unreadableWindow = "size·from 을 읽을 수 없음"
+
+// jsonScalar 는 JSON 문자열이면 풀어 쓴 값, 아니면 원문이다(숫자·불·객체는 ParseFloat 가 가른다).
+func jsonScalar(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return string(raw)
 }
 
 // ─── 결과 ───

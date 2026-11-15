@@ -41,8 +41,9 @@ func newLocal(t *testing.T, n int) (*Backend, string) {
 		t.Fatal(err)
 	}
 	b := sb.(*Backend)
+	cl := b.cl.(*dynamodb.Client) // 테이블 만들기·지우기는 Backend 가 쓰지 않는 작업이다
 	table := fmt.Sprintf("ddbtest-%d", time.Now().UnixNano())
-	_, err = b.cl.CreateTable(ctx, &dynamodb.CreateTableInput{
+	_, err = cl.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName:   aws.String(table),
 		BillingMode: types.BillingModePayPerRequest,
 		AttributeDefinitions: []types.AttributeDefinition{
@@ -64,7 +65,7 @@ func newLocal(t *testing.T, n int) (*Backend, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = b.cl.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: aws.String(table)})
+		_, _ = cl.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: aws.String(table)})
 	})
 	for i := range n {
 		pk := "u#1"
@@ -77,7 +78,7 @@ func newLocal(t *testing.T, n int) (*Backend, string) {
 			"status": &types.AttributeValueMemberS{Value: "open"},
 			"meta":   &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"n": &types.AttributeValueMemberN{Value: "1.0"}}},
 		}
-		if _, err := b.cl.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(table), Item: item}); err != nil {
+		if _, err := cl.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(table), Item: item}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -174,11 +175,10 @@ func TestDynamoLocal_작은_한도면_페이지를_이어_자르고_잘림을_�
 		t.Fatalf("거르기 Limit 2 = %d행 truncated=%v err=%v, want 2행 잘림", len(res.Rows), res.Truncated, err)
 	}
 
-	if res, err = b.OpenForce(ctx, table, 4); err != nil || len(res.Rows) != 4 || !res.Truncated || res.Cols[0] != "pk" {
-		t.Fatalf("OpenForce 4 = %v, err=%v, want pk 먼저 4행 잘림", res, err)
-	}
-	if res, err = b.OpenForce(ctx, table, 0); err != nil || len(res.Rows) != 7 || res.Truncated {
-		t.Fatalf("OpenForce 기본 50 = %v, err=%v, want 7행", res, err)
+	// 테이블 Enter 확인 뒤 화면이 보내는 전체 스캔(R63.1)
+	scanAll := source.Query{Text: fmt.Sprintf(`SELECT * FROM "%s"`, table), Force: true, Limit: 4}
+	if res, err = b.Run(ctx, scanAll); err != nil || len(res.Rows) != 4 || !res.Truncated || res.Cols[0] != "pk" {
+		t.Fatalf("전체 스캔 4 = %v, err=%v, want pk 먼저 4행 잘림", res, err)
 	}
 }
 

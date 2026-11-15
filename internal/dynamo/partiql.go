@@ -119,8 +119,11 @@ func target(toks []token) (table, index string, ok bool) {
 	return table, index, true
 }
 
-// hasKeyCondition 은 WHERE 가 파티션 키를 = 또는 IN 으로 고정하는지 본다. 맨 바깥 OR 로 갈린 가지마다
-// 조건이 있어야 하고, 괄호로 감싼 가지는 벗겨서 다시 본다. 판단이 서지 않으면 false(확인받기) 쪽으로 둔다.
+// hasKeyCondition 은 WHERE 가 파티션 키를 = 또는 IN 으로 고정하는지 본다. 괄호로 감싼 조건은 벗겨서 다시 본다.
+// 판단이 서지 않으면 false(확인받기) 쪽으로 둔다.
+//
+// OR 로 갈린 조건은 가지마다 키가 있어도(`pk = 'a' OR pk = 'b'`) 스캔으로 본다. AWS 문서는 스캔을 피하려면
+// 파티션 키를 = 또는 IN 으로 지정하라고만 하고 OR 가 Query 로 바뀌는지는 적지 않는다. 여러 값은 IN 으로 쓴다.
 func hasKeyCondition(toks []token, pk string) bool {
 	w := topLevel(toks, 0, "WHERE")
 	if w < 0 {
@@ -139,14 +142,8 @@ func hasKeyCondition(toks []token, pk string) bool {
 }
 
 func branchHasKey(toks []token, pk string) bool {
-	branches := splitTopLevel(toks, "OR")
-	if len(branches) > 1 {
-		for _, b := range branches {
-			if !branchHasKey(b, pk) {
-				return false
-			}
-		}
-		return true
+	if len(splitTopLevel(toks, "OR")) > 1 {
+		return false
 	}
 	if wrapped(toks) {
 		return branchHasKey(toks[1:len(toks)-1], pk)

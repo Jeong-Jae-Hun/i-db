@@ -3,6 +3,7 @@ package obs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -170,7 +171,7 @@ func (g *grafana) defaultDatasource(ctx context.Context) (datasource, error) {
 			}
 		}
 	}
-	return datasource{}, fmt.Errorf("grafana: no loki/prometheus datasource")
+	return datasource{}, errors.New("grafana: no loki/prometheus datasource")
 }
 
 // splitDirective 는 첫 비어 있지 않은 줄의 지시를 떼어 낸다. 지시가 없으면 key 는 "" 이고 text 는 그대로다.

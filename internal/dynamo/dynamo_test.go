@@ -3,11 +3,14 @@ package dynamo
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
@@ -135,5 +138,83 @@ func TestTableNodes_항목_수_키_인덱스를_보인다(t *testing.T) {
 	want := []string{"항목 수|≈42", "PK pk|S", "SK sk|N", "gsi byStatus|status", "lsi byDate|pk/date"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("nodes = %v, want %v", got, want)
+	}
+}
+
+// ─── 페이지 이어 받기 ───
+
+// fakeAPI 는 ExecuteStatement 마다 항목 perPage 개와 늘 NextToken 을 돌려준다(거르기로 거의 안 맞는 큰 테이블).
+type fakeAPI struct {
+	perPage  int
+	calls    int
+	deadline bool // 받은 ctx 에 기한이 있었는지
+	block    func(ctx context.Context, call int) error
+}
+
+func (f *fakeAPI) ListTables(context.Context, *dynamodb.ListTablesInput, ...func(*dynamodb.Options)) (*dynamodb.ListTablesOutput, error) {
+	return &dynamodb.ListTablesOutput{}, nil
+}
+
+func (f *fakeAPI) DescribeTable(_ context.Context, in *dynamodb.DescribeTableInput, _ ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
+	return &dynamodb.DescribeTableOutput{Table: &types.TableDescription{TableName: in.TableName,
+		KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}}}}, nil
+}
+
+func (f *fakeAPI) ExecuteStatement(ctx context.Context, _ *dynamodb.ExecuteStatementInput, _ ...func(*dynamodb.Options)) (*dynamodb.ExecuteStatementOutput, error) {
+	f.calls++
+	_, f.deadline = ctx.Deadline()
+	if f.block != nil {
+		if err := f.block(ctx, f.calls); err != nil {
+			return nil, err
+		}
+	}
+	out := &dynamodb.ExecuteStatementOutput{NextToken: aws.String("next")}
+	for i := range f.perPage {
+		out.Items = append(out.Items, map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: fmt.Sprint(f.calls, "-", i)}})
+	}
+	return out, nil
+}
+
+func TestRun_페이지가_끝없이_이어지면_상한에서_멈추고_잘림으로_알린다(t *testing.T) {
+	f := &fakeAPI{perPage: 0}
+	b := &Backend{cl: f}
+	res, err := b.Run(context.Background(), source.Query{Text: `SELECT * FROM "t" WHERE status = 'x'`, Force: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.calls != maxPages || !res.Truncated || !strings.Contains(res.Text, "페이지") {
+		t.Fatalf("calls=%d truncated=%v text=%q, want %d번에서 멈추고 잘림", f.calls, res.Truncated, res.Text, maxPages)
+	}
+	if !f.deadline {
+		t.Error("기한 없는 ctx 에도 기본 시간 상한을 걸어야 한다")
+	}
+}
+
+func TestRun_기한이_지나면_받은_데까지_잘림으로_돌려준다(t *testing.T) {
+	f := &fakeAPI{perPage: 1, block: func(ctx context.Context, call int) error {
+		if call < 3 {
+			return nil
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	b := &Backend{cl: f}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	res, err := b.Run(ctx, source.Query{Text: `SELECT * FROM "t"`, Force: true, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 2 || !res.Truncated || !strings.Contains(res.Text, "시간") {
+		t.Fatalf("rows=%d truncated=%v text=%q, want 2행 잘림·시간 초과", len(res.Rows), res.Truncated, res.Text)
+	}
+}
+
+func TestRun_받은_것_없이_기한이_지나면_오류다(t *testing.T) {
+	f := &fakeAPI{block: func(ctx context.Context, _ int) error { <-ctx.Done(); return ctx.Err() }}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := (&Backend{cl: f}).Run(ctx, source.Query{Text: `SELECT * FROM "t"`, Force: true}); err == nil {
+		t.Fatal("받은 항목이 없으면 오류여야 한다")
 	}
 }

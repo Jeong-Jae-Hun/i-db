@@ -12,10 +12,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 )
 
-const (
-	lokiMaxLimit = 5000 // R62.2 Loki 서버 상한
-	openLines    = 100  // R62.1 라벨 값 Enter 는 최근 100줄
-)
+const lokiMaxLimit = 5000 // R62.2 Loki 서버 상한
 
 type loki struct {
 	c   *client
@@ -35,7 +32,7 @@ func NewLoki(c db.Conn) (source.Backend, error) {
 // (라벨 이름에는 '/' 가 올 수 없어 첫 '/' 로 가른다).
 func (l *loki) Children(ctx context.Context, path string) ([]source.Node, error) {
 	end := l.now()
-	params := url.Values{"start": {nanos(end.Add(-defaultRange))}, "end": {nanos(end)}}
+	params := url.Values{"start": {nanos(end.Add(-source.DefaultRange))}, "end": {nanos(end)}}
 	if path == "" {
 		var names []string
 		if err := l.c.getData(ctx, "/loki/api/v1/labels", params, &names); err != nil {
@@ -67,7 +64,7 @@ func (l *loki) Open(ctx context.Context, path string, limit int) (*db.Result, er
 	if !ok || label == "" {
 		return nil, fmt.Errorf("loki: open needs label/value, got %q", path)
 	}
-	return l.Run(ctx, source.Query{Text: "{" + label + "=" + strconv.Quote(value) + "}", Limit: limitOf(limit, openLines, 0)})
+	return l.Run(ctx, source.Query{Text: "{" + label + "=" + strconv.Quote(value) + "}", Limit: limitOf(limit, source.LokiOpenLimit, 0)})
 }
 
 // Run 은 LogQL 을 query_range 로 보낸다(backward, 최신 먼저). 로그 질의는 서버 limit 으로, 지표 질의는 받은 뒤 행을 자른다.

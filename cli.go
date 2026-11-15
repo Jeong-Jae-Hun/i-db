@@ -124,15 +124,18 @@ func (p paramFlag) Set(s string) error {
 }
 
 // durFlag 는 --since·--until 값이다. Go 기간 꼴(1h·15m)에 더해 날짜(7d)를 받는다.
+// 날짜는 maxFlagDays(10년)까지다. 더 크면 time.Duration(약 292년)을 넘쳐 음수·작은 범위로 바뀔 수 있다.
 type durFlag time.Duration
+
+const maxFlagDays = 3650
 
 func (d *durFlag) String() string { return time.Duration(*d).String() }
 
 func (d *durFlag) Set(s string) error {
 	if n, ok := strings.CutSuffix(s, "d"); ok {
 		days, err := strconv.Atoi(n)
-		if err != nil || days < 0 {
-			return fmt.Errorf("invalid duration %q", s)
+		if err != nil || days < 0 || days > maxFlagDays {
+			return fmt.Errorf("invalid duration %q (days 0..%d)", s, maxFlagDays)
 		}
 		*d = durFlag(time.Duration(days) * 24 * time.Hour)
 		return nil
@@ -1004,7 +1007,7 @@ func runSourceCommand(ctx context.Context, o cliOpts, proj *db.Project, kind db.
 		case errors.Is(err, source.ErrWrite):
 			return nil, refused(msgReadOnlySource)
 		case errors.Is(err, source.ErrNeedsConfirm):
-			return nil, refused(msgExpensive + " (--force)")
+			return nil, refused(sourceErrText(err) + " (--force)")
 		}
 		return nil, err
 	}
