@@ -101,7 +101,7 @@ func runStatus(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Cli
 				ok, lat = strconv.FormatBool(*r.OK), strconv.FormatInt(r.LatencyMS, 10)
 				parts := make([]string, len(r.Metrics))
 				for i, x := range r.Metrics {
-					parts[i] = x.Name + " " + x.Value
+					parts[i] = strings.TrimSpace(x.Name + " " + x.Value)
 					if x.Warn {
 						parts[i] += " !"
 					}

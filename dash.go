@@ -410,7 +410,7 @@ func dashMetrics(d *dashState, c db.Conn) string {
 	}
 	parts := make([]string, len(h.Metrics))
 	for i, x := range h.Metrics {
-		parts[i] = textutil.Printable(x.Name+" "+x.Value, false)
+		parts[i] = textutil.Printable(x.String(), false)
 		if x.Warn {
 			parts[i] = dashWarnStyle.Render(parts[i])
 		}
