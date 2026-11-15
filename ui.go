@@ -93,6 +93,7 @@ const (
 	nFolder  // Redis 키 이름공간(`user:`)
 	nQueries // 쿼리 파일 묶음(R43). 접속 아래 `쿼리 (N)` 이거나 트리 맨 아래 `쿼리 (접속 없음)`
 	nFile    // queries/ 파일 하나. key 는 프로젝트 상대 경로다
+	nSource  // 읽기 전용 저장소 노드(R60). key 는 source.Node.Path 다
 )
 
 const (
@@ -207,6 +208,7 @@ var helpSections = []struct {
 		{"Ctrl+U", "사용자 한눈에 보기 (이메일·uid·id·닉네임으로 여러 DB 조회)", "ctrl+u"},
 		{"Alt+C", "같은 쿼리 다른 접속에서 비교 (기본 stg↔prod)", "alt+c"},
 		{"Ctrl+L", "prod 쓰기 잠금 열기·닫기 (탭 접속, DB_PROD_UNLOCK_MIN 분)", "ctrl+l"},
+		{"Ctrl+]", "Loki·Prometheus 범위 15m·1h·6h·24h·7d (탭마다)", "ctrl+]"},
 		{"Ctrl+C", "실행 취소, 실행 중이 아니면 종료", "ctrl+c"},
 		{"Ctrl+← / Ctrl+→", "트리 폭 (트리·결과 포커스, 다음에도 그 크기)", "ctrl+right"},
 		{"Ctrl+↑ / Ctrl+↓", "편집기 높이 (트리·결과 포커스, 다음에도 그 크기)", "ctrl+down"},
@@ -262,6 +264,7 @@ var helpSections = []struct {
 		{"Enter (테이블)", "테이블 보기 (서버 페이지·거르기·정렬)", "enter"},
 		{"Enter (접속)", "펼치기 · 그 접속을 쓰는 탭이 없으면 최근 파일 열기", "enter"},
 		{"Enter (쿼리 파일)", "파일 열기 (이미 열린 탭이면 그 탭으로)", "enter"},
+		{"Enter (저장소)", "인덱스·라벨 값·지표·테이블 미리 보기 (OpenSearch·Loki·Prometheus·Grafana·DynamoDB, 펼치기는 l)", "enter"},
 		{"d / D", "테이블 구조 / DDL 을 새 탭에", "d"},
 		{"I", "CSV 가져오기 (테이블)", "I"},
 		{"A / L / S", "활동 / 잠금 / 테이블 크기 (PostgreSQL 접속)", "A"},
@@ -271,7 +274,7 @@ var helpSections = []struct {
 		{"X", "패턴 맞는 키 일괄 삭제 (Redis 접속·이름공간, esc 멈춤)", "X"},
 		{"N", "새 접속 (URL 붙여넣기 · Ctrl+T 시험, .dbtui/connections.json)", "N"},
 		{"E", "접속 고치기 (db 전용 접속)", "E"},
-		{"X (PostgreSQL 접속)", "접속 지우기 (db 전용 접속, .env 비밀번호도)", ""},
+		{"X (PostgreSQL·저장소 접속)", "접속 지우기 (db 전용 접속, .env 비밀번호도)", ""},
 		{"Alt+X", "접속 지우기 (db 전용 접속, Redis 포함)", "alt+X"},
 		{"=", "다른 접속과 스키마 비교 (PostgreSQL 접속·스키마)", "="},
 		{"/", "거르기 (Redis 키는 SCAN 패턴)", "/"},
@@ -358,6 +361,10 @@ type node struct {
 	gen      int // 자식 읽기 요청 세대. 늦게 온 이전 응답을 버린다
 	children []*node
 	parent   *node
+	// nSource 만 쓴다(R60): 오른쪽 흐린 글, Enter 로 Open 할 수 있는지, 펼칠 자식이 있는지
+	info     string
+	openable bool
+	hasKids  bool
 }
 
 type row struct {
@@ -391,6 +398,7 @@ type resultMsg struct {
 	changes *db.ChangeSet     // rkSubmit: 낸 묶음. 성공하면 되돌리기 묶음을 쌓는다(R50)
 	undo    *undoEntry        // rkSubmit: 되돌리기로 낸 묶음. 성공하면 탭에서 뺀다
 	params  map[string]string // 파라미터 실행의 이름 → 값. 성공하면 기억한다(R55)
+	retry   *pendingRun       // 읽기 전용 저장소의 비싼 질의를 확인 뒤 다시 보낼 실행(R60.2)
 }
 
 // redisValueMsg 는 값 편집기에 넣을 키 하나를 읽은 결과다.
@@ -586,6 +594,8 @@ type pendingRun struct {
 	changes  *db.ChangeSet     // rkSubmit 이 낸 묶음(R50)
 	undo     *undoEntry        // rkSubmit 이 되돌리기 묶음을 낸다(R50)
 	params   map[string]string // 파라미터 실행의 이름 → 값(R55)
+	// 읽기 전용 저장소가 ErrNeedsConfirm 을 돌려주면 확인 뒤 대신 시작할 실행(Force, R60.2)
+	retry *pendingRun
 }
 
 // paramState 는 :name 자리마다 값을 묻는 중인 실행이다. run.exec 는 값을 다 받은 뒤 만든다.
@@ -674,9 +684,10 @@ type queryTab struct {
 	userText bool
 	// 세션을 되살릴 때 파일이 바뀌어 갈라 둔 `(저장 안 한 글)` 탭의 원래 파일. 끝낼 때 그 옆 충돌 사본에 저장한다
 	conflictOf string
-	name       string       // 사용자가 바꾼 탭 이름(R57). 비면 제목·파일 이름이다
-	pinned     bool         // 고정한 탭(R57). 탭 줄 앞에 모이고 닫을 때 묻는다
-	undo       []*undoEntry // 제출 되돌리기 묶음, 마지막이 가장 최근(R50)
+	name       string        // 사용자가 바꾼 탭 이름(R57). 비면 제목·파일 이름이다
+	pinned     bool          // 고정한 탭(R57). 탭 줄 앞에 모이고 닫을 때 묻는다
+	undo       []*undoEntry  // 제출 되돌리기 묶음, 마지막이 가장 최근(R50)
+	since      time.Duration // Loki·Prometheus 범위(R62.2). 0 이면 1h
 }
 
 // completer 는 편집기 자동완성 함수다. 탭의 접속이 바뀌어도 부를 때 다시 읽도록 탭을 가리킨다.
@@ -709,6 +720,7 @@ const (
 type model struct {
 	proj    *db.Project
 	clients *db.Clients
+	sources *sourcePool     // 읽기 전용 저장소 Backend(R60)
 	life    context.Context // 종료하면 끝나는 컨텍스트. 트리 조회·실행이 모두 여기서 갈라진다
 	stop    context.CancelFunc
 	roots   []*node
@@ -802,7 +814,7 @@ type model struct {
 
 func newModel(p *db.Project) *model {
 	life, stop := context.WithCancel(context.Background())
-	m := &model{proj: p, clients: db.NewClients(), life: life, stop: stop, input: textinput.New(),
+	m := &model{proj: p, clients: db.NewClients(), sources: newSourcePool(), life: life, stop: stop, input: textinput.New(),
 		patterns: map[int]string{}, inTx: map[int]bool{}, catalogs: map[int]*complete.Catalog{}, catGen: map[int]int{},
 		manual: map[int]bool{}, txSince: map[int]time.Time{}, dbOver: map[int]string{}, dbOrig: map[int]string{}, schemaOf: map[int]string{},
 		treeW: defaultTreeWidth, mac: keys.MacStyle(false),
@@ -819,6 +831,9 @@ func newModel(p *db.Project) *model {
 func (m *model) Init() tea.Cmd { return m.boot }
 
 func (n *node) expandable() bool {
+	if n.kind == nSource {
+		return n.hasKids
+	}
 	return n.kind == nGroup || n.kind == nConn || n.kind == nSchema || n.kind == nFolder || n.kind == nQueries
 }
 
@@ -1113,6 +1128,7 @@ func (m *model) expand(n *node) tea.Cmd {
 		pattern = "*"
 	}
 	kind, label, idx, clients, life := n.kind, n.label, n.conn, m.clients, m.life
+	sources, path := m.sources, n.key
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(life, loadTimeout)
 		defer cancel()
@@ -1141,6 +1157,19 @@ func (m *model) expand(n *node) tea.Cmd {
 			}
 			for _, t := range ts {
 				out = append(out, &node{kind: nTable, label: t, schema: label, conn: idx, parent: n})
+			}
+		case c.Kind.IsSource():
+			b, err := sources.get(ctx, c)
+			if err != nil {
+				return childrenMsg{n: n, gen: gen, err: err}
+			}
+			ns, err := b.Children(ctx, path)
+			if err != nil {
+				return childrenMsg{n: n, gen: gen, err: err}
+			}
+			for _, sn := range ns {
+				out = append(out, &node{kind: nSource, label: sn.Name, key: sn.Path, info: sn.Info, openable: sn.Openable,
+					hasKids: sn.HasChildren, loaded: !sn.HasChildren, conn: idx, parent: n})
 			}
 		case kind == nConn && c.Kind == db.KindRedis:
 			rc, err := clients.Redis(ctx, c)
@@ -1179,6 +1208,9 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 			t = m.newTab()
 		}
 		return m.openTable(t, n.conn, db.TableRef{Schema: n.schema, Table: n.label}, "")
+	}
+	if n.kind == nSource && n.openable && toggle {
+		return m.openSource(t, n)
 	}
 	if n.kind == nKey && other && t.bound() {
 		t = m.newTab()
@@ -1295,6 +1327,9 @@ func (m *model) run(text string) tea.Cmd {
 		return nil
 	}
 	c := m.conn(t.conn)
+	if c.Kind.IsSource() {
+		return m.runSource(t, text)
+	}
 	s := script{conn: c, out: &[]*db.Result{}}
 	readOnly := true
 	var danger []string
@@ -1527,7 +1562,7 @@ func (m *model) start(p pendingRun) tea.Cmd {
 		defer cancel()
 		res, err := exec(ctx)
 		msg := resultMsg{tab: id, seq: seq, conn: p.conn, sql: p.sql, stmts: p.stmts, res: res, err: err, kind: p.kind, key: p.key, old: p.old,
-			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params}
+			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params, retry: p.retry}
 		if p.all != nil {
 			msg.all = *p.all
 		}
@@ -2205,6 +2240,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resultMsg:
 		// ─── 실행 결과 ───
 		// 실행 하나의 결과를 기록하고 종류에 맞게 탭에 붙인다.
+		if cmd, ok := m.sourceRefused(msg); ok {
+			return m, cmd
+		}
 		c := m.conn(msg.conn)
 		e := history.Entry{Time: time.Now(), Conn: c.Name, SQL: db.Redact(db.MaskSecrets(msg.sql), c.Password)}
 		if msg.err != nil {
@@ -2284,7 +2322,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t.viewConn, t.viewDB = msg.conn, c.DB
 			// 전체 내보내기(R33.1)는 지금 보이는 표를 만든 문장만 다시 보낸다. 실패·취소한 문장이나 계획은 남기지 않는다
 			t.exportSQL, t.exportConn = "", msg.conn
-			if msg.kind == rkGrid && msg.err == nil && !t.cancelled {
+			if msg.kind == rkGrid && msg.err == nil && !t.cancelled && c.Kind == db.KindPG {
 				t.exportSQL = msg.sql
 			}
 			if msg.kind != rkTable {
@@ -3115,6 +3153,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case "ctrl+]":
+		m.cycleRange(t)
+		return m, nil
 	case "ctrl+r", "f5":
 		cmd := tea.Batch(m.run(m.target(t)), m.ensureCatalog(t.conn))
 		// 파일 없는 탭의 첫 실행은 글을 queries/ 에 저장하고 탭을 그 파일에 잇는다(R45.1). 실행 안내 앞에 경로를 보인다
@@ -3170,6 +3211,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 한계: 편집기에 범위 바꾸기 API 가 없어 SetValue 로 넣으므로 되돌리기 기록과 커서 위치가 처음으로 돌아간다.
 		if t.conn >= 0 && m.conn(t.conn).Kind == db.KindRedis {
 			m.status = "Redis 명령은 정렬하지 않음"
+			return m, nil
+		}
+		if t.conn >= 0 && m.conn(t.conn).Kind.IsSource() {
+			m.status = "SQL 정렬은 " + msgUnsupported
 			return m, nil
 		}
 		text := t.editor.Value()
@@ -3835,6 +3880,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "A·L·S(운영 조회)는 접속 줄에서 누르세요"
 			return m, nil
 		}
+		if m.conn(n.conn).Kind.IsSource() {
+			m.status = "A·L·S(운영 조회)는 " + msgUnsupported
+			return m, nil
+		}
 		t := m.cur()
 		if n.conn != t.conn && t.bound() {
 			t = m.newTab()
@@ -3969,7 +4018,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.removeConnKey(n)
 	case "X":
 		// PostgreSQL 접속 줄의 X 는 db 전용 접속 지우기다(R59.3). Redis 접속 줄은 아래 패턴 삭제다
-		if n != nil && n.kind == nConn && m.conn(n.conn).Kind == db.KindPG {
+		if n != nil && n.kind == nConn && (m.conn(n.conn).Kind == db.KindPG || m.conn(n.conn).Kind.IsSource()) {
 			return m, m.removeConnAsk(n.conn)
 		}
 		// ─── Redis 패턴 일괄 삭제 (R42) ───
@@ -4214,6 +4263,10 @@ func (m *model) View() string {
 			}
 		case nInfo:
 			style = dimStyle
+		case nSource:
+			if n.info != "" {
+				label += " " + dimStyle.Render(textutil.Printable(n.info, false))
+			}
 		}
 		if i == m.cursor {
 			// 포커스가 없을 때도 선택 줄을 옅게 보여 줘야 마우스로 고른 줄을 놓치지 않는다
@@ -4254,6 +4307,10 @@ func (m *model) View() string {
 	edInfo := ""
 	if t.file != "" {
 		edInfo = textutil.Printable(t.file, false)
+	}
+	// Loki·Prometheus 탭은 편집기 위 줄(테두리)에 범위를 보인다(R62.2)
+	if t.conn >= 0 && usesRange(m.conn(t.conn).Kind) {
+		edInfo = strings.TrimSuffix("최근 "+rangeLabel(t.since)+" · "+m.label("Ctrl+]")+" · "+edInfo, " · ")
 	}
 
 	// ─── 결과 ───

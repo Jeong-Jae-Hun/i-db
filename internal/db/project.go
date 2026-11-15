@@ -31,6 +31,15 @@ const (
 
 type Kind string
 
+// SourceKinds 는 R60~R63 읽기 전용 저장소 종류다. 접속 창이 PostgreSQL·Redis 뒤에 이 순서로 돈다.
+var SourceKinds = []Kind{KindOpenSearch, KindLoki, KindPrometheus, KindGrafana, KindDynamoDB}
+
+// IsSource 는 읽기 전용 저장소(R60) 종류인지다. 이 종류는 internal/source 의 Backend 로만 다룬다.
+func (k Kind) IsSource() bool { return slices.Contains(SourceKinds, k) }
+
+// IsHTTP 는 url 칸이 필요한 HTTP 저장소(OpenSearch·Loki·Prometheus·Grafana)인지다.
+func (k Kind) IsHTTP() bool { return k.IsSource() && k != KindDynamoDB }
+
 type Conn struct {
 	Name     string
 	UUID     string
@@ -83,7 +92,28 @@ type xmlMapping struct {
 
 // String 은 %v·%+v 로 찍혀도 비밀번호가 나오지 않게 한다.
 func (c Conn) String() string {
+	if c.Kind.IsSource() {
+		return fmt.Sprintf("%s(%s %s auth=%s region=%s user=%s)", c.Name, c.Kind, redactURL(c.URL), c.Auth, c.Region, c.User)
+	}
 	return fmt.Sprintf("%s(%s %s:%d/%s user=%s)", c.Name, c.Kind, c.Host, c.Port, c.DB, c.User)
+}
+
+// redactURL 은 URL 의 비밀번호 자리를 가린다. ValidateConn 이 사용자 정보가 든 URL 을 막지만 손으로 고친 파일도 찍힐 수 있다.
+func redactURL(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return u.Redacted()
+	}
+	return "(invalid url)"
+}
+
+// hostOf 는 환경 판정에 쓸 호스트다. 읽기 전용 저장소는 Host 가 비어 URL 의 호스트를 본다(R60.2).
+func (c Conn) hostOf() string {
+	if c.Host == "" && c.URL != "" {
+		if u, err := url.Parse(c.URL); err == nil {
+			return u.Hostname()
+		}
+	}
+	return c.Host
 }
 
 // GoString 은 %#v 도 막는다.
@@ -94,7 +124,7 @@ func (c Conn) GoString() string { return c.String() }
 func (c Conn) Env() string {
 	// Shop-PROD 도 prod 로 본다(R6.1 안전 쪽). live 는 서비스 이름으로 흔히 쓰여 환경 토큰으로 넣지 않는다
 	name := strings.ToLower(c.Name)
-	hostProd := slices.ContainsFunc(strings.FieldsFunc(strings.ToLower(c.Host), func(r rune) bool { return r == '.' || r == '-' }),
+	hostProd := slices.ContainsFunc(strings.FieldsFunc(strings.ToLower(c.hostOf()), func(r rune) bool { return r == '.' || r == '-' }),
 		func(t string) bool { return t == "prod" || t == "prd" })
 	switch {
 	case strings.Contains(name, "prod"), strings.Contains(name, "prd"), hostProd:
@@ -228,18 +258,40 @@ func GroupOf(c Conn) string {
 	return c.Group
 }
 
-// PasswordKey 는 접속 비밀번호를 두는 .env 키다(PG_<이름>_PASSWORD·REDIS_<이름>_PASSWORD).
+// secretPrefix 는 종류별 .env 비밀값 키 접두다(R59.1·R60.1). DynamoDB 는 자격 증명을 profile 로 받아 키가 없다.
+var secretPrefix = map[Kind]string{KindPG: "PG_", KindRedis: "REDIS_", KindOpenSearch: "OS_", KindLoki: "LOKI_",
+	KindPrometheus: "PROM_", KindGrafana: "GRAFANA_"}
+
+// PasswordKey 는 접속 비밀값을 두는 .env 키다(PG_<이름>_PASSWORD·REDIS_·OS_·LOKI_·PROM_, Grafana 는 GRAFANA_<이름>_TOKEN).
+// 비밀값이 없는 종류(DynamoDB)는 빈 글이다. 모르는 종류는 예전처럼 PG_ 로 둔다.
 func PasswordKey(kind Kind, name string) string {
-	prefix := "PG_"
-	if kind == KindRedis {
-		prefix = "REDIS_"
+	if kind == KindDynamoDB {
+		return ""
 	}
-	return prefix + EnvName(name) + "_PASSWORD"
+	prefix, ok := secretPrefix[kind]
+	if !ok {
+		prefix = "PG_"
+	}
+	suffix := "_PASSWORD"
+	if kind == KindGrafana {
+		suffix = "_TOKEN"
+	}
+	return prefix + EnvName(name) + suffix
+}
+
+// sameSecretKey 는 두 접속이 .env 비밀값 키를 나눠 쓰게 되는지다. 키가 없는 종류는 겹치지 않는다.
+func sameSecretKey(a, b Conn) bool {
+	k := PasswordKey(a.Kind, a.Name)
+	return k != "" && k == PasswordKey(b.Kind, b.Name)
 }
 
 // envPassword 는 .env 의 접속 비밀번호다. 값은 URL 인코딩돼 있다(.lazysql.toml 시절 형식). 인코딩이 아닌 원문이면 그대로 쓴다.
 func envPassword(env map[string]string, kind Kind, name string) string {
-	pw := env[PasswordKey(kind, name)]
+	key := PasswordKey(kind, name)
+	if key == "" {
+		return ""
+	}
+	pw := env[key]
 	if dec, err := url.QueryUnescape(pw); err == nil {
 		pw = dec
 	}

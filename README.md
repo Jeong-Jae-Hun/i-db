@@ -17,6 +17,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Redis: key browser, value editor for every type, TTL/rename, monitor (INFO, SLOWLOG, big keys), pattern bulk delete
 - `queries/` folder integration: files are attached to connections via DataGrip's `data_source_mapping.xml`, auto-save, session restore
 - Optional client-side decryption view and `enc('...')` expansion for AES-CBC values stored as `<iv hex>^|^<ciphertext hex>` (pgcrypto `encrypt_iv` compatible). Keys come from `.env` (`<GROUP>_AES_KEY`, `<GROUP>_AES_IV`); nothing is installed in your database. Without a key/IV, `enc(...)` is sent as a call to an existing `staticEncrypt(...)` function, so it only works if your database already has one
+- Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources) and DynamoDB in the same tree, editor and results grid (see Sources)
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
 ## Install
@@ -90,6 +91,31 @@ db conn rm app-stg2 --yes
 
 Passwords are only taken from `--url` or `--password-stdin` and never printed. `add` and `edit` test the connection first and refuse to save on failure unless `--force` is given (exit code 1). `rm` asks on a terminal and needs `--yes` otherwise. Connecting to a prod connection needs `--prod`, as with the other commands.
 
+### Sources
+
+OpenSearch, Loki, Prometheus, Grafana and DynamoDB connections are read-only and live only in `.dbtui/connections.json` (DataGrip sources are unchanged). Fields are `url` (DynamoDB: optional endpoint), `auth` (`basic`, `sigv4` for OpenSearch, `token` for Grafana, or none), `user`, and `region`/`profile` for SigV4 and DynamoDB. Secrets go to `.env` as `OS_<NAME>_PASSWORD`, `LOKI_<NAME>_PASSWORD`, `PROM_<NAME>_PASSWORD` or `GRAFANA_<NAME>_TOKEN`; AWS credentials are never stored and come from `profile` or the standard chain.
+
+```json
+[{"uuid":"…","name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"},
+ {"uuid":"…","name":"logs-stg","kind":"loki","url":"http://loki.stg.internal:3100"},
+ {"uuid":"…","name":"orders","kind":"dynamodb","region":"ap-northeast-2"}]
+```
+
+In the connection form the kind field cycles through all seven kinds and shows only the fields that kind needs; pasting an `https://user:pw@host:9200` URL fills url, user and password. In the tree, these connections expand lazily (indices and mapping fields, Loki labels and values, Prometheus metrics, Grafana data sources, DynamoDB tables and keys) with details dimmed on the right. `Enter` previews an index, label value, metric or table in a result tab, `l` expands, `r` reloads. `Ctrl+R` sends the editor text as the source's own query language (`GET idx/_search` + JSON body or `SELECT …` for OpenSearch, LogQL, PromQL, PartiQL `SELECT`). Anything that looks like a write is refused before sending (`읽기 전용 저장소라 보내지 않음`), and expensive queries (DynamoDB full scan, OpenSearch `size` over 10,000, Loki/Prometheus ranges over 7 days) ask `비싼 질의: y/N` first. Loki/Prometheus/Grafana tabs show the range (`최근 1h`) above the editor; `Ctrl+]` cycles 15m, 1h, 6h, 24h, 7d per tab. Results are ordinary grids, so `c` charts metric series. Table view, editing and transactions do not apply.
+
+```sh
+db conn add logs-stg --kind loki --url http://loki.stg.internal:3100
+printf '%s' "$GRAFANA_TOKEN" | db conn add graf --kind grafana --url https://grafana.example.com --password-stdin
+db tables -c search-stg
+db query -c search-stg 'GET logs-*/_search
+{"query":{"match":{"status":500}},"size":20}'
+db logs -c logs-stg '{app="api"} |= "error"' --since 6h
+db metrics -c prom 'sum by (status) (rate(http_requests_total[5m]))' --since 24h --until 1h
+db query -c orders 'SELECT * FROM "orders"' --force   # full scan needs --force (exit 3 without)
+```
+
+`--max-rows` defaults to 1,000 for sources. Prod sources need `--prod` like everything else; write-looking queries and unconfirmed expensive queries exit with 3. `describe`, `ddl`, `explain`, `redis`, `search`, `schemas` and `schema-diff` are usage errors on these connections.
+
 ## TUI
 
 Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some common ones:
@@ -103,6 +129,7 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `Ctrl+O` / `Ctrl+S` | open / save a file under `queries/` |
 | `F9` / `F10` / `F11` | Auto/Manual transactions / COMMIT / ROLLBACK |
 | `Ctrl+L` | unlock writes on a prod connection for a few minutes |
+| `Ctrl+]` | Loki/Prometheus range 15m · 1h · 6h · 24h · 7d (per tab) |
 | `Ctrl+H` | history |
 | tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
 | tree `N` / `E` | add / edit a connection (see Connections) |
