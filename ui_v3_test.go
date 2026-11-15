@@ -183,7 +183,7 @@ func TestTableView_페이지_개수_머리_클릭_정렬(t *testing.T) {
 	it := pgTest{t, m}
 	it.sql("drop table if exists public.v3_page; create table public.v3_page (id int primary key, name text)")
 	it.sql("insert into public.v3_page select g, 'n' || (1000 - g) from generate_series(1, 450) g")
-	cn := m.roots[0].children[0]
+	cn := m.connNode(0)
 	schema := &node{kind: nSchema, label: "public", conn: 0, parent: cn, loaded: true, expanded: true}
 	schema.children = []*node{{kind: nTable, label: "v3_page", schema: "public", conn: 0, parent: schema}}
 	cn.children, cn.loaded, cn.expanded = []*node{schema}, true, true
@@ -380,7 +380,7 @@ func TestImport_확인_뒤_COPY_로_넣고_실패하면_한_행도_남지_않는
 	m := pgModel(t, "it-local")
 	it := pgTest{t, m}
 	it.sql("drop table if exists public.v3_imp; create table public.v3_imp (id int primary key, name text not null)")
-	cn := m.roots[0].children[0]
+	cn := m.connNode(0)
 	schema := &node{kind: nSchema, label: "public", conn: 0, parent: cn, loaded: true, expanded: true}
 	tn := &node{kind: nTable, label: "v3_imp", schema: "public", conn: 0, parent: schema}
 	schema.children = []*node{tn}
@@ -525,7 +525,7 @@ func TestOps_pid_결과에서_K_X는_늘_묻고_prod는_이름을_보인다(t *t
 		t.Fatal("pid 열이 없으면 안내만")
 	}
 	m.setFocus(fTree)
-	m.selectNode(m.roots[0].children[1])
+	m.selectNode(m.connNode(1))
 	if _, cmd := m.Update(key("A")); cmd == nil || m.cur().running == nil {
 		t.Fatal("접속 줄의 A 는 활동을 읽는다")
 	}
@@ -563,7 +563,7 @@ func TestFinder_고르면_트리에서_찾아_테이블_보기를_연다(t *test
 	m := testModel(t)
 	tn := addTable(m, 1)
 	schema := tn.parent
-	m.roots[0].children[1].expanded = false
+	m.connNode(1).expanded = false
 	m.rebuild()
 	m.catalogs[1] = &complete.Catalog{Schemas: []complete.Schema{{Name: "public", Tables: []complete.Table{{Name: "users"}, {Name: "orders"}}}}}
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
@@ -734,7 +734,7 @@ func TestTabs_다른_접속의_화면을_든_탭은_다른_접속의_객체를_�
 	}
 	m.switchTab(0)
 	m.setFocus(fTree)
-	m.selectNode(m.roots[0].children[0])
+	m.selectNode(m.connNode(0))
 	m.Update(key("A"))
 	if len(m.tabs) != 3 || tab.conn != 1 || m.cur().conn != 0 {
 		t.Fatalf("A 도 새 탭: tabs=%d conn=%d", len(m.tabs), tab.conn)
@@ -764,7 +764,7 @@ func TestTx_트리의_A와_파일_매핑도_이_탭만_쓰던_트랜잭션을_�
 	tab.conn = 0
 	m.inTx[0] = true
 	m.setFocus(fTree)
-	m.selectNode(m.roots[0].children[1])
+	m.selectNode(m.connNode(1))
 	m.Update(key("A"))
 	if m.overlay != oTx || tab.conn != 0 || m.txAsk.after != afterRun {
 		t.Fatalf("접속을 바꾸기 전에 묻는다: overlay=%v conn=%d", m.overlay, tab.conn)

@@ -396,3 +396,31 @@ func TestConnForm_대문자_URL_도_칸을_채운다(t *testing.T) {
 		t.Fatalf("채운 칸: host=%q status=%q", f.inputs[cfHost].Value(), f.status)
 	}
 }
+
+func TestConnRoots는_폴더를_이름순_기타는_뒤_안은_환경_종류_이름순으로_둔다(t *testing.T) {
+	conns := []db.Conn{
+		{Name: "app-prod", Group: "app", Kind: db.KindPG, Host: "db.prod.example.internal"},
+		{Name: "app-stg-redis", Group: "app", Kind: db.KindRedis, Host: "redis.stg.example.internal"},
+		{Name: "loose", Kind: db.KindPG, Host: "localhost"},
+		{Name: "app-stg-read", Group: "app", Kind: db.KindPG, Host: "read.db.stg.example.internal"},
+		{Name: "app-local", Group: "app", Kind: db.KindPG, Host: "localhost"},
+		{Name: "app-stg", Group: "app", Kind: db.KindPG, Host: "db.stg.example.internal"},
+		{Name: "app-stg-os", Group: "app", Kind: db.KindOpenSearch, URL: "http://os.stg.example.internal"},
+		{Name: "zz-stg", Group: "aaa", Kind: db.KindPG, Host: "db.stg.example.internal"},
+	}
+	roots := connRoots(conns, nil, map[string]bool{})
+	var groups []string
+	for _, g := range roots {
+		groups = append(groups, g.label)
+	}
+	if got := strings.Join(groups, ","); got != "aaa,app,"+db.GroupOf(db.Conn{}) {
+		t.Fatalf("폴더 순서: %s", got)
+	}
+	var names []string
+	for _, c := range roots[1].children {
+		names = append(names, c.label)
+	}
+	if got := strings.Join(names, ","); got != "app-local,app-stg,app-stg-read,app-stg-redis,app-stg-os,app-prod" {
+		t.Fatalf("폴더 안 순서: %s", got)
+	}
+}

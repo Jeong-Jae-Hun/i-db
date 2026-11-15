@@ -600,6 +600,11 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: 받은 태그가 판 꼴(`vX.Y.Z[-pre][+build]`, 영숫자·`.`·`-`만)이 아니거나 `--version`과 다르면 바꾸지 않고 끝낸다. 기본 클라이언트는 https의 `api.github.com`·`github.com`·`*.githubusercontent.com`로만 넘어가고, 토큰은 API 호스트 밖으로 보내지 않는다. 묶음 안의 풀린 크기 합은 200MiB가 상한이다.
 - R65.2 TUI는 켤 때 하루에 한 번만(마지막 확인 시각은 개인 상태 폴더) 최신 판을 조용히 확인해, 새 판이 있으면 상태 줄에 `새 판 v0.13.0 — db update` 를 한 번 보인다. 지금 판이 최신보다 낮은 이유가 되돌아간 설치든 아니든 같다. `DB_UPDATE_CHECK=0`이면 확인하지 않는다. 네트워크 오류는 알리지 않는다.
 
+### R66 트리 정렬
+
+- R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
+  - 예: `shop` 폴더 → `shop-local`, `shop-local-redis`, `shop-stg`, `shop-stg-read`, `shop-stg-redis`, `shop-stg-os`, `shop-prod`, `shop-prod-read-redis`, `shop-prod-os`.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |

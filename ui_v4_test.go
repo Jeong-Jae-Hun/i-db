@@ -113,7 +113,7 @@ func TestDefinition_실제_서버에서_테이블과_함수를_찾는다(t *test
 	p.sql(`drop schema if exists v4ui cascade; create schema v4ui; create table v4ui.v4ui_t (id int primary key);
 		create function v4ui.v4ui_fn() returns int language sql as 'select 1'`)
 	t.Cleanup(func() { p.sql("drop schema if exists v4ui cascade") })
-	cn := m.roots[0].children[0]
+	cn := m.connNode(0)
 	m.selectNode(cn)
 	drive(m, m.activate(cn, false))
 	tab := m.cur()
@@ -139,7 +139,7 @@ func TestDefinition_실제_서버에서_테이블과_함수를_찾는다(t *test
 
 func TestDB_B로_고르면_열린_트랜잭션을_먼저_묻고_없으면_다시_연다(t *testing.T) {
 	m := testModel(t)
-	stg := m.roots[0].children[1]
+	stg := m.connNode(1)
 	m.setFocus(fTree)
 	m.selectNode(stg)
 	_, cmd := m.Update(key("B"))
@@ -181,7 +181,7 @@ func TestDB_실제_서버에서_B와_F6이_DB와_search_path를_바꾼다(t *tes
 	p.sql("drop schema if exists v4ui_sp cascade; create schema v4ui_sp; drop database if exists v4ui_db with (force); create database v4ui_db")
 	t.Cleanup(func() { p.sql("drop schema if exists v4ui_sp cascade; drop database if exists v4ui_db with (force)") })
 	orig := m.conn(0).DB
-	cn := m.roots[0].children[0]
+	cn := m.connNode(0)
 	m.selectNode(cn)
 	drive(m, m.activate(cn, false))
 
@@ -389,7 +389,7 @@ func TestExport_실제_서버에서_F7은_행_제한_없이_CSV로_쓰고_테이
 	p := pgTest{t, m}
 	p.sql("drop table if exists v4ui_export; create table v4ui_export as select g as id from generate_series(1, 1500) g")
 	t.Cleanup(func() { p.sql("drop table if exists v4ui_export") })
-	cn := m.roots[0].children[0]
+	cn := m.connNode(0)
 	m.selectNode(cn)
 	drive(m, m.activate(cn, false))
 	m.setFocus(fEditor)
@@ -443,7 +443,7 @@ func slicesIndexLabel(ns []*node, label string) int {
 func TestSearch_F는_prod면_테이블_수를_세어_묻고_stg는_바로_찾는다(t *testing.T) {
 	m := testModel(t)
 	m.setFocus(fTree)
-	m.selectNode(m.roots[0].children[0])
+	m.selectNode(m.connNode(0))
 	m.Update(key("F"))
 	if m.overlay != oPrompt {
 		t.Fatal("찾을 글을 묻는다")
@@ -465,7 +465,7 @@ func TestSearch_F는_prod면_테이블_수를_세어_묻고_stg는_바로_찾는
 
 	m.setFocus(fTree)
 	m.cur().running = nil
-	m.selectNode(m.roots[0].children[1])
+	m.selectNode(m.connNode(1))
 	m.Update(key("F"))
 	typeText(m, "abc")
 	if _, cmd := m.Update(key("enter")); cmd == nil || m.overlay != oNone || m.cur().running == nil {
@@ -483,7 +483,7 @@ func TestSearch_실제_서버에서_스키마_글자_열을_찾는다(t *testing
 	p.sql(`drop schema if exists v4ui_s cascade; create schema v4ui_s;
 		create table v4ui_s.a (id int primary key, note text); insert into v4ui_s.a values (1, 'hello v4ui needle'), (2, 'x')`)
 	t.Cleanup(func() { p.sql("drop schema if exists v4ui_s cascade") })
-	cn := m.roots[0].children[0]
+	cn := m.connNode(0)
 	m.selectNode(cn)
 	drive(m, m.activate(cn, false))
 	schema := cn.children[slicesIndexLabel(cn.children, "v4ui_s")]
@@ -606,7 +606,7 @@ func TestDB_B로_바꾸면_옛_DB의_테이블_보기와_결과로_새_DB에_보
 	show(m, editable())
 
 	m.setFocus(fTree)
-	m.selectNode(m.roots[0].children[1])
+	m.selectNode(m.connNode(1))
 	_, cmd := m.Update(key("B"))
 	drive(m, cmd().(pickListMsg).do("other"))
 	if m.conn(1).DB != "other" {
@@ -630,7 +630,7 @@ func TestDB_실행_중_보류_편집_바꾸는_중에는_B를_막고_내보내�
 	tab.conn = 1
 	m.manual[1] = true
 	m.setFocus(fTree)
-	m.selectNode(m.roots[0].children[1])
+	m.selectNode(m.connNode(1))
 	_, cmd := m.Update(key("B"))
 	pick := cmd().(pickListMsg)
 
@@ -683,7 +683,7 @@ func TestDefinition_CtrlB_결과는_요청한_탭에_붙고_그_탭을_닫았으
 	}
 
 	// 부모를 읽는 사이 요청한 탭을 닫으면 다른 탭에 열지 않는다
-	cn := m.roots[0].children[0]
+	cn := m.connNode(0)
 	cn.loaded, cn.children = false, nil
 	gone := m.newTab()
 	gone.conn = 0
@@ -801,7 +801,7 @@ func TestSearch_prod에서_N이면_빈_결과_탭을_남기지_않는다(t *test
 	editCell(m, "q") // 다른 접속의 편집을 든 탭이라 검색 결과는 새 탭에 연다
 	ask := func() {
 		m.setFocus(fTree)
-		m.selectNode(m.roots[0].children[0])
+		m.selectNode(m.connNode(0))
 		m.Update(key("F"))
 		typeText(m, "abc")
 		_, cmd := m.Update(key("enter"))

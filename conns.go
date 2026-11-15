@@ -92,7 +92,7 @@ func connLabel(c db.Conn) string {
 	return c.Name
 }
 
-// connRoots 는 그룹 → 접속 트리다. 그룹 이름 순, 그룹 안은 접속 순서이고 지운 자리(Kind "")는 뺀다.
+// connRoots 는 그룹 → 접속 트리다. 그룹 이름 순(그룹 없음은 맨 뒤), 그룹 안은 환경·종류·이름 순(R66.1)이고 지운 자리(Kind "")는 뺀다.
 // reuse 에 있는 접속 노드(펼침·읽은 자식)와 그룹 펼침 상태는 이어받는다.
 func connRoots(conns []db.Conn, reuse map[int]*node, groupOpen map[string]bool) []*node {
 	byGroup := map[string]*node{}
@@ -116,8 +116,42 @@ func connRoots(conns []db.Conn, reuse map[int]*node, groupOpen map[string]bool) 
 		cn.parent = gn
 		gn.children = append(gn.children, cn)
 	}
-	slices.SortStableFunc(roots, func(a, b *node) int { return strings.Compare(a.label, b.label) })
+	slices.SortStableFunc(roots, func(a, b *node) int {
+		return cmp.Or(cmp.Compare(boolRank(a.label == db.GroupOf(db.Conn{})), boolRank(b.label == db.GroupOf(db.Conn{}))), strings.Compare(a.label, b.label))
+	})
+	for _, gn := range roots {
+		slices.SortStableFunc(gn.children, func(a, b *node) int {
+			ca, cb := conns[a.conn], conns[b.conn]
+			return cmp.Or(cmp.Compare(envRank[ca.Env()], envRank[cb.Env()]), cmp.Compare(connRank(ca), connRank(cb)), strings.Compare(ca.Name, cb.Name))
+		})
+	}
 	return roots
+}
+
+// envRank 는 폴더 안 환경 순서다(R66.1). Env 는 이 셋만 돌려준다
+var envRank = map[string]int{"local": 0, "stg": 1, "prod": 2}
+
+// connRank 는 같은 환경 안의 순서다: 쓰기 DB → 읽기 DB → Redis → 검색 → 로그·지표 → DynamoDB(R66.1).
+func connRank(c db.Conn) int {
+	read := strings.Contains(c.Name, "-read") || strings.HasPrefix(c.Host, "read.") || strings.Contains(c.Host, ".cluster-ro-")
+	switch c.Kind {
+	case db.KindPG:
+		return 1 + boolRank(read)
+	case db.KindRedis:
+		return 3 + boolRank(read)
+	case db.KindOpenSearch:
+		return 5
+	case db.KindLoki, db.KindPrometheus, db.KindGrafana:
+		return 6
+	}
+	return 7
+}
+
+func boolRank(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // ─── 창 열기 ───

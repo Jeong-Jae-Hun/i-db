@@ -513,7 +513,7 @@ func TestCompare_기본_대상은_stg_prod를_바꾼_접속이고_새_탭에_비
 func TestSchemaDiff_트리_스키마_줄의_등호는_고른_접속의_같은_스키마와_비교한다(t *testing.T) {
 	m := testModel(t)
 	addTable(m, 1)
-	m.selectNode(m.roots[0].children[1].children[0])
+	m.selectNode(m.connNode(1).children[0])
 	m.setFocus(fTree)
 	old := schemaSnap
 	var asked []string

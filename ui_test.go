@@ -93,7 +93,7 @@ func key(s string) tea.KeyMsg {
 
 func TestTree_테이블_Enter_는_테이블_보기를_열고_추정치부터_읽는다(t *testing.T) {
 	m := testModel(t)
-	stg := m.roots[0].children[1]
+	stg := m.connNode(1)
 	schema := &node{kind: nSchema, label: "pub\"lic", conn: 1, parent: stg, loaded: true, expanded: true}
 	schema.children = []*node{{kind: nTable, label: "users", schema: "pub\"lic", conn: 1, parent: schema}}
 	stg.children, stg.loaded, stg.expanded = []*node{schema}, true, true
@@ -295,9 +295,9 @@ func wheel(at image.Point, b tea.MouseButton) tea.MouseMsg {
 func TestMouse_트리_행을_클릭하면_고르고_포커스를_옮긴다(t *testing.T) {
 	m := testModel(t)
 	m.setFocus(fEditor)
-	// y=0 헤더, y=1 트리 위 테두리, y=2 첫 행(기타), y=3 x-prod
+	// y=0 헤더, y=1 트리 위 테두리, y=2 첫 행(기타), y=3 x-stg(R66: stg 가 prod 앞)
 	m.Update(press(10, 3))
-	if m.focus != fTree || m.cursor != 1 || m.current().label != "x-prod" {
+	if m.focus != fTree || m.cursor != 1 || m.current().label != "x-stg" {
 		t.Fatalf("focus=%v cursor=%d", m.focus, m.cursor)
 	}
 	m.Update(press(10, 30)) // 행이 없는 자리
@@ -318,17 +318,17 @@ func TestMouse_펼침표시_클릭과_더블클릭은_노드를_연다(t *testin
 		t.Fatal("▸ 클릭은 펼쳐야 한다")
 	}
 
-	stg := group.children[1]
+	stg := m.connNode(1)
 	m.lastClick = click{row: -1}
-	m.Update(press(12, 4)) // 이름 위 한 번 클릭은 고르기만
+	m.Update(press(12, 3)) // 이름 위 한 번 클릭은 고르기만
 	if stg.expanded || m.cur().conn != -1 {
 		t.Fatal("한 번 클릭은 펼치지 않는다")
 	}
-	_, cmd := m.Update(press(12, 4))
+	_, cmd := m.Update(press(12, 3))
 	if !stg.expanded || cmd == nil || m.cur().conn != 1 {
 		t.Fatalf("더블클릭은 접속을 펼치고 활성으로: expanded=%v conn=%d", stg.expanded, m.cur().conn)
 	}
-	m.Update(press(12, 4))
+	m.Update(press(12, 3))
 	if !stg.expanded {
 		t.Fatal("더블클릭 다음 세 번째 클릭은 다시 더블클릭이 아니다")
 	}
@@ -648,7 +648,7 @@ func addRedis(m *model) *node {
 }
 
 func addTable(m *model, conn int) *node {
-	cn := m.roots[0].children[conn]
+	cn := m.connNode(conn)
 	schema := &node{kind: nSchema, label: "public", conn: conn, parent: cn, loaded: true, expanded: true}
 	schema.children = []*node{{kind: nTable, label: "users", schema: "public", conn: conn, parent: schema}}
 	cn.children, cn.loaded, cn.expanded = []*node{schema}, true, true
@@ -898,7 +898,7 @@ func TestComplete_목록은_접속별로_한_번_읽고_없어도_키워드는_�
 		t.Fatalf("목록이 오면 테이블: %+v", items)
 	}
 
-	m.selectNode(m.roots[0].children[1])
+	m.selectNode(m.connNode(1))
 	if _, cmd := m.Update(key("r")); cmd == nil || m.catalogs[1] != nil {
 		t.Fatal("접속에서 r 은 목록도 다시 읽는다")
 	}
