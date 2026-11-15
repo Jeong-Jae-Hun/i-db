@@ -95,7 +95,6 @@ func TestUpdate_check_는_새_판이면_10_최신이면_0(t *testing.T) {
 		{"v0.11.0", exitNewer, "새 판 v0.11.0 → v0.12.0\n"},
 		{"v0.12.0", exitOK, "이미 최신 (v0.12.0)\n"},
 		{"v0.13.0", exitOK, "이미 최신 (v0.13.0)\n"},
-		{"dev", exitNewer, "새 판 dev → v0.12.0\n"},
 	}
 	for _, c := range cases {
 		u, exe := testUpdater(t, c.current, false)
@@ -106,6 +105,32 @@ func TestUpdate_check_는_새_판이면_10_최신이면_0(t *testing.T) {
 		if b, _ := os.ReadFile(exe); string(b) != "bin-"+c.current {
 			t.Errorf("%s: --check 는 바꾸지 않는다: %q", c.current, b)
 		}
+	}
+}
+
+func TestUpdate_check_는_소스_빌드면_새_판이라_하지_않고_오류(t *testing.T) {
+	u, _ := testUpdater(t, "dev", false)
+	code, out, errOut := runUpdate(t, u, "--check")
+	if code != exitErr || out != "" || !strings.Contains(errOut, "소스 빌드(dev)는 판을 비교할 수 없음") {
+		t.Fatalf("코드 %d 출력 %q 오류 %q", code, out, errOut)
+	}
+}
+
+func TestUpdate_받은_태그가_판_꼴이_아니면_소스_빌드_안내가_아닌_오류(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"latest\u001b[2J"}`))
+	}))
+	t.Cleanup(srv.Close)
+	u, exe := testUpdater(t, "v0.11.0", false)
+	u.src = selfupdate.Source{HTTP: srv.Client(), API: srv.URL}
+	for _, args := range [][]string{nil, {"--check"}} {
+		code, out, errOut := runUpdate(t, u, args...)
+		if code != exitErr || out != "" || !strings.Contains(errOut, "not a version") || strings.Contains(errOut, "소스 빌드") {
+			t.Fatalf("%v: 코드 %d 출력 %q 오류 %q", args, code, out, errOut)
+		}
+	}
+	if b, _ := os.ReadFile(exe); string(b) != "bin-v0.11.0" {
+		t.Fatalf("바뀌면 안 된다: %q", b)
 	}
 }
 

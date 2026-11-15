@@ -334,6 +334,7 @@ func TestDaily_하루_안이면_남긴_판을_쓰고_지나면_새로_묻는다(
 		{"깨진 파일 → 다시 묻는다", func(t *testing.T, p string) { _ = os.WriteFile(p, []byte("{"), 0o600) }, "v0.13.0", nil, "v0.12.0", "v0.13.0", 1},
 		{"네트워크 오류 → 조용히 없음", nil, "", errors.New("offline"), "v0.12.0", "", 1},
 		{"지금 판이 더 높음", nil, "v0.12.0", nil, "v0.13.0", "", 1},
+		{"상태 파일의 판에 제어 문자 → 다시 묻는다", func(t *testing.T, p string) { write(t, p, now.Add(-time.Hour), "v0.13.0-\x1b[2J") }, "v0.13.0", nil, "v0.12.0", "v0.13.0", 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -361,5 +362,140 @@ func TestDaily_하루_안이면_남긴_판을_쓰고_지나면_새로_묻는다(
 				}
 			}
 		})
+	}
+}
+
+func TestExtractDB_압축_풀린_전체_크기를_넘으면_다른_항목을_건너뛰다가도_멈춘다(t *testing.T) {
+	var buf bytes.Buffer
+	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	tw := tar.NewWriter(gz)
+	const big = 2*maxArchive + 1<<20
+	if err := tw.WriteHeader(&tar.Header{Name: "pad", Typeflag: tar.TypeReg, Mode: 0o644, Size: big}); err != nil {
+		t.Fatal(err)
+	}
+	zeros := make([]byte, 1<<20)
+	for range big >> 20 {
+		if _, err := tw.Write(zeros); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "db", Typeflag: tar.TypeReg, Mode: 0o755, Size: 3}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = tw.Write([]byte("new"))
+	if err := errors.Join(tw.Close(), gz.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractDB(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "uncompressed") {
+		t.Fatalf("압축 폭탄은 거절해야 한다: %v", err)
+	}
+}
+
+func TestClient_기본은_https_와_GitHub_호스트만_따라가고_토큰은_API_에만_남긴다(t *testing.T) {
+	cases := []struct {
+		url      string
+		ok       bool
+		keepAuth bool
+	}{
+		{"https://api.github.com/repos/o/r", true, true},
+		{"https://github.com/o/r/releases/download/v1.0.0/x", true, false},
+		{"https://objects.githubusercontent.com/x", true, false},
+		{"http://github.com/x", false, false},
+		{"https://evil.example/x", false, false},
+		{"https://githubusercontent.com.evil.example/x", false, false},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, c.url, nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		err := Source{}.client().CheckRedirect(req, []*http.Request{httptest.NewRequest(http.MethodGet, "https://api.github.com/", nil)})
+		if (err == nil) != c.ok {
+			t.Errorf("%s: 오류 %v", c.url, err)
+		}
+		if c.ok && (req.Header.Get("Authorization") != "") != c.keepAuth {
+			t.Errorf("%s: Authorization %q", c.url, req.Header.Get("Authorization"))
+		}
+	}
+}
+
+func TestRelease_다른_호스트로_넘어가면_토큰을_보내지_않는다(t *testing.T) {
+	var got []string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"tag_name":"v1.0.0"}`))
+	}))
+	t.Cleanup(other.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/latest", http.StatusFound)
+	}))
+	t.Cleanup(api.Close)
+	if _, err := (Source{HTTP: api.Client(), API: api.URL, Token: "tok"}).Release(context.Background(), "o/r", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "" {
+		t.Fatalf("넘어간 호스트의 Authorization: %q", got)
+	}
+}
+
+func TestApply_https_가_아니거나_주입한_주소_밖이면_받지_않는다(t *testing.T) {
+	gh := newFakeGitHub(t, "v0.12.0", map[string][]byte{"v0.12.0": makeTarGz(t, tarEntry{name: "db", body: "new"})})
+	exe := writeExe(t, t.TempDir(), 0o755)
+	for _, src := range []Source{gh.source(""), {}} {
+		rel := Release{Tag: "v0.12.0", Assets: map[string]string{
+			testArchive:     "http://127.0.0.1:1/" + testArchive,
+			"checksums.txt": "http://127.0.0.1:1/checksums.txt",
+		}}
+		if err := src.Apply(context.Background(), rel, "linux", "amd64", exe); err == nil || !strings.Contains(err.Error(), "refuse download") {
+			t.Fatalf("API %q: %v", src.API, err)
+		}
+	}
+}
+
+func TestRelease_판_꼴이_아니거나_요청과_다른_태그는_거절한다(t *testing.T) {
+	tag := "v1.0.0"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": tag})
+	}))
+	t.Cleanup(srv.Close)
+	src := Source{HTTP: srv.Client(), API: srv.URL}
+	ctx := context.Background()
+	if _, err := src.Release(ctx, "o/r", "v1.1.0"); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("다른 태그: %v", err)
+	}
+	tag = "v1.0.0-\x1b]0;x\x07"
+	if _, err := src.Release(ctx, "o/r", ""); err == nil || !strings.Contains(err.Error(), "not a version") || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("판 꼴 아님: %q", err)
+	}
+	if _, err := src.Release(ctx, "o/r", "v1.0.0/../x"); err == nil {
+		t.Fatal("판 꼴이 아닌 요청은 주소를 만들기 전에 거절한다")
+	}
+}
+
+func TestCompare_pre_release_는_semver_순서를_따른다(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+		ok   bool
+	}{
+		{"v1.0.0-rc2", "v1.0.0-rc10", 1, true}, // rc2 는 한 식별자라 글자로 비교한다(semver). 숫자로 비교하려면 rc.2
+		{"v1.0.0-rc.2", "v1.0.0-rc.10", -1, true},
+		{"v1.0.0-1", "v1.0.0-alpha", -1, true},
+		{"v1.0.0-alpha", "v1.0.0-alpha.1", -1, true},
+		{"v1.0.0-alpha.1", "v1.0.0-alpha.beta", -1, true},
+		{"v1.0.0-beta.11", "v1.0.0-rc.1", -1, true},
+		{"v1.0.0-2", "v1.0.0-10", -1, true},
+		{"v1.0.0-01", "v1.0.0", 0, false},
+		{"v01.0.0", "v1.0.0", 0, false},
+		{"v1.0.0-", "v1.0.0", 0, false},
+		{"v1.0.0-a..b", "v1.0.0", 0, false},
+		{"v1.0.0-a\x1b", "v1.0.0", 0, false},
+		{"v1.0.0+b\x1b", "v1.0.0", 0, false},
+		{"v1.0.0+001", "v1.0.0", 0, true},
+		{"v+1.0.0", "v1.0.0", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := Compare(c.a, c.b)
+		if got != c.want || ok != c.ok {
+			t.Errorf("Compare(%q, %q) = %d,%v 기대 %d,%v", c.a, c.b, got, ok, c.want, c.ok)
+		}
 	}
 }

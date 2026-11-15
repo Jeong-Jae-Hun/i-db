@@ -83,12 +83,13 @@ func runUpdateCLI(ctx context.Context, u updater, args []string, stdout, stderr 
 		fmt.Fprintln(stderr, "db update:", err)
 		return exitErr
 	}
-	// 소스 빌드(dev)는 비교할 수 없어 늘 낮은 판으로 본다
+	// rel.Tag 는 Release 가 판 꼴만 돌려주므로 비교할 수 없으면 지금 판이 소스 빌드(dev)다
 	c, comparable := selfupdate.Compare(rel.Tag, u.current)
-	if !comparable {
-		c = 1
-	}
 	if *check {
+		if !comparable {
+			fmt.Fprintf(stderr, "db update: 소스 빌드(%s)는 판을 비교할 수 없음\n", u.current)
+			return exitErr
+		}
 		if c > 0 {
 			fmt.Fprintf(stdout, "새 판 %s → %s\n", u.current, rel.Tag)
 			return exitNewer
