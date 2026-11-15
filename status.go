@@ -68,16 +68,14 @@ func runStatus(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Cli
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-			defer cancel()
-			h := probeConn(pctx, clients, sources, c)
+			h := probeConn(ctx, clients, sources, c)
 			row := &rows[r]
 			row.OK, row.LatencyMS, row.Version = &h.OK, h.Latency.Milliseconds(), h.Version
 			for _, x := range h.Metrics {
 				row.Metrics = append(row.Metrics, statusMetric(x))
 			}
 			if !h.OK {
-				row.Error = cliErrText(pctx, proj, o, errors.New(h.Err), c.Name)
+				row.Error = cliErrText(ctx, proj, o, errors.New(h.Err), c.Name)
 			}
 		}()
 	}

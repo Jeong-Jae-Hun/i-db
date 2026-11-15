@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -289,6 +291,110 @@ func TestDash_슬래시는_그룹_이름_환경으로_거른다(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if d.filter != "" || len(m.dashRows(d)) != 4 {
 		t.Fatal("esc 는 거르기를 푼다")
+	}
+}
+
+func TestDash_다시_확인하는_동안_이전_값을_그대로_보이고_머리에_확인_중을_센다(t *testing.T) {
+	fakeProbe(t, healthy)
+	m := dashModel(t)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	feed(m, collect(cmd))
+	m.Update(key("r"))
+	d := m.cur().dash
+	if len(d.pending) != 4 {
+		t.Fatalf("r 은 모두 다시 확인한다: %v", d.pending)
+	}
+	if s := m.dashSum(d); s.ok != 3 || s.fail != 1 || s.pgActive != 6 || s.redisClients != 1200 {
+		t.Fatalf("요약은 이전 값을 센다: %+v", s)
+	}
+	v := ansi.Strip(m.View())
+	for _, want := range []string{"확인 중 4", "●", "✕", "12ms", "활성 3 · 크기 1.2 GB", "dial tcp: refused"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("%q 가 없다:\n%s", want, v)
+		}
+	}
+	if body := ansi.Strip(m.dashView(m.cur(), 160, 30)); strings.Contains(body, "…") {
+		t.Fatalf("확인한 적 있는 접속은 말줄임표가 아니다:\n%s", body)
+	}
+}
+
+// spawnCmds 는 명령을 고루틴에서 돌린다. 막히는 확인을 기다리지 않고 묶음(Batch)은 펴서 각각 돌린다.
+func spawnCmds(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	go func() {
+		if b, ok := cmd().(tea.BatchMsg); ok {
+			for _, c := range b {
+				spawnCmds(c)
+			}
+		}
+	}()
+}
+
+// waitN 은 ch 에서 n 번 받을 때까지 기다린다. 5초 안에 오지 않으면 시험을 멈춘다.
+func waitN(t *testing.T, ch chan struct{}, n int, what string) {
+	t.Helper()
+	for range n {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s 를 기다리다 멈춤", what)
+		}
+	}
+}
+
+func TestDash_r_과_탭_닫기는_진행_중인_이전_확인을_취소한다(t *testing.T) {
+	started, canceled := make(chan struct{}, 16), make(chan struct{}, 16)
+	oldProbe, oldEvery := probeConn, dashEvery
+	t.Cleanup(func() { probeConn, dashEvery = oldProbe, oldEvery })
+	dashEvery = time.Hour
+	probeConn = func(ctx context.Context, _ *db.Clients, _ *sourcePool, _ db.Conn) db.Health {
+		started <- struct{}{}
+		<-ctx.Done()
+		if errors.Is(ctx.Err(), context.Canceled) {
+			canceled <- struct{}{}
+		}
+		return db.Health{Err: ctx.Err().Error()}
+	}
+	m := dashModel(t)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	spawnCmds(cmd)
+	waitN(t, started, 4, "첫 확인 시작")
+	_, cmd = m.Update(key("r"))
+	waitN(t, canceled, 4, "r 이 이전 확인 취소")
+	spawnCmds(cmd)
+	waitN(t, started, 4, "다시 확인 시작")
+	m.closeTab(m.cur())
+	waitN(t, canceled, 4, "탭 닫기가 확인 취소")
+}
+
+func TestDash_낮은_화면에서는_카드를_한_줄로_접어_표가_다섯_줄을_넘게_보인다(t *testing.T) {
+	fakeProbe(t, healthy)
+	conns := make([]db.Conn, 10)
+	for i := range conns {
+		conns[i] = db.Conn{Name: fmt.Sprintf("pg-%02d-stg", i), UUID: fmt.Sprint(i), Kind: db.KindPG, Group: "app", Host: "127.0.0.1", Port: 1}
+	}
+	m := newModel(&db.Project{Dir: t.TempDir(), Mapping: map[string]string{}, Conns: conns})
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	tab := m.cur()
+	tab.dash.cursor = 99
+	lines := strings.Split(ansi.Strip(m.dashView(tab, 160, 9)), "\n")
+	if len(lines) > 9 || !strings.Contains(lines[0], "접속 10") || strings.Contains(lines[0], "╭") {
+		t.Fatalf("카드가 한 줄 요약이어야 한다:\n%s", strings.Join(lines, "\n"))
+	}
+	if rows := strings.Count(strings.Join(lines, "\n"), "pg-"); rows < 5 {
+		t.Fatalf("표가 다섯 줄 이상: %d\n%s", rows, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[len(lines)-1], "▸ ") || !strings.Contains(lines[len(lines)-1], "pg-09") {
+		t.Fatalf("범위를 넘은 커서는 마지막 줄로 보인다:\n%s", strings.Join(lines, "\n"))
+	}
+	if tab.dash.cursor != 99 {
+		t.Fatalf("그리기는 커서를 바꾸지 않는다: %d", tab.dash.cursor)
+	}
+	if v := ansi.Strip(m.dashView(tab, 160, 30)); !strings.Contains(v, "╭") {
+		t.Fatalf("높으면 카드로 그린다:\n%s", v)
 	}
 }
 

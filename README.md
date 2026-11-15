@@ -140,9 +140,9 @@ On macOS, in terminals that speak the kitty keyboard protocol (Ghostty, kitty, W
 
 ### Dashboard
 
-`Ctrl+G` (⌘G, palette `대시보드`) opens a single dashboard tab. The top row has summary cards: connections by kind, connections by environment, connected / failed, the sum of PostgreSQL active sessions and Redis clients, open transactions and prod connections whose write lock is currently open. Below is one row per connection: group, name, environment, kind, state (`●` up, `✕` failed, `…` checking), latency, version and the main numbers (numbers over their threshold are highlighted).
+`Ctrl+G` (⌘G, palette `대시보드`) opens a single dashboard tab. The top row has summary cards: connections by kind, connections by environment, connected / failed, the sum of PostgreSQL active sessions and Redis clients, open transactions and prod connections whose write lock is currently open. Below is one row per connection: group, name, environment, kind, state (`●` up, `✕` failed, `…` not checked yet), latency, version and the main numbers (numbers over their threshold are highlighted). While a check is running again the rows keep their last values and the header shows `확인 중 N`.
 
-Every connection is checked at the same time with a 5 second limit each, again every 30 seconds while the dashboard is the active tab. The checks only ask for read-only metadata (PostgreSQL `pg_stat_activity` counts and `version()`, Redis `INFO`, OpenSearch cluster health, and so on; see SPEC R64). In the dashboard `r` checks again now, `Enter` selects the connection in the tree, `/` filters by group, name or environment and `esc` clears the filter.
+Every connection is checked at the same time with a 5 second limit per query (opening a connection for the first time may take up to 15 seconds), again every 30 seconds while the dashboard is the active tab. The checks only ask for read-only metadata (PostgreSQL `pg_stat_activity` counts and `version()`, Redis `INFO`, OpenSearch cluster health, and so on; see SPEC R64). In the dashboard `r` checks again now, `Enter` selects the connection in the tree, `/` filters by group, name or environment and `esc` clears the filter.
 
 From a shell, `db status` runs the same checks once:
 
@@ -152,7 +152,7 @@ db status --prod --format json     # include prod
 db status -c app-stg -c app-stg-redis --format tsv
 ```
 
-Columns are `group`, `name`, `env`, `kind`, `ok`, `latency_ms`, `version` and `metrics` (in JSON, `metrics` is an array of `{name, value, warn}` and `ok` is `null` for skipped connections). Prod connections are not contacted without `--prod` and show `--prod 로 확인`. The exit code is 1 if any checked connection failed.
+Columns are `group`, `name`, `env`, `kind`, `ok`, `latency_ms`, `version` and `metrics` (in JSON, `metrics` is an array of `{name, value, warn}` and `ok` is `null` for skipped connections). Prod connections are not contacted without `--prod` and show `--prod 로 확인`. The exit code is 1 if any checked connection failed. Skipped prod connections do not count, so `db status -c app-prod` without `--prod` exits 0 having probed nothing.
 
 ## CLI
 

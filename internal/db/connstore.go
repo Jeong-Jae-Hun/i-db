@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -537,8 +538,8 @@ func testConn(ctx context.Context, cs *Clients, c Conn) (string, error) {
 	return "", fmt.Errorf("kind must be postgresql or redis: %q", c.Kind)
 }
 
-// redisVersion 은 INFO server 글에서 서버 이름과 버전을 고른다.
+// redisVersion 은 INFO server 글에서 서버 이름과 버전을 고른다. 버전 필드를 숨긴 서버는 이름만 보인다.
 func redisVersion(text string) string {
 	info, _ := parseInfo(text)
-	return infoVersion(info)
+	return cmp.Or(infoVersion(info), "Redis")
 }

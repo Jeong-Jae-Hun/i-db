@@ -5,8 +5,13 @@ import (
 	"time"
 )
 
-// ProbeTimeout 은 접속 하나를 살펴보는 제한 시간이다(R64.2). 호출부가 ctx 에 건다.
-const ProbeTimeout = 5 * time.Second
+// 확인 제한 시간(R64.2). ProbeTimeout 은 질의 한 번, ProbeOpenTimeout 은 아직 열지 않은 접속을 여는 데 쓴다.
+// 여는 쪽이 긴 까닭은 Redis 가 평문 3초 뒤 TLS 로 다시 붙고(CNAME 조회 3초 포함) PostgreSQL connect_timeout 이 8초라서다.
+// 확인 함수가 ctx 에 스스로 건다. 테스트가 줄인다
+var (
+	ProbeTimeout     = 5 * time.Second
+	ProbeOpenTimeout = 15 * time.Second
+)
 
 // Health 는 대시보드(R64)가 접속 하나를 가볍게 살펴본 결과다. 읽기 전용 메타데이터만 묻는다.
 type Health struct {

@@ -20,21 +20,18 @@ import (
 
 var (
 	// probeConn 은 접속 하나를 읽기 전용 메타데이터로 살펴본다(R64.2). 화면과 `db status` 가 같이 쓴다.
-	// ctx 에는 probeTimeout 이 걸려 있다. 결과의 Err 는 비밀값을 지운 한 줄이어야 한다.
-	// 테스트가 바꿔 끼운다
+	// ctx 는 취소만 넘기고 제한 시간은 확인 함수가 건다(db.ProbeOpenTimeout·db.ProbeTimeout).
+	// 결과의 Err 는 비밀값을 지운 한 줄이어야 한다. 테스트가 바꿔 끼운다
 	probeConn = probeAny
-	// 접속마다 확인 한 번의 시간 제한(R64.2)
-	probeTimeout = 5 * time.Second
 	// 대시보드가 활성 탭인 동안 다시 확인하는 간격(R64.2). 테스트가 줄인다
 	dashEvery = 30 * time.Second
 )
 
-// 요약 카드가 더하는 수치 이름. 확인 함수가 Metrics 에 이 이름으로 정수(앞자리 숫자)를 싣는다
 const (
-	metricPGActive     = "활성"
-	metricRedisClients = "클라이언트"
-	dashProdHint       = "--prod 로 확인" // CLI 가 확인하지 않은 prod 접속(R64.3)
-	dashHint           = "r 새로고침 · Enter 트리에서 고르기 · / 거르기 · Ctrl+W 닫기 · F1 도움말"
+	dashProdHint = "--prod 로 확인" // CLI 가 확인하지 않은 prod 접속(R64.3)
+	dashHint     = "r 새로고침 · Enter 트리에서 고르기 · / 거르기 · Ctrl+W 닫기 · F1 도움말"
+	// 표가 이만큼 줄을 못 얻으면 요약 카드를 한 줄로 접는다(R64.1)
+	dashMinRows = 5
 )
 
 var (
@@ -44,11 +41,15 @@ var (
 )
 
 // dashState 는 대시보드 탭의 상태다. 확인 결과는 접속 uuid 로 들고 있어 접속을 다시 읽어 자리가 바뀌어도 맞는다.
+// 다시 확인하는 동안 health 는 이전 결과를 그대로 두고, pending 은 머리의 `확인 중 N` 만 센다.
 type dashState struct {
 	health  map[string]db.Health
 	pending map[string]bool
 	// 확인을 돌릴 때마다 올린다. 늦게 온 이전 확인 결과와 이전 타이머(r 로 다시 센 뒤)를 버린다
-	gen    int
+	gen int
+	// cancel 은 진행 중인 확인 한 회차를 멈춘다. 다시 확인하거나 탭을 닫을 때 부른다
+	cancel context.CancelFunc
+	// cursor 는 거른 줄 수를 넘을 수 있다(접속을 다시 읽어 줄었을 때). 그릴 때는 잘라 쓰고 키를 받을 때 맞춘다
 	cursor int
 	filter string
 }
@@ -91,23 +92,32 @@ func (m *model) openDash() tea.Cmd {
 	return m.dashRefresh(t)
 }
 
-// dashRefresh 는 모든 접속을 동시에 확인하고 dashEvery 뒤 다시 확인할 타이머를 건다. 이전 타이머는 gen 이 낡아 버려진다.
+// dashRefresh 는 모든 접속을 동시에 확인하고 dashEvery 뒤 다시 확인할 타이머를 건다.
+// 진행 중인 이전 회차는 취소하고, 이전 타이머·늦게 온 결과는 gen 이 낡아 버려진다.
 func (m *model) dashRefresh(t *queryTab) tea.Cmd {
 	d := t.dash
+	d.stop()
 	d.gen++
-	id, gen, life, clients, sources := t.id, d.gen, m.life, m.clients, m.sources
+	ctx, cancel := context.WithCancel(m.life)
+	d.cancel = cancel
+	id, gen, clients, sources := t.id, d.gen, m.clients, m.sources
 	cmds := []tea.Cmd{tea.Tick(dashEvery, func(time.Time) tea.Msg { return dashTickMsg{tab: id, gen: gen} })}
 	for _, i := range connOrder(m.proj.Conns) {
 		c := m.conn(i)
 		d.pending[c.UUID] = true
 		cmds = append(cmds, func() tea.Msg {
-			ctx, cancel := context.WithTimeout(life, probeTimeout)
-			defer cancel()
 			return dashProbeMsg{tab: id, gen: gen, uuid: c.UUID, h: probeConn(ctx, clients, sources, c)}
 		})
 	}
 	m.status = "대시보드 확인 중…"
 	return tea.Batch(cmds...)
+}
+
+// stop 은 진행 중인 확인 회차를 취소한다.
+func (d *dashState) stop() {
+	if d.cancel != nil {
+		d.cancel()
+	}
 }
 
 func (m *model) dashProbed(msg dashProbeMsg) {
@@ -204,7 +214,7 @@ func (m *model) dashSelect(ci int) {
 
 // ─── 요약 ───
 
-// dashSummary 는 요약 카드 숫자다(R64.1). ok·fail 은 확인이 끝난 접속만 센다.
+// dashSummary 는 요약 카드 숫자다(R64.1). ok·fail 은 결과가 한 번이라도 온 접속을 마지막 결과로 센다.
 type dashSummary struct {
 	total, pg, redis, source int
 	prod, stg, local         int
@@ -241,7 +251,7 @@ func (m *model) dashSum(d *dashState) dashSummary {
 			s.openTx++
 		}
 		h, ok := d.health[c.UUID]
-		if !ok || d.pending[c.UUID] {
+		if !ok {
 			continue
 		}
 		if !h.OK {
@@ -251,9 +261,9 @@ func (m *model) dashSum(d *dashState) dashSummary {
 		s.ok++
 		switch c.Kind {
 		case db.KindPG:
-			s.pgActive += metricInt(h, metricPGActive)
+			s.pgActive += metricInt(h, db.MetricPGActive)
 		case db.KindRedis:
-			s.redisClients += metricInt(h, metricRedisClients)
+			s.redisClients += metricInt(h, db.MetricRedisClients)
 		}
 	}
 	return s
@@ -293,9 +303,16 @@ func (m *model) dashView(t *queryTab, w, h int) string {
 		dashCard("prod 잠금 해제", strconv.Itoa(s.unlocked)),
 	}
 	lines := strings.Split(wrapCards(cards, w), "\n")
+	var extra []string
 	if d.filter != "" {
-		lines = append(lines, dimStyle.Render("거르기 "+textutil.Printable(d.filter, false)+" · esc 해제"))
+		extra = append(extra, dimStyle.Render("거르기 "+textutil.Printable(d.filter, false)+" · esc 해제"))
 	}
+	// 머리 줄 하나를 뺀 표 줄이 dashMinRows 보다 적으면 카드를 한 줄 요약으로 접는다
+	if h-len(lines)-len(extra)-1 < dashMinRows {
+		lines = []string{truncate(fmt.Sprintf("접속 %d · prod %d · stg %d · local %d · ● %d ✕ %d · PG 활성 %d · Redis 클라이언트 %d · 트랜잭션 %d · 잠금 해제 %d",
+			s.total, s.prod, s.stg, s.local, s.ok, s.fail, s.pgActive, s.redisClients, s.openTx, s.unlocked), w)}
+	}
+	lines = append(lines, extra...)
 	rows := m.dashRows(d)
 	table := dashTable(m, d, rows, w, max(1, h-len(lines)), m.focus != fTree)
 	return strings.Join(append(lines, table...), "\n")
@@ -342,7 +359,7 @@ func dashTable(m *model, d *dashState, rows []int, w, h int, focused bool) []str
 	for r, ci := range rows {
 		c := m.conn(ci)
 		st, lat, ver := "…", "", ""
-		if hh, ok := d.health[c.UUID]; ok && !d.pending[c.UUID] {
+		if hh, ok := d.health[c.UUID]; ok {
 			st, ver = "✕", hh.Version
 			if hh.OK {
 				st = "●"
@@ -365,13 +382,13 @@ func dashTable(m *model, d *dashState, rows []int, w, h int, focused bool) []str
 	if len(rows) == 0 {
 		return append(out, dimStyle.Render("접속 없음"))
 	}
-	d.cursor = clamp(d.cursor, len(rows))
+	cur := clamp(d.cursor, len(rows))
 	room := max(1, h-1)
-	top := max(0, d.cursor-room+1)
+	top := max(0, cur-room+1)
 	for r := top; r < len(rows) && r < top+room; r++ {
 		c := m.conn(rows[r])
 		mark := "  "
-		if r == d.cursor {
+		if r == cur {
 			mark = "▸ "
 			if focused {
 				mark = lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render(mark)
@@ -402,7 +419,7 @@ func dashTable(m *model, d *dashState, rows []int, w, h int, focused bool) []str
 // dashMetrics 는 수치 칸이다. Warn 인 수치는 경고 색으로, 실패면 오류 글을 빨강으로 보인다.
 func dashMetrics(d *dashState, c db.Conn) string {
 	h, ok := d.health[c.UUID]
-	if !ok || d.pending[c.UUID] {
+	if !ok {
 		return ""
 	}
 	if !h.OK {
@@ -425,6 +442,7 @@ func padCell(v string, w int) string {
 }
 
 // probeAny 는 종류별 확인을 고른다. 저장소는 Backend 가 source.Prober 를 구현할 때만 확인한다.
+// PostgreSQL·Redis 는 확인 함수가 제한 시간을 건다. 저장소도 같게 여는 데 ProbeOpenTimeout, 확인에 ProbeTimeout 이다.
 func probeAny(ctx context.Context, clients *db.Clients, sources *sourcePool, c db.Conn) db.Health {
 	switch c.Kind {
 	case db.KindPG:
@@ -433,7 +451,9 @@ func probeAny(ctx context.Context, clients *db.Clients, sources *sourcePool, c d
 		return clients.ProbeRedis(ctx, c)
 	}
 	start := time.Now()
-	b, err := sources.get(ctx, c)
+	octx, cancel := context.WithTimeout(ctx, db.ProbeOpenTimeout)
+	b, err := sources.get(octx, c)
+	cancel()
 	if err != nil {
 		return db.Failed(time.Since(start), err, c.Password)
 	}
@@ -441,5 +461,7 @@ func probeAny(ctx context.Context, clients *db.Clients, sources *sourcePool, c d
 	if !ok {
 		return db.Health{Err: "이 종류는 확인을 지원하지 않음"}
 	}
+	ctx, cancel = context.WithTimeout(ctx, db.ProbeTimeout)
+	defer cancel()
 	return p.Probe(ctx)
 }

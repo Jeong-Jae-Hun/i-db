@@ -2,9 +2,15 @@ package db
 
 import (
 	"errors"
+	"io"
+	"net"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func TestPgMetrics_세션이_max_connections의_80퍼센트를_넘을_때만_경고한다(t *testing.T) {
@@ -76,6 +82,10 @@ func TestRedisMetrics_maxmemory_0이면_제한_없음이고_숨긴_필드는_대
 	if m[0].Value != "-" || m[2].Value != "0" {
 		t.Errorf("클라이언트·키 = %q %q", m[0].Value, m[2].Value)
 	}
+	info, dbs = parseInfo("used_memory:1181116006\r\n")
+	if m := redisMetrics(info, dbs); m[1].Value != "1.1GB" || m[1].Warn {
+		t.Errorf("maxmemory 를 숨기면 사용량만 = %+v", m[1])
+	}
 	info, dbs = parseInfo("connected_clients:1\r\n")
 	if m := redisMetrics(info, dbs); m[1].Value != "-" {
 		t.Errorf("used_memory 없음 = %q", m[1].Value)
@@ -105,8 +115,8 @@ func TestProbePG_세션_활성_크기_버전을_읽는다(t *testing.T) {
 	if !strings.HasPrefix(h.Version, "PostgreSQL ") || len(h.Metrics) != 3 || h.Latency <= 0 {
 		t.Fatalf("ProbePG = %+v", h)
 	}
-	// 확인하는 연결 자신이 세션이자 활성이다
-	if n, _, ok := strings.Cut(h.Metrics[0].Value, "/"); !ok || n == "0" || h.Metrics[1].Value == "0" || !strings.HasSuffix(h.Metrics[2].Value, "B") {
+	// 확인하는 연결 자신도 세션이다(활성에서는 뺀다)
+	if n, _, ok := strings.Cut(h.Metrics[0].Value, "/"); !ok || n == "0" || !strings.HasSuffix(h.Metrics[2].Value, "B") {
 		t.Errorf("Metrics = %+v", h.Metrics)
 	}
 	// 풀에 돌려준 연결이 READ ONLY 로 남지 않는다
@@ -116,6 +126,34 @@ func TestProbePG_세션_활성_크기_버전을_읽는다(t *testing.T) {
 	must(t, err)
 	if res.Rows[0][0] != "off" {
 		t.Errorf("transaction_read_only = %q", res.Rows[0][0])
+	}
+}
+
+func TestProbePG_활성_수에서_확인하는_연결_자신은_뺀다(t *testing.T) {
+	c := testPGConn(t)
+	c.UUID = "it-pg-active"
+	cs := NewClients()
+	defer cs.Close()
+	p, err := cs.PG(ctx(t), c)
+	must(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.pool.Exec(ctx(t), "select pg_sleep(2)")
+		done <- err
+	}()
+	t.Cleanup(func() { <-done })
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		var n int
+		must(t, p.pool.QueryRow(ctx(t), `select count(*) from pg_stat_activity where state = 'active' and query = 'select pg_sleep(2)'`).Scan(&n))
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pg_sleep 세션이 활성으로 보이지 않는다")
+		}
+	}
+	if h := cs.ProbePG(ctx(t), c); !h.OK || h.Metrics[1].Value != "1" {
+		t.Fatalf("활성은 pg_sleep 하나뿐이다: %+v", h)
 	}
 }
 
@@ -143,6 +181,110 @@ func TestProbeRedis_클라이언트_메모리_키_버전을_읽는다(t *testing
 	}
 	if h.Metrics[0].Value == "-" || h.Metrics[0].Value == "0" || h.Metrics[1].Value == "-" {
 		t.Errorf("Metrics = %+v", h.Metrics)
+	}
+}
+
+func TestProbeRedis_INFO_는_필요한_네_구역만_묻는다(t *testing.T) {
+	c := testRedisConn(t)
+	c.UUID = "it-redis-sections"
+	cs := NewClients()
+	defer cs.Close()
+	_, err := cs.Redis(ctx(t), c) // 연결을 미리 열어 MONITOR 에 확인의 INFO 만 남게 한다
+	must(t, err)
+	mon := redis.NewClient(&redis.Options{Addr: net.JoinHostPort(c.Host, strconv.Itoa(c.Port))})
+	defer mon.Close()
+	lines := make(chan string, 64)
+	cmd := mon.Monitor(ctx(t), lines)
+	cmd.Start()
+	defer cmd.Stop()
+	time.Sleep(100 * time.Millisecond) // MONITOR 가 자리 잡을 때까지
+	if h := cs.ProbeRedis(ctx(t), c); !h.OK {
+		t.Fatalf("ProbeRedis = %+v", h)
+	}
+	for timeout := time.After(3 * time.Second); ; {
+		select {
+		case l := <-lines:
+			if strings.Contains(l, `"info"`) || strings.Contains(l, `"INFO"`) {
+				if !strings.Contains(strings.ToLower(l), `"info" "server" "clients" "memory" "keyspace"`) {
+					t.Fatalf("INFO 인자: %s", l)
+				}
+				return
+			}
+		case <-timeout:
+			t.Fatal("INFO 를 보지 못함")
+		}
+	}
+}
+
+// delayProxy 는 새 연결마다 delay 만큼 기다린 뒤 upstream 과 잇는다. stall 이 켜지면 서버 응답을 버린다.
+type delayProxy struct {
+	ln    net.Listener
+	stall atomic.Bool
+}
+
+func newDelayProxy(t *testing.T, upstream string, delay time.Duration) *delayProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	must(t, err)
+	p := &delayProxy{ln: ln}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			cl, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.pipe(cl, upstream, delay)
+		}
+	}()
+	return p
+}
+
+func (p *delayProxy) pipe(cl net.Conn, upstream string, delay time.Duration) {
+	defer cl.Close()
+	time.Sleep(delay)
+	up, err := net.Dial("tcp", upstream)
+	if err != nil {
+		return
+	}
+	defer up.Close()
+	go func() { _, _ = io.Copy(up, cl) }()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := up.Read(buf)
+		if err != nil {
+			return
+		}
+		if p.stall.Load() {
+			continue
+		}
+		if _, err := cl.Write(buf[:n]); err != nil {
+			return
+		}
+	}
+}
+
+func TestProbeRedis_처음_여는_데는_긴_제한을_쓰고_질의는_짧은_제한을_쓴다(t *testing.T) {
+	c := testRedisConn(t)
+	oldQ, oldO := ProbeTimeout, ProbeOpenTimeout
+	ProbeTimeout, ProbeOpenTimeout = 200*time.Millisecond, 10*time.Second
+	t.Cleanup(func() { ProbeTimeout, ProbeOpenTimeout = oldQ, oldO })
+	px := newDelayProxy(t, net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), 300*time.Millisecond)
+	_, port, _ := net.SplitHostPort(px.ln.Addr().String())
+	c.UUID, c.Host = "it-redis-slow-open", "127.0.0.1"
+	c.Port, _ = strconv.Atoi(port)
+	cs := NewClients()
+	defer cs.Close()
+	if h := cs.ProbeRedis(ctx(t), c); !h.OK {
+		t.Fatalf("여는 데 질의 제한보다 오래 걸려도 성공해야 한다: %+v", h)
+	}
+	px.stall.Store(true)
+	start := time.Now()
+	if h := cs.ProbeRedis(ctx(t), c); h.OK {
+		t.Fatalf("응답이 없으면 실패: %+v", h)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("질의는 짧은 제한에 끝나야 한다: %v", took)
 	}
 }
 

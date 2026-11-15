@@ -41,7 +41,7 @@ type Backend interface {
 }
 
 // Prober 는 대시보드(R64.2)용 가벼운 확인을 하는 Backend 다. 읽기 전용 메타데이터만 묻고, 오류는 비밀값을 지운
-// db.Health{OK: false} 로 돌려준다. 제한 시간은 호출부가 ctx 에 건다(db.ProbeTimeout).
+// db.Health{OK: false} 로 돌려준다. 제한 시간은 호출부가 ctx 에 건다(db.ProbeTimeout, main 의 probeAny).
 type Prober interface {
 	Probe(ctx context.Context) db.Health
 }

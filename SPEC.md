@@ -581,10 +581,11 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R64 대시보드
 
-- R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 확인 중)·지연(ms)·버전·주요 수치다.
+- R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 아직 결과 없음)·지연(ms)·버전·주요 수치다. 다시 확인하는 동안에는 줄·수치·요약이 마지막 결과를 그대로 보이고 머리에 `확인 중 N`만 센다. 표가 다섯 줄을 못 얻을 만큼 낮으면 요약 카드를 한 줄 글로 접는다.
   - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`.
+  - 예: PostgreSQL `활성`은 확인하는 연결 자신을 뺀다. Redis 메모리는 `maxmemory:0`이면 `1.1GB/제한 없음`, `maxmemory` 필드를 숨긴 서버는 사용량만 `1.1GB`다.
   - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있으면 그 칸을 경고 색으로 그린다.
-- R64.2 확인은 모든 접속에 동시에, 접속마다 5초 제한으로 보낸다. 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO`, OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
+- R64.2 확인은 모든 접속에 동시에, 접속마다 질의 5초 제한으로 보낸다. 아직 열지 않은 접속을 여는 데는 15초까지 따로 준다(Redis 는 평문 3초 뒤 TLS 로 다시 붙고, PostgreSQL `connect_timeout` 이 8초다). 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 다시 볼 때와 대시보드 탭을 닫을 때는 진행 중인 이전 확인을 취소한다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO server clients memory keyspace`(Redis 7 미만이 거절하면 `INFO`), OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
   - 단, 아직 열지 않은 접속도 확인 때문에 연결을 연다(풀 연결 하나). 확인 오류는 비밀값을 지워 한 줄로 보인다.
 - R64.3 CLI `db status [--format table|tsv|json] [--prod] [-c 이름…]`는 같은 확인을 한 번 돌려 표를 찍는다. prod 접속은 `--prod`가 없으면 확인하지 않고 `--prod 로 확인`으로 보인다(R58.2). 하나라도 실패하면 종료 코드 1이다.
   - 예: 열은 `group`·`name`·`env`·`kind`·`ok`·`latency_ms`·`version`·`metrics`다. json 은 접속마다 객체인 배열이고 `metrics`는 `{name,value,warn}` 배열, 확인하지 않은 prod 는 `"ok":null`·`"note":"--prod 로 확인"`이다. `-c`는 여러 번 줄 수 있고 없으면 모든 접속이다.

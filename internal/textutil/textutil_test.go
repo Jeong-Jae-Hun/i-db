@@ -1,6 +1,9 @@
 package textutil
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestPrintable_제어문자는_보이는_글자로_줄바꿈은_고를_수_있다(t *testing.T) {
 	cases := []struct {
@@ -39,6 +42,10 @@ func TestKoreanCount_만_억_조_단위로_줄이고_경계는_버린다(t *test
 		{150000000, "1.5억"},
 		{1234567890123, "1.2조"},
 		{-12000, "-1.2만"},
+		{-37, "-37"},
+		{-150000000, "-1.5억"},
+		{math.MaxInt64, "9,223,372조"},
+		{math.MinInt64, "-9,223,372조"}, // 부호를 뒤집으면 넘쳐 같은 값이 된다
 	}
 	for _, c := range cases {
 		if got := KoreanCount(c.in); got != c.want {
