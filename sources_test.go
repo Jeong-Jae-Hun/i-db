@@ -880,6 +880,9 @@ func TestConnWarning_평문_http_비밀번호와_AWS_밖_서명을_알린다(t *
 		{db.Conn{Kind: db.KindDynamoDB, URL: "http://localhost:8000"}, ""},
 		{db.Conn{Kind: db.KindDynamoDB, URL: "https://dynamodb.ap-northeast-2.amazonaws.com"}, ""},
 		{db.Conn{Kind: db.KindDynamoDB}, ""},
+		{db.Conn{Kind: db.KindPG, Host: "db.internal", SSLMode: "prefer"}, msgPlainPG},
+		{db.Conn{Kind: db.KindPG, Host: "db.internal", SSLMode: "require"}, ""},
+		{db.Conn{Kind: db.KindPG, Host: "localhost", SSLMode: "disable"}, ""},
 	}
 	for _, c := range cases {
 		if got := connWarning(c.c); got != c.want {

@@ -35,6 +35,7 @@ const (
 	msgExpensive      = "비싼 질의"
 	msgUnsupported    = "이 접속 종류에서는 안 됨"
 	msgPlainHTTP      = "비밀번호가 평문 http 로 감"
+	msgPlainPG        = "TLS 없이 붙으면 비밀번호가 평문으로 감"
 	msgForeignSigV4   = "AWS 서명을 AWS 밖 주소로 보냄"
 )
 
@@ -116,7 +117,7 @@ func sourceErrText(err error) string {
 func connWarning(c db.Conn) string {
 	// TLS 를 끄거나 실패 시 평문으로 떨어지게 한 원격 PostgreSQL 은 비밀번호가 평문으로 갈 수 있다(R59.1)
 	if c.Kind == db.KindPG && (c.SSLMode == "disable" || c.SSLMode == "prefer") && c.Host != "localhost" && c.Host != "127.0.0.1" {
-		return msgPlainHTTP
+		return msgPlainPG
 	}
 	u, err := url.Parse(c.URL)
 	if !c.Kind.IsSource() || c.URL == "" || err != nil {
