@@ -86,11 +86,11 @@ func TestToResult_항목에_없는_키_열은_빼고_한도를_넘으면_자른�
 
 func TestCapText_큰_칸은_db_규칙대로_자른다(t *testing.T) {
 	big := strings.Repeat("가", db.MaxCellBytes)
-	got := capText(big)
+	got := db.CapCell(big)
 	if !db.IsCappedCell(got) {
 		t.Errorf("잘린 칸을 db.IsCappedCell 이 알아봐야 한다: 꼬리 %q", got[len(got)-30:])
 	}
-	if capText("짧음") != "짧음" {
+	if db.CapCell("짧음") != "짧음" {
 		t.Error("짧은 칸은 그대로여야 한다")
 	}
 }

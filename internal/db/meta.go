@@ -104,11 +104,11 @@ func (p *PGConn) DescribeTable(ctx context.Context, t TableRef) (*Result, error)
 		if c.NotNull {
 			nullable = "NO"
 		}
-		res.Rows = append(res.Rows, []string{c.Name, c.Type, nullable, capCell(columnDefault(c)), capCell(c.Comment)})
+		res.Rows = append(res.Rows, []string{c.Name, c.Type, nullable, CapCell(columnDefault(c)), CapCell(c.Comment)})
 	}
 	var b strings.Builder
 	if m.rel.Comment != "" {
-		fmt.Fprintf(&b, "comment: %s\n", capCell(m.rel.Comment))
+		fmt.Fprintf(&b, "comment: %s\n", CapCell(m.rel.Comment))
 	}
 	if len(m.cons) > 0 {
 		b.WriteString("constraints:\n")

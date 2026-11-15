@@ -11,18 +11,23 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/dynamo"
+	"github.com/Jeong-Jae-Hun/i-db/internal/obs"
+	"github.com/Jeong-Jae-Hun/i-db/internal/opensearch"
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 )
 
 // ─── 읽기 전용 저장소 (R60~R63) ───
 // 화면·CLI 는 source.Backend 만 본다. 종류별 구현은 openSource 에 등록한 생성기로 연다.
 
-// openSource 는 종류별 Backend 생성기다. 등록하지 않은 종류는 `<종류> source is not built in` 오류다.
-// 각 저장소 패키지를 합칠 때 sources_register.go 같은 곳에서 채운다. 예:
-//
-//	openSource[db.KindOpenSearch] = func(_ context.Context, c db.Conn) (source.Backend, error) { return opensearch.New(c) }
-//	openSource[db.KindDynamoDB] = dynamo.New
-var openSource = map[db.Kind]func(context.Context, db.Conn) (source.Backend, error){}
+// openSource 는 종류별 Backend 생성기다. 등록하지 않은 종류는 `<종류> source is not built in` 오류다(테스트가 가짜로 바꿔 끼운다).
+var openSource = map[db.Kind]func(context.Context, db.Conn) (source.Backend, error){
+	db.KindOpenSearch: func(_ context.Context, c db.Conn) (source.Backend, error) { return opensearch.New(c) },
+	db.KindLoki:       func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewLoki(c) },
+	db.KindPrometheus: func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewPrometheus(c) },
+	db.KindGrafana:    func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewGrafana(c) },
+	db.KindDynamoDB:   dynamo.New,
+}
 
 const (
 	msgReadOnlySource = "읽기 전용 저장소라 보내지 않음"

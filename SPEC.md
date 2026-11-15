@@ -554,12 +554,15 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R61.1 트리는 인덱스(별칭은 `→ 인덱스`)와 그 아래 매핑 필드(`이름 타입`, 중첩은 `a.b`)다. 인덱스 `Enter`는 최근 문서 50개(`sort: _doc desc`가 아니라 `match_all`, `size: 50`)를 연다. 인증은 `basic`(user·비밀번호) 또는 `sigv4`(서비스 `es`).
 - R61.2 편집기는 두 꼴을 받는다. `SELECT …`(대소문자 무시)는 SQL 플러그인(`POST _plugins/_sql`)으로, `GET <인덱스>/_search`·`GET <인덱스>/_count`·`GET _cat/…`·`GET <인덱스>/_mapping` 첫 줄 뒤 JSON 본문은 REST로 보낸다. 다른 메서드·경로는 R60.2로 거절한다(`_search`의 POST는 받음). 결과 열은 `_index`·`_id`·`_score`와 `_source` 최상위 필드(첫 1,000건의 필드 합집합)이고 집계(`aggregations`)는 JSON 칸 한 줄로 보인다.
   - 예: `GET logs-*/_search` + `{"query":{"match":{"status":500}},"size":20}` → 20행.
+  - 단, `SELECT`는 `fetch_size`로 `--max-rows`(기본 1,000, 상한 1만)까지 첫 페이지를 받는다(플러그인 기본 200행 상한을 넘김). REST `_search`는 본문의 `size`를 그대로 따르고 없으면 OpenSearch 기본 10건이다.
 
 ### R62 Loki·Prometheus·Grafana
 
 - R62.1 Loki 트리는 라벨 이름 → 값(최근 1시간), 값 `Enter`는 `{라벨="값"}` 최근 100줄이다. Prometheus 트리는 지표 이름(앞 1,000개)이고 `Enter`는 그 지표의 즉시값이다. Grafana 접속은 Loki·Prometheus 데이터 소스 목록을 보이고 그 아래는 같은 트리다(`/api/datasources/proxy/uid/<uid>/…`로 보냄, 토큰 `Authorization: Bearer`).
 - R62.2 편집기는 Loki면 LogQL, Prometheus면 PromQL이다. 편집기 위 한 줄에 범위(`최근 1h`)를 보이고 `Ctrl+]`로 `15m·1h·6h·24h·7d`를 돈다(CLI `--since`·`--until`). 로그 결과 열은 `time`(KST)·스트림 라벨·`line`, 지표 결과는 `time`·라벨·`value`이고 범위 질의는 차트(R28)로 볼 수 있다. 한도는 `--max-rows`(기본 1,000, Loki 서버 상한 5,000).
   - 예: `{app="api"} |= "error"` → 최근 1시간 로그. `sum by (status) (rate(http_requests_total[5m]))` → 범위 질의 표.
+  - Prometheus 실행은 늘 범위 질의다(step은 범위/250, 최소 15초). 즉시값은 트리 지표 `Enter`로 본다.
+  - Grafana 접속은 편집기 첫 줄 `# datasource: <이름|uid>`로 데이터 소스를 고른다(LogQL·PromQL 주석이라 서버에 가도 무해, 보내기 전에 지움). 없으면 이름순 첫 Loki, 없으면 첫 Prometheus다.
 
 ### R63 DynamoDB
 

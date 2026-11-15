@@ -324,7 +324,9 @@ func (b *backend) Run(ctx context.Context, q source.Query) (*db.Result, error) {
 }
 
 func (b *backend) runSQL(ctx context.Context, text string, limit int) (*db.Result, error) {
-	body, err := json.Marshal(map[string]string{"query": strings.TrimRight(strings.TrimSpace(text), "; \t\r\n")})
+	// fetch_size 를 주면 플러그인 기본 상한(plugins.query.size_limit, 200행) 대신 첫 페이지로 limit 행까지 돌려준다.
+	// 다음 페이지 커서는 따라가지 않는다(행 상한이 곧 첫 페이지 크기다)
+	body, err := json.Marshal(map[string]any{"query": strings.TrimRight(strings.TrimSpace(text), "; \t\r\n"), "fetch_size": min(limit, maxWindow)})
 	if err != nil {
 		return nil, err
 	}
@@ -648,9 +650,5 @@ func cell(raw json.RawMessage) string {
 	default:
 		s = string(raw)
 	}
-	// db.capCell 과 같은 꼬리라 db.IsCappedCell 이 잘린 칸으로 알아본다
-	if len(s) > db.MaxCellBytes {
-		s = strings.ToValidUTF8(s[:db.MaxCellBytes], "") + fmt.Sprintf("…(%d바이트)", len(s))
-	}
-	return s
+	return db.CapCell(s)
 }

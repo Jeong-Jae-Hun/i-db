@@ -77,9 +77,9 @@ func table(rows []labeledRow, last string, limit int) *db.Result {
 		row := make([]string, 0, len(res.Cols))
 		row = append(row, kstTime(r.at))
 		for _, l := range labels {
-			row = append(row, r.labels[l])
+			row = append(row, db.CapCell(r.labels[l]))
 		}
-		res.Rows = append(res.Rows, append(row, r.last))
+		res.Rows = append(res.Rows, append(row, db.CapCell(r.last)))
 	}
 	return res
 }

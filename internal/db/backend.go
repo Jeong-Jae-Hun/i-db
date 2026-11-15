@@ -616,7 +616,7 @@ func collectRows(rows pgx.Rows, limit int, raw func([][]byte)) *Result {
 			if v == nil {
 				row[i] = "NULL"
 			} else {
-				row[i] = capCell(v) // []byte 를 통째로 string 으로 복사하지 않게 자른 뒤 바꾼다
+				row[i] = CapCell(v) // []byte 를 통째로 string 으로 복사하지 않게 자른 뒤 바꾼다
 			}
 		}
 		res.Rows = append(res.Rows, row)
@@ -705,7 +705,7 @@ func (r *RedisConn) GetValue(ctx context.Context, key string) (*Result, error) {
 				return nil, err
 			}
 			for i := 0; i+1 < len(kv); i += 2 {
-				res.Rows = append(res.Rows, []string{capCell(kv[i]), capCell(kv[i+1])})
+				res.Rows = append(res.Rows, []string{CapCell(kv[i]), CapCell(kv[i+1])})
 			}
 			cursor = next
 			if cursor == 0 || len(res.Rows) >= MaxRows {
@@ -724,7 +724,7 @@ func (r *RedisConn) GetValue(ctx context.Context, key string) (*Result, error) {
 		}
 		res.Cols = []string{"#", "value"}
 		for i, v := range vs {
-			res.Rows = append(res.Rows, []string{strconv.Itoa(i), capCell(v)})
+			res.Rows = append(res.Rows, []string{strconv.Itoa(i), CapCell(v)})
 		}
 	case "set":
 		res.Cols = []string{"member"}
@@ -735,7 +735,7 @@ func (r *RedisConn) GetValue(ctx context.Context, key string) (*Result, error) {
 				return nil, err
 			}
 			for _, v := range vs {
-				res.Rows = append(res.Rows, []string{capCell(v)})
+				res.Rows = append(res.Rows, []string{CapCell(v)})
 			}
 			cursor = next
 			if cursor == 0 || len(res.Rows) >= MaxRows {
@@ -754,7 +754,7 @@ func (r *RedisConn) GetValue(ctx context.Context, key string) (*Result, error) {
 		}
 		res.Cols = []string{"member", "score"}
 		for _, z := range zs {
-			res.Rows = append(res.Rows, []string{capCell(fmt.Sprint(z.Member)), strconv.FormatFloat(z.Score, 'f', -1, 64)})
+			res.Rows = append(res.Rows, []string{CapCell(fmt.Sprint(z.Member)), strconv.FormatFloat(z.Score, 'f', -1, 64)})
 		}
 	case "stream":
 		xs, err := r.cl.XRangeN(ctx, key, "-", "+", 200).Result()
@@ -767,7 +767,7 @@ func (r *RedisConn) GetValue(ctx context.Context, key string) (*Result, error) {
 			if err != nil {
 				return nil, err
 			}
-			res.Rows = append(res.Rows, []string{x.ID, capCell(string(b))})
+			res.Rows = append(res.Rows, []string{x.ID, CapCell(string(b))})
 		}
 	case "none":
 		res.Text += "\n\n(키 없음)"
@@ -876,7 +876,8 @@ func (r *RedisConn) Run(ctx context.Context, args []string) (*Result, error) {
 	return res, nil
 }
 
-func capCell[T string | []byte](s T) string {
+// CapCell 은 칸을 MaxCellBytes(E63)에서 자르고 `…(N바이트)` 꼬리를 붙인다. IsCappedCell 이 이 꼬리로 잘린 칸을 알아보므로 다른 저장소 패키지도 이것을 쓴다
+func CapCell[T string | []byte](s T) string {
 	if len(s) <= MaxCellBytes {
 		return string(s)
 	}

@@ -295,7 +295,7 @@ func toResult(items []map[string]types.AttributeValue, limit int, keys []string)
 			if res.Types[i] == "" {
 				res.Types[i] = typ
 			}
-			row[i] = capText(text)
+			row[i] = db.CapCell(text)
 		}
 		res.Rows = append(res.Rows, row)
 	}
@@ -379,11 +379,3 @@ func toJSON(v types.AttributeValue) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
-// capText 는 db 의 칸 상한(E63)과 같은 꼴로 자른다. 꼬리 모양이 같아야 db.IsCappedCell 이 잘린 칸을 알아본다.
-// db.capCell 이 내보내지지 않아 같은 규칙을 여기 둔다.
-func capText(s string) string {
-	if len(s) <= db.MaxCellBytes {
-		return s
-	}
-	return strings.ToValidUTF8(s[:db.MaxCellBytes], "") + fmt.Sprintf("…(%d바이트)", len(s))
-}
