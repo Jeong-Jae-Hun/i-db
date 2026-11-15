@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
 
@@ -20,10 +21,8 @@ import (
 var (
 	// probeConn 은 접속 하나를 읽기 전용 메타데이터로 살펴본다(R64.2). 화면과 `db status` 가 같이 쓴다.
 	// ctx 에는 probeTimeout 이 걸려 있다. 결과의 Err 는 비밀값을 지운 한 줄이어야 한다.
-	// 종류별 확인(db.ProbePG·ProbeRedis·source.Prober)은 통합할 때 여기에 잇는다. 테스트가 바꿔 끼운다
-	probeConn = func(ctx context.Context, clients *db.Clients, sources *sourcePool, c db.Conn) db.Health {
-		return db.Health{Err: "not built"}
-	}
+	// 테스트가 바꿔 끼운다
+	probeConn = probeAny
 	// 접속마다 확인 한 번의 시간 제한(R64.2)
 	probeTimeout = 5 * time.Second
 	// 대시보드가 활성 탭인 동안 다시 확인하는 간격(R64.2). 테스트가 줄인다
@@ -423,4 +422,24 @@ func dashMetrics(d *dashState, c db.Conn) string {
 func padCell(v string, w int) string {
 	v = ansi.Truncate(v, w, "…")
 	return v + strings.Repeat(" ", max(0, w-ansi.StringWidth(v)))
+}
+
+// probeAny 는 종류별 확인을 고른다. 저장소는 Backend 가 source.Prober 를 구현할 때만 확인한다.
+func probeAny(ctx context.Context, clients *db.Clients, sources *sourcePool, c db.Conn) db.Health {
+	switch c.Kind {
+	case db.KindPG:
+		return clients.ProbePG(ctx, c)
+	case db.KindRedis:
+		return clients.ProbeRedis(ctx, c)
+	}
+	start := time.Now()
+	b, err := sources.get(ctx, c)
+	if err != nil {
+		return db.Failed(time.Since(start), err, c.Password)
+	}
+	p, ok := b.(source.Prober)
+	if !ok {
+		return db.Health{Err: "이 종류는 확인을 지원하지 않음"}
+	}
+	return p.Probe(ctx)
 }

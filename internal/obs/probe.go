@@ -79,7 +79,7 @@ func (p *prom) count(ctx context.Context, query string) (int64, error) {
 	return int64(n), nil
 }
 
-// Probe 는 `/api/health` 의 database 상태와 버전이다. database 가 `ok` 가 아니면 경고다. 예: `ok · 11.4.0`.
+// Probe 는 `/api/health` 의 database 상태와 버전이다. database 가 `ok` 가 아니면 경고다. 예: `ok`(버전은 Version 열에만).
 func (g *grafana) Probe(ctx context.Context) db.Health {
 	start := time.Now()
 	body, err := g.c.get(ctx, "/api/health", nil)
@@ -94,7 +94,6 @@ func (g *grafana) Probe(ctx context.Context) db.Health {
 	metrics := []db.Metric{{Value: h.Database, Warn: h.Database != "ok"}}
 	version := ""
 	if h.Version != "" {
-		metrics = append(metrics, db.Metric{Value: h.Version})
 		version = "Grafana " + h.Version
 	}
 	return db.Health{OK: true, Latency: latency, Version: version, Metrics: metrics}

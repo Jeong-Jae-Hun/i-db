@@ -100,7 +100,7 @@ func grafanaProbe(t *testing.T, health func(url.Values) (int, string)) db.Health
 
 func TestGrafanaProbe_database_상태와_버전이고_ok_가_아니면_경고다(t *testing.T) {
 	h := grafanaProbe(t, ok(`{"commit":"abc","database":"ok","version":"11.4.0"}`))
-	if !h.OK || h.Summary() != "ok · 11.4.0" || h.Version != "Grafana 11.4.0" || h.Metrics[0].Warn {
+	if !h.OK || h.Summary() != "ok" || h.Version != "Grafana 11.4.0" || h.Metrics[0].Warn {
 		t.Fatalf("Probe = %+v", h)
 	}
 	if h := grafanaProbe(t, ok(`{"database":"failing","version":"11.4.0"}`)); !h.OK || !h.Metrics[0].Warn {
