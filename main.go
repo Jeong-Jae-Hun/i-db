@@ -64,6 +64,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "conn" {
+		// rm 확인·--password-stdin 은 터미널에서도 표준 입력을 읽는다(R59.4)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := runConnCLI(ctx, os.Args[2:], os.Stdin, term.IsTerminal(os.Stdin.Fd()), os.Stdout, os.Stderr)
+		stop()
+		os.Exit(code)
+	}
 	if len(os.Args) > 1 && isCLICommand(os.Args[1]) {
 		// 표준 입력이 터미널이면 SQL 을 기다리며 멈추지 않게 읽지 않는다
 		var stdin io.Reader = os.Stdin

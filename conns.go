@@ -1,0 +1,590 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
+)
+
+// ─── 접속 추가·수정·삭제 (R59) ───
+// db 전용 접속은 .dbtui/connections.json 에 두고 .idea 는 고치지 않는다. 저장·삭제 뒤 접속 목록을 다시 읽어 맞춘다.
+// 접속 인덱스는 탭·캐시·늦게 오는 메시지가 모두 쓰므로 자리를 옮기지 않는다. 지운 접속 자리에는 빈 Conn(Kind "")을 남긴다.
+
+const (
+	cfName = iota
+	cfGroup
+	cfKind
+	cfHost
+	cfPort
+	cfDB
+	cfUser
+	cfPassword
+	cfCount
+
+	connTestTimeout = 10 * time.Second
+	dataGripRefusal = "DataGrip 접속은 DataGrip 에서 고침"
+)
+
+var (
+	connFieldLabels = [cfCount]string{"이름", "그룹", "종류", "호스트", "포트", "DB", "사용자", "비밀번호"}
+	// 이름 칸 끝에 붙인 접속 URL. 앞의 글은 이름으로 남긴다
+	connURLRe = regexp.MustCompile(`(?:postgres|postgresql|redis|rediss)://\S*$`)
+)
+
+// connForm 은 접속 창이다. inputs[cfKind] 는 쓰지 않고 kind 를 space·←→ 로 바꾼다.
+type connForm struct {
+	edit    int // 고치는 접속 인덱스, 새 접속은 -1
+	kind    db.Kind
+	inputs  [cfCount]textinput.Model
+	focus   int
+	status  string
+	failed  bool // status 가 오류다
+	testSeq int  // 시험마다 올린다. 늦게 온 이전 시험 결과를 버린다
+	testing bool
+	askSave bool // 시험이 실패해 저장할지 묻는 중
+}
+
+type connTestMsg struct {
+	seq     int
+	save    bool
+	version string
+	err     error
+}
+
+// connLabel 은 트리·팔레트·CLI 에 보일 접속 이름이다. db 전용 접속은 (db) 를 붙인다(R59.1).
+func connLabel(c db.Conn) string {
+	if c.Source == db.SourceDB {
+		return c.Name + " (db)"
+	}
+	return c.Name
+}
+
+// connRoots 는 그룹 → 접속 트리다. 그룹 이름 순, 그룹 안은 접속 순서이고 지운 자리(Kind "")는 뺀다.
+// reuse 에 있는 접속 노드(펼침·읽은 자식)와 그룹 펼침 상태는 이어받는다.
+func connRoots(conns []db.Conn, reuse map[int]*node, groupOpen map[string]bool) []*node {
+	byGroup := map[string]*node{}
+	var roots []*node
+	for i, c := range conns {
+		if c.Kind == "" {
+			continue
+		}
+		g := db.GroupOf(c)
+		gn := byGroup[g]
+		if gn == nil {
+			open, ok := groupOpen[g]
+			gn = &node{kind: nGroup, label: g, conn: -1, expanded: open || !ok, loaded: true}
+			byGroup[g] = gn
+			roots = append(roots, gn)
+		}
+		cn := reuse[i]
+		if cn == nil {
+			cn = &node{kind: nConn, label: c.Name, conn: i}
+		}
+		cn.parent = gn
+		gn.children = append(gn.children, cn)
+	}
+	slices.SortStableFunc(roots, func(a, b *node) int { return strings.Compare(a.label, b.label) })
+	return roots
+}
+
+// ─── 창 열기 ───
+
+// openConnForm 은 새 접속(N) 또는 고치기(E) 창을 연다. 새 접속은 고른 줄의 그룹을 채운다.
+func (m *model) openConnForm(n *node, edit bool) {
+	f := &connForm{edit: -1, kind: db.KindPG}
+	for i := range f.inputs {
+		f.inputs[i] = textinput.New()
+		f.inputs[i].Prompt = ""
+		f.inputs[i].CharLimit = 1024
+		f.inputs[i].Width = 40
+		f.inputs[i].Cursor.SetMode(cursor.CursorStatic) // 창 입력은 깜박임 메시지를 받지 않는다
+	}
+	f.inputs[cfPassword].EchoMode = textinput.EchoPassword
+	f.inputs[cfPassword].EchoCharacter = '•'
+	f.inputs[cfName].Placeholder = "app-stg2 또는 postgres://user:pw@host:5432/db"
+	if edit {
+		if n == nil || n.kind != nConn {
+			m.status = "E(접속 고치기)는 접속 줄에서 누르세요"
+			return
+		}
+		c := m.conn(n.conn)
+		if c.Source != db.SourceDB {
+			m.status = dataGripRefusal
+			return
+		}
+		f.edit, f.kind = n.conn, c.Kind
+		for i, v := range map[int]string{cfName: c.Name, cfGroup: c.Group, cfHost: c.Host, cfDB: c.DB, cfUser: c.User} {
+			f.inputs[i].SetValue(v)
+		}
+		if c.Port > 0 {
+			f.inputs[cfPort].SetValue(strconv.Itoa(c.Port))
+		}
+		// B 로 바꾼 데이터베이스는 메모리에만 있다. 파일에는 원래 DB 를 남긴다
+		if m.dbOver[n.conn] != "" {
+			f.inputs[cfDB].SetValue(m.fileConnDB(n.conn))
+		}
+		f.inputs[cfPassword].Placeholder = "비우면 그대로"
+	} else if n != nil {
+		// 고른 줄에서 위로 올라가 처음 만나는 접속의 그룹, 아니면 그룹 줄 이름(`기타` 는 그룹 없음)이다
+		for p := n; p != nil; p = p.parent {
+			if p.kind == nConn {
+				f.inputs[cfGroup].SetValue(m.conn(p.conn).Group)
+				break
+			}
+			if p.kind == nGroup {
+				if p.label != db.GroupOf(db.Conn{}) {
+					f.inputs[cfGroup].SetValue(p.label)
+				}
+				break
+			}
+		}
+	}
+	f.setFocus(cfName)
+	m.connForm = f
+	m.overlay = oConn
+}
+
+// fileConnDB 는 접속 파일에 적힌 DB 다. B(R27.1)로 바꾼 값이 아닌 원래 값을 다시 읽는다. 못 읽으면 지금 값이다.
+func (m *model) fileConnDB(i int) string {
+	if p, err := db.LoadProject(m.proj.Dir); err == nil {
+		if j, ok := p.ConnIndex(m.conn(i).UUID); ok {
+			return p.Conns[j].DB
+		}
+	}
+	return m.conn(i).DB
+}
+
+func (f *connForm) setFocus(i int) {
+	f.focus = (i + cfCount) % cfCount
+	for j := range f.inputs {
+		if j == f.focus {
+			f.inputs[j].Focus()
+		} else {
+			f.inputs[j].Blur()
+		}
+	}
+}
+
+// fillURL 은 이름 칸 끝의 접속 URL 을 읽어 나머지 칸을 채우고 이름 칸에는 앞의 글만 남긴다. 읽지 못하면 그대로 둔다.
+func (f *connForm) fillURL() {
+	v := f.inputs[cfName].Value()
+	loc := connURLRe.FindStringIndex(v)
+	if loc == nil {
+		return
+	}
+	c, pw, err := db.ParseConnURL(v[loc[0]:])
+	if err != nil {
+		f.status, f.failed = "URL 을 읽지 못함 (postgres://user:pw@host:5432/db · redis://:pw@host:6379/0)", true
+		return
+	}
+	f.kind = c.Kind
+	f.inputs[cfName].SetValue(strings.TrimSpace(v[:loc[0]]))
+	for i, s := range map[int]string{cfHost: c.Host, cfPort: strconv.Itoa(c.Port), cfDB: c.DB, cfUser: c.User, cfPassword: pw} {
+		f.inputs[i].SetValue(s)
+	}
+	f.status, f.failed = "URL 로 칸을 채웠음", false
+}
+
+// conn 은 칸 값으로 만든 접속이다. 포트가 비면 종류의 기본 포트다. 비밀번호가 비면 그대로 비운다(고치기에서는 그대로 둠).
+func (f *connForm) conn() (db.Conn, error) {
+	var v [cfCount]string
+	for i := range f.inputs {
+		v[i] = strings.TrimSpace(f.inputs[i].Value())
+	}
+	c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, Host: v[cfHost], DB: v[cfDB], User: v[cfUser],
+		Password: f.inputs[cfPassword].Value(), Port: db.DefaultPGPort}
+	if f.kind == db.KindRedis {
+		c.Port = db.DefaultRedisPort
+	}
+	if p := v[cfPort]; p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return c, errors.New("포트는 1~65535 숫자")
+		}
+		c.Port = n
+	}
+	if c.Host == "" {
+		return c, errors.New("호스트가 필요함")
+	}
+	return c, nil
+}
+
+// ─── 키 ───
+
+func (m *model) connFormKey(k tea.KeyMsg) tea.Cmd {
+	f := m.connForm
+	ks := k.String()
+	if f.askSave {
+		f.askSave = false
+		if ks == "y" {
+			return m.saveConnForm()
+		}
+		f.status = "저장하지 않음"
+		return nil
+	}
+	switch ks {
+	case "esc":
+		f.testSeq++ // 진행 중인 시험 결과는 버린다
+		m.overlay, m.connForm = oNone, nil
+		m.status = "취소함"
+		return nil
+	case "tab", "down":
+		if f.focus == cfName {
+			f.fillURL()
+		}
+		f.setFocus(f.focus + 1)
+		return nil
+	case "shift+tab", "up":
+		f.setFocus(f.focus - 1)
+		return nil
+	case "ctrl+t", "enter":
+		if f.testing {
+			f.status = "시험 중…"
+			return nil
+		}
+		f.fillURL()
+		return m.testConnForm(ks == "enter")
+	}
+	if f.focus == cfKind {
+		if ks == " " || ks == "left" || ks == "right" || ks == "h" || ks == "l" {
+			port := f.inputs[cfPort].Value()
+			f.kind = map[db.Kind]db.Kind{db.KindPG: db.KindRedis, db.KindRedis: db.KindPG}[f.kind]
+			// 기본 포트를 그대로 두었으면 새 종류의 기본 포트로 바꾼다
+			if port == strconv.Itoa(db.DefaultPGPort) || port == strconv.Itoa(db.DefaultRedisPort) {
+				f.inputs[cfPort].SetValue("")
+			}
+		}
+		return nil
+	}
+	var cmd tea.Cmd
+	f.inputs[f.focus], cmd = f.inputs[f.focus].Update(k)
+	if k.Paste && f.focus == cfName {
+		f.fillURL()
+	}
+	return cmd
+}
+
+// testConnForm 은 칸 값으로 접속을 시험한다. save 면 성공 뒤 저장하고, 실패하면 저장할지 묻는다(R59.2).
+func (m *model) testConnForm(save bool) tea.Cmd {
+	f := m.connForm
+	c, err := f.conn()
+	if err == nil && save {
+		err = db.ValidateConn(c)
+	}
+	if err != nil {
+		f.status, f.failed = err.Error(), true
+		return nil
+	}
+	if c.Password == "" && f.edit >= 0 {
+		c.Password = m.conn(f.edit).Password
+	}
+	f.testSeq++
+	seq, life := f.testSeq, m.life
+	f.testing, f.status, f.failed = true, "접속 시험 중…", false
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(life, connTestTimeout)
+		defer cancel()
+		v, err := db.TestConn(ctx, c)
+		return connTestMsg{seq: seq, save: save, version: v, err: err}
+	}
+}
+
+func (m *model) connTested(msg connTestMsg) tea.Cmd {
+	f := m.connForm
+	if f == nil || msg.seq != f.testSeq {
+		return nil
+	}
+	f.testing = false
+	if msg.err != nil {
+		f.status, f.failed = "접속 실패: "+msg.err.Error(), true
+		f.askSave = msg.save
+		return nil
+	}
+	f.status, f.failed = "접속됨 ("+msg.version+")", false
+	if msg.save {
+		return m.saveConnForm()
+	}
+	return nil
+}
+
+// connBusy 는 접속 i 를 지금 고치거나 지우면 안 되는 이유다. 비면 된다.
+// 연결을 닫으면(Forget) 실행·보류 중인 편집·열린 트랜잭션이 사라지므로 먼저 끝내게 한다.
+func (m *model) connBusy(i int) string {
+	switch why := m.dbSwitchBlock(i); {
+	case why != "":
+		return why
+	case m.inTx[i]:
+		return "열린 트랜잭션을 먼저 끝내세요 (F10 COMMIT · F11 ROLLBACK)"
+	case m.export != nil && m.export.conn == i:
+		return "전체 내보내기를 먼저 끝내세요 (esc)"
+	case m.unlink != nil && m.unlink.conn == i:
+		return "키를 지우는 중 (esc 멈춤)"
+	}
+	return ""
+}
+
+func (m *model) saveConnForm() tea.Cmd {
+	f := m.connForm
+	c, err := f.conn()
+	if err != nil {
+		f.status, f.failed = err.Error(), true
+		return nil
+	}
+	if f.edit >= 0 {
+		if why := m.connBusy(f.edit); why != "" {
+			f.status, f.failed = why, true
+			return nil
+		}
+		c, err = db.UpdateConn(m.proj.Dir, m.conn(f.edit).Name, c)
+	} else {
+		c, err = db.AddConn(m.proj.Dir, c)
+	}
+	if err != nil {
+		f.status, f.failed = "저장하지 못함: "+err.Error(), true
+		return nil
+	}
+	m.overlay, m.connForm = oNone, nil
+	cmd := m.reloadConns()
+	if i, ok := m.proj.ConnIndex(c.UUID); ok {
+		if cn := m.connNode(i); cn != nil {
+			m.selectNode(cn)
+		}
+	}
+	m.status = strings.TrimPrefix(m.status+" · 접속 저장함: "+connLabel(c), " · ")
+	return cmd
+}
+
+// ─── 지우기 ───
+
+// removeConnAsk 는 db 전용 접속 i 를 지울지 묻는다(R59.3). DataGrip 접속은 안내만 한다.
+func (m *model) removeConnAsk(i int) tea.Cmd {
+	c := m.conn(i)
+	if c.Source != db.SourceDB {
+		m.status = dataGripRefusal
+		return nil
+	}
+	if why := m.connBusy(i); why != "" {
+		m.status = why
+		return nil
+	}
+	uuid := c.UUID
+	m.confirm(fmt.Sprintf("%s 접속을 지울까요(.env 비밀번호도)", c.Name), func() tea.Cmd {
+		// 묻는 사이 목록이 바뀌었을 수 있어 uuid 로 다시 찾는다
+		j, ok := m.proj.ConnIndex(uuid)
+		if !ok || uuid == "" {
+			m.status = "접속이 이미 없음"
+			return nil
+		}
+		if why := m.connBusy(j); why != "" {
+			m.status = why
+			return nil
+		}
+		name := m.conn(j).Name
+		if err := db.RemoveConn(m.proj.Dir, name); err != nil {
+			m.status = "지우지 못함: " + err.Error()
+			return nil
+		}
+		cmd := m.reloadConns()
+		m.status = strings.TrimPrefix(m.status+" · 접속 지움: "+name, " · ")
+		return cmd
+	})
+	return nil
+}
+
+// removeConnKey 는 팔레트 `접속 지우기`(트리 Alt+X)다. 접속 줄이면 그 접속을, 아니면 db 전용 접속을 고르게 한다(Redis 포함).
+func (m *model) removeConnKey(n *node) tea.Cmd {
+	if n != nil && n.kind == nConn {
+		return m.removeConnAsk(n.conn)
+	}
+	var names []string
+	for _, c := range m.proj.Conns {
+		if c.Source == db.SourceDB {
+			names = append(names, connLabel(c))
+		}
+	}
+	if len(names) == 0 {
+		m.status = "db 전용 접속이 없음 (N 으로 추가)"
+		return nil
+	}
+	m.openPicker("지울 접속 ", names, nil, func(label string) tea.Cmd {
+		i := connByName(m.proj, strings.TrimSuffix(label, " (db)"))
+		if i < 0 {
+			return nil
+		}
+		return m.removeConnAsk(i)
+	}, nil)
+	return nil
+}
+
+// ─── 다시 읽기 ───
+
+// reloadConns 는 접속 파일을 다시 읽어 uuid 로 맞춘다. 그대로인 접속은 자리·트리 노드·캐시를 두고, 새 접속은 끝에 붙인다.
+// 바뀐 접속은 연결을 닫고(Forget) 캐시를 비운다. 사라진 접속 자리는 비우고 그 접속을 쓰던 탭은 접속을 잃는다.
+func (m *model) reloadConns() tea.Cmd {
+	p, err := db.LoadProject(m.proj.Dir)
+	if err != nil {
+		m.status = "접속 목록을 다시 읽지 못함: " + err.Error()
+		return nil
+	}
+	conns := slices.Clone(m.proj.Conns)
+	seen := map[int]bool{}
+	var changed, removed []int
+	var forget []string
+	for _, c := range p.Conns {
+		i := slices.IndexFunc(conns, func(o db.Conn) bool { return o.Kind != "" && o.UUID == c.UUID })
+		if i < 0 {
+			conns = append(conns, c)
+			seen[len(conns)-1] = true
+			continue
+		}
+		seen[i] = true
+		same := c
+		if m.dbOver[i] != "" {
+			same.DB = conns[i].DB // B 로 바꾼 DB 는 메모리에만 있어 비교에서 뺀다
+		}
+		if same != conns[i] {
+			forget = append(forget, conns[i].UUID)
+			conns[i] = c
+			changed = append(changed, i)
+		}
+	}
+	for i, o := range conns {
+		if o.Kind != "" && !seen[i] {
+			forget = append(forget, o.UUID)
+			conns[i] = db.Conn{}
+			removed = append(removed, i)
+		}
+	}
+	m.proj.Conns, m.proj.Mapping, m.proj.AESEnv, m.proj.Warnings = conns, p.Mapping, p.AESEnv, p.Warnings
+
+	reuse, groupOpen := map[int]*node{}, map[string]bool{}
+	var loose *node
+	for _, g := range m.roots {
+		if g.kind == nQueries {
+			loose = g
+			continue
+		}
+		groupOpen[g.label] = g.expanded
+		for _, cn := range g.children {
+			if !slices.Contains(changed, cn.conn) {
+				reuse[cn.conn] = cn
+			}
+		}
+	}
+	m.roots = connRoots(conns, reuse, groupOpen)
+	if loose != nil {
+		m.roots = append(m.roots, loose) // refreshQueries 가 펼침 상태를 이어받고 다시 만든다
+	}
+
+	var catalogs []tea.Cmd
+	for _, i := range slices.Concat(changed, removed) {
+		delete(m.catalogs, i)
+		m.catGen[i]++
+		delete(m.enums, i)
+		delete(m.schemaOf, i)
+		delete(m.dbOver, i)
+		delete(m.inTx, i)
+		delete(m.txSince, i)
+		delete(m.unlocked, i)
+		delete(m.patterns, i)
+		for _, t := range m.tabs {
+			if t.exportConn == i {
+				t.exportSQL = ""
+			}
+			if t.conn != i {
+				continue
+			}
+			if slices.Contains(removed, i) {
+				m.setConn(t, -1)
+			} else {
+				catalogs = append(catalogs, m.setConn(t, i))
+			}
+		}
+	}
+	m.refreshQueries()
+	if len(p.Warnings) > 0 {
+		m.status = "건너뜀: " + strings.Join(p.Warnings, ", ")
+	} else {
+		m.status = ""
+	}
+	if len(forget) == 0 {
+		return tea.Batch(catalogs...)
+	}
+	clients, life := m.clients, m.life
+	// 연결을 닫은 뒤에 자동완성 목록을 읽어야 옛 풀(옛 호스트)을 다시 쓰지 않는다
+	return tea.Sequence(func() tea.Msg {
+		ctx, cancel := context.WithTimeout(life, loadTimeout)
+		defer cancel()
+		for _, uuid := range forget {
+			if err := clients.Forget(ctx, uuid); err != nil {
+				return statusMsg("이전 연결을 닫지 못함: " + err.Error())
+			}
+		}
+		return nil
+	}, tea.Batch(catalogs...))
+}
+
+// ─── 화면 ───
+
+func (m *model) connFormView() string {
+	f := m.connForm
+	title := "새 접속"
+	if f.edit >= 0 {
+		title = "접속 고치기: " + textutil.Printable(m.conn(f.edit).Name, false)
+	}
+	lines := []string{helpTitle.Render(title), ""}
+	for i := range cfCount {
+		label := connFieldLabels[i]
+		if i == cfDB && f.kind == db.KindRedis {
+			label = "DB 번호"
+		}
+		var v string
+		switch i {
+		case cfKind:
+			v = "‹ " + connKinds[f.kind] + " ›"
+			if f.focus == cfKind {
+				v = lipgloss.NewStyle().Reverse(true).Render(v) + dimStyle.Render("  space·←→")
+			}
+		case cfPort:
+			if f.inputs[i].Value() == "" {
+				f.inputs[i].Placeholder = strconv.Itoa(map[db.Kind]int{db.KindPG: db.DefaultPGPort, db.KindRedis: db.DefaultRedisPort}[f.kind])
+			}
+			v = f.inputs[i].View()
+		default:
+			v = f.inputs[i].View()
+		}
+		key := helpKey.Width(10).Render(label)
+		if i != f.focus {
+			key = dimStyle.Width(10).Render(label)
+		}
+		lines = append(lines, key+v)
+	}
+	// pgx 오류는 여러 줄이라 한 줄로 접어 창 폭에서 자른다
+	status := truncate(textutil.Printable(oneLine(f.status), false), max(20, m.w-8))
+	switch {
+	case f.failed:
+		status = errStyle.Render(status)
+	case status != "":
+		status = lipgloss.NewStyle().Foreground(colAccent).Render(status)
+	}
+	lines = append(lines, "", status)
+	if f.askSave {
+		lines = append(lines, confirmBar.Render(" 저장할까요? y/N "))
+	}
+	lines = append(lines,
+		dimStyle.Render(m.label("Tab 다음 칸 · 이름 칸에 URL 붙이면 채움 · Ctrl+T 시험 · Enter 시험 뒤 저장 · esc 닫기")))
+	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, helpBox.Render(strings.Join(lines, "\n")))
+}
