@@ -226,3 +226,15 @@ func TestConnCLI_이름_자리의_URL_은_찾거나_되풀이하기_전에_거�
 		t.Fatalf("하위 명령 자리: %d %q", code, errw)
 	}
 }
+
+func TestConnCLI_add_는_URL_의_sslmode_를_접속_파일에_남긴다(t *testing.T) {
+	dir := connCLIProject(t)
+	u := "postgres://ro:" + connCLIPw + "@10.0.0.9:1/app?sslmode=prefer"
+	if code, _, errw := runCLITest(t, "", "conn", "add", "app-stg3", "--url", u, "-p", dir, "--force"); code != exitOK {
+		t.Fatalf("code=%d err=%q", code, errw)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".dbtui", "connections.json"))
+	if err != nil || !strings.Contains(string(raw), `"sslmode": "prefer"`) {
+		t.Fatalf("sslmode 를 버리면 TLS 를 받지 않는 서버에 다시 못 붙는다: %s %v", raw, err)
+	}
+}

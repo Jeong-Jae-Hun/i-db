@@ -59,6 +59,7 @@ type connForm struct {
 	edit    int // 고치는 접속 인덱스, 새 접속은 -1
 	kind    db.Kind
 	auth    string
+	sslMode string // 칸은 없고 고치기·URL 붙여넣기에서 이어받는다(R59.1)
 	inputs  [cfCount]textinput.Model
 	focus   int
 	status  string
@@ -179,7 +180,7 @@ func (m *model) openConnForm(n *node, edit bool) {
 			m.status = why
 			return
 		}
-		f.edit, f.kind, f.auth = n.conn, c.Kind, c.Auth
+		f.edit, f.kind, f.auth, f.sslMode = n.conn, c.Kind, c.Auth, c.SSLMode
 		for i, v := range map[int]string{cfName: c.Name, cfGroup: c.Group, cfHost: c.Host, cfDB: c.DB, cfUser: c.User,
 			cfURL: c.URL, cfRegion: c.Region, cfProfile: c.Profile} {
 			f.inputs[i].SetValue(v)
@@ -287,6 +288,7 @@ func (f *connForm) fillURL() {
 		return
 	}
 	f.setKind(c.Kind)
+	f.sslMode = c.SSLMode
 	f.inputs[cfName].SetValue(strings.TrimSpace(v[:loc[0]]))
 	for i, s := range map[int]string{cfHost: c.Host, cfPort: strconv.Itoa(c.Port), cfDB: c.DB, cfUser: c.User, cfPassword: pw} {
 		f.inputs[i].SetValue(s)
@@ -357,6 +359,9 @@ func (f *connForm) conn() (db.Conn, error) {
 	}
 	c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, Host: v[cfHost], DB: v[cfDB], User: v[cfUser],
 		Password: f.inputs[cfPassword].Value(), Port: db.DefaultPort(f.kind)}
+	if f.kind == db.KindPG {
+		c.SSLMode = f.sslMode
+	}
 	if p := v[cfPort]; p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 {

@@ -424,3 +424,18 @@ func TestConnRoots는_폴더를_이름순_기타는_뒤_안은_환경_종류_이
 		t.Fatalf("폴더 안 순서: %s", got)
 	}
 }
+
+func TestConnForm_URL_의_sslmode_와_고치는_접속의_sslmode_를_이어받는다(t *testing.T) {
+	m := connTestModel(t)
+	m.selectConn(t, "dg-stg")
+	m.Update(key("N"))
+	m.Update(key("app2"))
+	m.Update(paste("postgres://ro@db.internal:5432/app?sslmode=disable"))
+	if c, err := m.connForm.conn(); err != nil || c.SSLMode != "disable" {
+		t.Fatalf("붙인 URL 의 sslmode: %+v %v", c, err)
+	}
+	m.connForm.setKind(db.KindRedis)
+	if c, _ := m.connForm.conn(); c.SSLMode != "" {
+		t.Fatalf("Redis 는 sslmode 를 쓰지 않는다: %q", c.SSLMode)
+	}
+}

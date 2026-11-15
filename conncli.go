@@ -235,7 +235,7 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 		if err != nil {
 			return usageErr("%v", err)
 		}
-		c.Kind, c.Host, c.Port, c.DB, c.User, c.Password = u.Kind, u.Host, u.Port, u.DB, u.User, pw
+		c.Kind, c.Host, c.Port, c.DB, c.User, c.Password, c.SSLMode = u.Kind, u.Host, u.Port, u.DB, u.User, pw, u.SSLMode
 	}
 	if o.kind != "" && db.Kind(o.kind) != c.Kind && !db.Kind(o.kind).IsSource() {
 		return usageErr("--kind %s 가 URL 종류(%s)와 다름", o.kind, c.Kind)
