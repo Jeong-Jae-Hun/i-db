@@ -5,6 +5,7 @@ package tableview
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/grid"
 	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
 
@@ -20,6 +22,13 @@ const DefaultPageSize = 200
 
 var (
 	errWhere = errors.New("WHERE must be a single expression without a top-level ';'")
+	// plainValue 는 짧은 꼴(R14.4)의 같음·크기 비교 값으로 받는 한 낱말이다. + * / % : 같은 연산자 글자가 들면 SQL 식이다
+	plainValue = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+	// qualifiedName 은 열 참조(t.col)로 읽히는 값이다
+	qualifiedName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$`)
+	// sqlValueWords 는 한 낱말이지만 SQL 값·함수로 읽히는 말이다(대소문자 무시). = null·!= null 은 ParseFilter 가 먼저 IS NULL 로 바꾼다
+	sqlValueWords = []string{"true", "false", "null", "unknown", "default", "current_date", "current_time", "current_timestamp",
+		"localtime", "localtimestamp", "current_user", "current_role", "session_user", "user", "current_schema", "current_catalog"}
 	// 한 줄 입력이라 붙여넣은 줄바꿈·탭은 보이는 대로 공백으로 바꾼다
 	pasteFlattener = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ")
 )
@@ -37,6 +46,22 @@ type Action struct {
 	Status  string
 }
 
+// field 는 열린 입력 줄이다(R16.4).
+type field int
+
+const (
+	fieldNone field = iota
+	fieldWhere
+	fieldOrder
+)
+
+const (
+	barGap   = "   " // WHERE 칸과 ORDER BY 칸 사이
+	barEmpty = "(없음)"
+)
+
+var fieldHeads = map[field]string{fieldWhere: "WHERE ", fieldOrder: "ORDER BY "}
+
 type sortKey struct {
 	col  string
 	desc bool
@@ -49,11 +74,19 @@ type Model struct {
 	page     int
 	where    string
 	orders   []sortKey
+	orderRaw string // 열 이름·방향으로 읽지 못한 ORDER BY 글(식 등). 있으면 orders 대신 쓴다
+	short    string // WHERE 입력의 짧은 꼴(R14.4)에서 바꾼 조건. esc 는 WHERE 가 이것일 때만 지운다
+	cols     []string
+	numeric  []bool
 	total    int64
 	known    bool // total 을 안다(추정이든 정확하든)
 	exact    bool
-	typing   bool
+	typing   field
 	input    string
+	// Tab 완성 후보와 바꿀 자리. 다른 키를 누르면 비워 다음 Tab 이 새로 찾는다
+	comp    []string
+	compAt  int
+	compIdx int
 }
 
 func New(t db.TableRef, opt Options) Model {
@@ -64,7 +97,20 @@ func New(t db.TableRef, opt Options) Model {
 	return Model{table: t, pageSize: min(size, db.MaxRows)}
 }
 
-func (m Model) Typing() bool { return m.typing }
+func (m Model) Typing() bool { return m.typing != fieldNone }
+
+func (m Model) Table() db.TableRef { return m.table }
+
+// SetColumns 는 지금 테이블의 열 이름·타입이다. Tab 완성, 짧은 꼴 조건, ORDER BY 읽기가 쓴다.
+func (m Model) SetColumns(cols, types []string) Model {
+	m.cols, m.numeric = cols, make([]bool, len(cols))
+	if len(types) == len(cols) {
+		for i, t := range types {
+			m.numeric[i] = db.IsNumericType(t)
+		}
+	}
+	return m
+}
 
 // SetTotal 은 행 수를 알린다. 추정치(reltuples)가 음수면 PostgreSQL 14+ 의 "아직 ANALYZE 안 함"이라 모르는 것으로 둔다.
 // 통합은 받은 페이지가 PageSize 보다 짧으면 SetTotal(offset+행 수, true) 로 끝을 알려 다음 페이지를 막을 수 있다.
@@ -85,7 +131,12 @@ func (m Model) SQL() string {
 		}
 	}
 	s := "SELECT * FROM " + m.relation() + m.whereClause()
-	if len(order) > 0 {
+	switch {
+	case m.orderRaw != "" && strings.Contains(m.orderRaw, "--"):
+		s += " ORDER BY " + m.orderRaw + "\n"
+	case m.orderRaw != "":
+		s += " ORDER BY " + m.orderRaw
+	case len(order) > 0:
 		s += " ORDER BY " + strings.Join(order, ", ")
 	}
 	return s + fmt.Sprintf(" LIMIT %d OFFSET %d", m.pageSize, m.page*m.pageSize)
@@ -115,7 +166,10 @@ func (m Model) whereClause() string {
 
 // Update 는 입력 줄이 열려 있으면 모든 키를 먹는다. ctrl+c 같은 전역 키는 통합이 먼저 가로챈다고 본다.
 func (m Model) Update(k tea.KeyMsg) (Model, Action) {
-	if m.typing {
+	if m.typing != fieldNone {
+		if k.Type != tea.KeyTab {
+			m.comp = nil
+		}
 		switch k.Type {
 		case tea.KeyRunes:
 			m.input += pasteFlattener.Replace(string(k.Runes))
@@ -124,15 +178,33 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 		case tea.KeyBackspace:
 			_, size := utf8.DecodeLastRuneInString(m.input)
 			m.input = m.input[:len(m.input)-size]
+		case tea.KeyTab:
+			m = m.complete()
 		case tea.KeyEsc:
-			m.typing, m.input = false, ""
+			m.typing, m.input = fieldNone, ""
 		case tea.KeyEnter:
-			where := strings.TrimSpace(m.input)
-			if err := CheckWhere(where); err != nil {
+			text := strings.TrimSpace(m.input)
+			if err := CheckWhere(text); err != nil {
 				return m, Action{Handled: true, Status: err.Error()}
 			}
-			m.typing, m.input = false, ""
-			return m.withWhere(where), Action{Handled: true, Requery: true}
+			n := m
+			n.typing, n.input = fieldNone, ""
+			if m.typing == fieldOrder {
+				n.orders, n.orderRaw = n.parseOrder(text)
+				n.page = 0
+			} else {
+				cond, short := n.shortCondition(text)
+				n = n.withWhere(cond)
+				if short {
+					n.short = cond
+				}
+			}
+			// 칸마다 보면 WHERE 의 $q$ 가 ORDER BY 의 $q$ 까지 이어져 그 사이 ';' 를 가리는 식으로 두 칸이 합쳐 문장을 늘릴 수 있다.
+			// 실제로 보낼 문장 전체가 하나인지 본다
+			if len(db.SplitStatements(n.SQL())) != 1 || len(db.SplitStatements(n.CountSQL())) != 1 {
+				return m, Action{Handled: true, Status: errWhere.Error()}
+			}
+			return n, Action{Handled: true, Requery: true}
 		}
 		return m, Action{Handled: true}
 	}
@@ -141,9 +213,16 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 		return m, Action{}
 	}
 	switch k.String() {
-	case "w":
-		m.typing, m.input = true, m.where
-		return m, Action{Handled: true}
+	case "w", "/":
+		return m.open(fieldWhere), Action{Handled: true}
+	case "O":
+		return m.open(fieldOrder), Action{Handled: true}
+	case "esc":
+		// / 짧은 꼴로 건 거르기만 지운다. 그 밖의 esc 는 결과 표(선택 끝 등)가 쓴다
+		if m.short == "" || m.where != m.short {
+			return m, Action{}
+		}
+		return m.withWhere(""), Action{Handled: true, Requery: true}
 	case "]":
 		if m.known && m.exact && int64((m.page+1)*m.pageSize) >= m.total {
 			return m, Action{Handled: true, Status: "마지막 페이지"}
@@ -170,7 +249,7 @@ func (m Model) ToggleWhere(cond string) (Model, Action) {
 // withWhere 는 WHERE 를 바꾸고 첫 페이지로 간다. 거르기가 바뀌면 이전 정확한 개수는 맞지 않는다.
 // 추정치는 테이블 전체 기준이라 남긴다.
 func (m Model) withWhere(where string) Model {
-	m.where, m.page = where, 0
+	m.where, m.page, m.short = where, 0, ""
 	if m.exact {
 		m.known, m.exact = false, false
 	}
@@ -193,7 +272,7 @@ func CheckWhere(where string) error {
 // HeaderClick 은 그 열만으로 정렬을 ASC → DESC → 없음 순으로 돌린다. 다른 열 정렬은 지운다.
 func (m Model) HeaderClick(col string) (Model, Action) {
 	next := cycle(m.orders, col)
-	m.orders = nil
+	m.orders, m.orderRaw = nil, ""
 	if i := indexOf(next, col); i >= 0 {
 		m.orders = []sortKey{next[i]}
 	}
@@ -203,7 +282,7 @@ func (m Model) HeaderClick(col string) (Model, Action) {
 
 // HeaderClickAdd 는 다른 열 정렬을 두고 그 열만 순환한다(shift+클릭). 새 열은 뒤에 붙는다.
 func (m Model) HeaderClickAdd(col string) (Model, Action) {
-	m.orders, m.page = cycle(m.orders, col), 0
+	m.orders, m.orderRaw, m.page = cycle(m.orders, col), "", 0
 	return m, Action{Handled: true, Requery: true}
 }
 
@@ -230,13 +309,13 @@ func indexOf(orders []sortKey, col string) int {
 	return -1
 }
 
-// View 는 폭 w 한 줄이다. 입력 중이면 WHERE 입력 줄을, 아니면 테이블·거르기·정렬·행 범위·키 도움말을 보여 준다.
+// View 는 폭 w 한 줄이다. 입력 중이면 WHERE·ORDER BY 입력 줄을, 아니면 WHERE·ORDER BY 칸(R16.4)과 행 범위·테이블·키 도움말을 보여 준다.
 func (m Model) View(w int) string {
 	if w <= 0 {
 		return ""
 	}
-	if m.typing {
-		head, tail := "WHERE ", "█  Enter 적용 · Esc 취소 · 빈 값은 해제"
+	if m.typing != fieldNone {
+		head, tail := fieldHeads[m.typing], "█  Enter 적용 · Esc 취소 · Tab 열 이름"
 		room := w - ansi.StringWidth(head) - ansi.StringWidth(tail)
 		in := textutil.Printable(m.input, false)
 		// 긴 입력은 커서가 있는 끝이 보이도록 앞을 자른다
@@ -245,21 +324,7 @@ func (m Model) View(w int) string {
 		}
 		return ansi.Truncate(head+in+tail, w, "")
 	}
-	where := "WHERE 없음"
-	if m.where != "" {
-		where = "WHERE " + m.where
-	}
-	parts := []string{textutil.Printable(m.table.Schema+"."+m.table.Table, false), textutil.Printable(where, false)}
-	if len(m.orders) > 0 {
-		order := make([]string, len(m.orders))
-		for i, o := range m.orders {
-			order[i] = o.col + "↑"
-			if o.desc {
-				order[i] = o.col + "↓"
-			}
-		}
-		parts = append(parts, textutil.Printable("ORDER BY "+strings.Join(order, ", "), false))
-	}
+	whereSeg, orderSeg := m.bar(w)
 	// 정확한 개수를 알면 끝을 개수로 줄인다. 추정치는 틀릴 수 있어 줄이지 않는다
 	from, to := int64(m.page*m.pageSize), int64((m.page+1)*m.pageSize)
 	rows := fmt.Sprintf("rows %s–%s", textutil.GroupDigits(from+1), textutil.GroupDigits(to))
@@ -271,6 +336,201 @@ func (m Model) View(w int) string {
 	case m.known:
 		rows += " of ~" + textutil.GroupDigits(m.total) + " (추정)"
 	}
-	parts = append(parts, rows, "w 거르기 · + - 칸 조건 · [ ] 페이지 · # 개수")
+	parts := []string{whereSeg + barGap + orderSeg, rows, textutil.Printable(m.table.Schema+"."+m.table.Table, false),
+		"w·/ WHERE · O 정렬 · + - 칸 조건 · [ ] 페이지 · # 개수"}
 	return ansi.Truncate(strings.Join(parts, " · "), w, "…")
+}
+
+// bar 는 표 위 줄 앞의 WHERE 칸과 ORDER BY 칸이다. 그리기와 클릭(BarClick)이 같은 폭을 쓴다.
+// 긴 WHERE 가 ORDER BY 칸을 밀어내지 않게 각 칸 폭을 줄 폭의 반·4분의 1로 자른다.
+func (m Model) bar(w int) (string, string) {
+	where, order := barEmpty, barEmpty
+	if m.where != "" {
+		where = m.where
+	}
+	if t := m.orderText(); t != "" {
+		order = t
+	}
+	return fieldHeads[fieldWhere] + ansi.Truncate(textutil.Printable(where, false), max(8, w/2), "…"),
+		fieldHeads[fieldOrder] + ansi.Truncate(textutil.Printable(order, false), max(8, w/4), "…")
+}
+
+// BarClick 은 표 위 줄의 x 자리 클릭이다. WHERE 칸이면 WHERE 입력, ORDER BY 칸이면 ORDER BY 입력을 연다.
+// 칸 사이 빈칸은 가까운 쪽으로 본다. 입력 중이거나 칸 밖이면 Handled 가 false 다.
+func (m Model) BarClick(x, w int) (Model, Action) {
+	if m.typing != fieldNone || x < 0 {
+		return m, Action{}
+	}
+	whereSeg, orderSeg := m.bar(w)
+	ww := ansi.StringWidth(whereSeg)
+	switch {
+	case x <= ww:
+		return m.open(fieldWhere), Action{Handled: true}
+	case x < ww+len(barGap)+ansi.StringWidth(orderSeg):
+		return m.open(fieldOrder), Action{Handled: true}
+	}
+	return m, Action{}
+}
+
+// open 은 입력 줄을 지금 값으로 채워 연다. 커서는 끝이다.
+func (m Model) open(f field) Model {
+	m.typing, m.input, m.comp = f, m.where, nil
+	if f == fieldOrder {
+		m.input = m.orderText()
+	}
+	return m
+}
+
+// orderText 는 ORDER BY 칸·입력에 보일 글이다. 단순한 소문자 이름은 따옴표 없이 쓴다.
+//   - 예: name 오름, "createdAt" 내림 → name, "createdAt" DESC.
+func (m Model) orderText() string {
+	if m.orderRaw != "" {
+		return m.orderRaw
+	}
+	parts := make([]string, len(m.orders))
+	for i, o := range m.orders {
+		parts[i] = identText(o.col)
+		if o.desc {
+			parts[i] += " DESC"
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// parseOrder 는 ORDER BY 입력을 열·방향 목록으로 읽는다. 모르는 열·식이 있으면 글 그대로(raw) 둔다.
+// 목록으로 읽어야 열 머리 클릭·s 가 그 정렬에서 이어 돈다.
+//   - 예: "Name desc, id" → name 내림, id 오름. "lower(name)" → raw.
+func (m Model) parseOrder(text string) ([]sortKey, string) {
+	if text == "" {
+		return nil, ""
+	}
+	var keys []sortKey
+	for _, item := range strings.Split(text, ",") {
+		f := strings.Fields(item)
+		if len(f) == 0 || len(f) > 2 {
+			return nil, text
+		}
+		col, ok := m.column(f[0])
+		if !ok {
+			return nil, text
+		}
+		k := sortKey{col: col}
+		if len(f) == 2 {
+			switch strings.ToLower(f[1]) {
+			case "asc":
+			case "desc":
+				k.desc = true
+			default:
+				return nil, text
+			}
+		}
+		keys = append(keys, k)
+	}
+	return keys, ""
+}
+
+// column 은 입력한 이름이 가리키는 열이다. "따옴표 이름"은 그대로, 아니면 대소문자까지 같은 열을 먼저, 없으면 대소문자를 무시해 찾는다.
+func (m Model) column(tok string) (string, bool) {
+	if len(tok) >= 2 && tok[0] == '"' && tok[len(tok)-1] == '"' {
+		name := strings.ReplaceAll(tok[1:len(tok)-1], `""`, `"`)
+		return name, slices.Contains(m.cols, name)
+	}
+	if slices.Contains(m.cols, tok) {
+		return tok, true
+	}
+	for _, c := range m.cols {
+		if strings.EqualFold(c, tok) {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// shortCondition 은 WHERE 입력이 R14.4 짧은 꼴(아는 열 + 한 낱말 값)이면 SQL 조건으로 바꾼다. 아니면 SQL 그대로다.
+// SQL 로도 읽히는 글(id = 1 AND …, name = 'x', a<>b, a::text, id = other_col, id=1+2, created>CURRENT_DATE)을
+// 짧은 꼴로 잘못 바꾸지 않도록 값에 따옴표·괄호가 있거나 연산자 글자로 시작하면 SQL 로 둔다.
+// 같음·크기 비교는 더해서 값이 plainValue 한 낱말이고, 열 이름·열 참조(a.b)·SQL 값 낱말이 아니고,
+// 숫자 열이면 십진수일 때만 바꾼다. `:`(찾기)는 SQL 연산자가 아니라 공백이 있어도 바꾼다.
+//   - 예: status=ACTIVE → "status"::text = 'ACTIVE'. status = 'ACTIVE' → 그대로. id=1::int → 그대로.
+func (m Model) shortCondition(text string) (string, bool) {
+	f := grid.ParseFilter(text, m.cols)
+	if f.Col < 0 || strings.ContainsAny(f.Value, `'"()`) || strings.IndexAny(f.Value, "=<>!:~") == 0 {
+		return text, false
+	}
+	if f.Op != grid.OpContains && f.Op != grid.OpNull && f.Op != grid.OpNotNull {
+		_, isCol := m.column(f.Value)
+		if !plainValue.MatchString(f.Value) || isCol || qualifiedName.MatchString(f.Value) ||
+			slices.Contains(sqlValueWords, strings.ToLower(f.Value)) || (m.numeric[f.Col] && !grid.IsDecimal(f.Value)) {
+			return text, false
+		}
+	}
+	cond, _ := f.SQL(m.numeric[f.Col])
+	return cond, true
+}
+
+// complete 는 커서(끝) 앞 낱말을 열 이름(ORDER BY 는 asc·desc 도)으로 채운다. 대소문자를 무시한 앞부분 일치이고
+// 다시 Tab 이면 다음 후보로 돈다.
+func (m Model) complete() Model {
+	if m.comp == nil {
+		inSingle, inDouble := quoteState(m.input)
+		if inSingle {
+			return m // 글자 값 안은 열 이름 자리가 아니다
+		}
+		start := len(m.input)
+		for start > 0 && identByte(m.input[start-1]) {
+			start--
+		}
+		if start > 0 && m.input[start-1] == '"' {
+			if !inDouble {
+				return m // 닫는 따옴표 바로 뒤다. 여는 따옴표로 보고 채우면 앞 이름을 덮는다
+			}
+			start--
+		}
+		prefix := strings.ToLower(strings.TrimPrefix(m.input[start:], `"`))
+		words := m.cols
+		if m.typing == fieldOrder {
+			words = append(slices.Clone(m.cols), "asc", "desc")
+		}
+		for _, w := range words {
+			if strings.HasPrefix(strings.ToLower(w), prefix) {
+				m.comp = append(m.comp, identText(w))
+			}
+		}
+		if m.comp == nil {
+			return m
+		}
+		m.compAt, m.compIdx = start, 0
+	} else {
+		m.compIdx = (m.compIdx + 1) % len(m.comp)
+	}
+	m.input = m.input[:m.compAt] + m.comp[m.compIdx]
+	return m
+}
+
+// quoteState 는 s 끝이 닫히지 않은 작은따옴표 글자 또는 큰따옴표 이름 안인지다. 따옴표를 두 번 쓴 이스케이프는
+// 두 번 바뀌어 제자리다. E 문자열의 백슬래시 이스케이프는 보지 않는다(Tab 완성만 쓰는 근사다).
+func quoteState(s string) (inSingle, inDouble bool) {
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\'' && !inDouble:
+			inSingle = !inSingle
+		case s[i] == '"' && !inSingle:
+			inDouble = !inDouble
+		}
+	}
+	return inSingle, inDouble
+}
+
+// identText 는 따옴표 없이 써도 PostgreSQL 이 같은 이름으로 읽는 이름(소문자·숫자·_)은 그대로, 아니면 QuoteIdent 다.
+func identText(name string) string {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !(c == '_' || ('a' <= c && c <= 'z') || (i > 0 && '0' <= c && c <= '9')) {
+			return db.QuoteIdent(name)
+		}
+	}
+	if name == "" {
+		return db.QuoteIdent(name)
+	}
+	return name
 }

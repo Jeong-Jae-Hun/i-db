@@ -223,3 +223,33 @@ func TestSave_최근_파일과_창_크기를_되살리고_예전_파일도_읽�
 		t.Fatal("v5 파일에는 최근 기록이 없다")
 	}
 }
+
+func TestTouchTable_최근_것부터_같은_테이블은_하나로_50개까지_저장하고_예전_파일도_읽는다(t *testing.T) {
+	var st State
+	t0 := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	st.TouchTable("c1", "public", "users", t0)
+	st.TouchTable("c2", "public", "users", t0.Add(time.Minute))
+	st.TouchTable("c1", "public", "users", t0.Add(2*time.Minute))
+	st.TouchTable("", "public", "x", t0)
+	st.TouchTable("c1", "public", "", t0)
+	want := []RecentTable{{"c1", "public", "users", t0.Add(2 * time.Minute)}, {"c2", "public", "users", t0.Add(time.Minute)}}
+	if !reflect.DeepEqual(st.RecentTables, want) {
+		t.Fatalf("got %v, want %v", st.RecentTables, want)
+	}
+	for i := range 60 {
+		st.TouchTable("c3", "s", fmt.Sprintf("t%d", i), t0)
+	}
+	if n, first, last := len(st.RecentTables), st.RecentTables[0].Table, st.RecentTables[49].Table; n != 50 || first != "t59" || last != "t10" {
+		t.Fatalf("50개까지: n=%d first=%s last=%s", n, first, last)
+	}
+
+	path := tempPath(t)
+	must(t, Save(path, "/p", st))
+	if got, ok, err := Load(path, "/p"); err != nil || !ok || !reflect.DeepEqual(got.RecentTables, st.RecentTables) {
+		t.Fatalf("저장·되살림: %v %v", ok, err)
+	}
+	must(t, os.WriteFile(path, []byte(`{"/old":{"active":0,"tabs":[{"title":"Q"}]}}`), 0o600))
+	if old, ok, err := Load(path, "/old"); err != nil || !ok || old.RecentTables != nil {
+		t.Fatalf("예전 파일: %+v %v %v", old, ok, err)
+	}
+}

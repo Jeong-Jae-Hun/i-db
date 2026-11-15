@@ -57,6 +57,7 @@ var cliCommands = []cliCommand{
 	{"user360", "db user360 --prod 이메일|uid|id|닉네임", "사용자 한눈에 보기(R51). prod 를 조회해 --prod 가 필요하다"},
 	{"search", "db search -c 접속 [-s 스키마] 찾을글", "스키마의 글자 열 전체 검색(테이블당 5행)"},
 	{"schema-diff", "db schema-diff -c 접속A --to 접속B [-s 스키마] [--to-schema 스키마2]", "두 스키마의 테이블·열·제약·인덱스 비교"},
+	{"conn", "db conn add|edit|rm|test …", "db 전용 접속 추가·고치기·지우기·시험(R59, .dbtui/connections.json). db help conn"},
 }
 
 // cliCmdFlags 는 일부 명령만 받는 플래그와 그 명령들이다. 다른 명령에는 플래그를 정의하지 않아
@@ -136,7 +137,9 @@ type cliResult struct {
 }
 
 // runCLI 는 `db <명령> …` 을 실행하고 종료 코드를 돌려준다. stdin 이 nil 이면(터미널) 표준 입력에서 SQL 을 읽지 않는다.
-func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, tty bool) (code int) {
+// stdinTTY 면 표준 입력이 터미널이다. conn 은 rm 확인·--password-stdin 에 그대로 읽고(R59.4),
+// 나머지 명령은 SQL 을 기다리며 멈추지 않게 읽지 않는다. tty 는 표준 출력이 터미널인지다(기본 출력 형식).
+func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, stdout, stderr io.Writer, tty bool) (code int) {
 	// 패닉 값과 스택에는 SQL·서버 응답이 섞여 비밀번호가 나올 수 있어 찍지 않는다
 	defer func() {
 		if recover() != nil {
@@ -145,8 +148,14 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		}
 	}()
 	cmd := args[0]
-	if cmd == "help" {
+	switch cmd {
+	case "help":
 		return cliHelp(args[1:], stdout, stderr)
+	case "conn":
+		return runConnCLI(ctx, args[1:], stdin, stdinTTY, stdout, stderr)
+	}
+	if stdinTTY {
+		stdin = nil
 	}
 	o, err := parseCLI(cmd, args[1:], tty, stderr)
 	switch {
@@ -231,6 +240,10 @@ func cliErrText(ctx context.Context, proj *db.Project, o cliOpts, err error, con
 }
 
 func cliHelp(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "conn" {
+		fmt.Fprint(stdout, connUsage)
+		return exitOK
+	}
 	if len(args) > 0 {
 		if findCommand(args[0]) < 0 {
 			fmt.Fprintf(stderr, "알 수 없는 명령: %s\n", args[0])
@@ -291,23 +304,31 @@ func newCLIFlags(cmd string, out io.Writer) (*flag.FlagSet, *cliOpts) {
 	return fs, o
 }
 
-// parseCLI 는 플래그와 위치 인자를 섞어 쓸 수 있게 읽는다(`db query -c x "select 1" --format json`).
+// parseInterleaved 는 플래그와 위치 인자를 섞어 쓸 수 있게 읽고 위치 인자를 돌려준다(`db query -c x "select 1" --format json`).
 // `--` 뒤는 모두 위치 인자다(Redis 의 -1 같은 인자).
-func parseCLI(cmd string, args []string, tty bool, stderr io.Writer) (cliOpts, error) {
-	fs, o := newCLIFlags(cmd, stderr)
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
 	for {
 		if err := fs.Parse(args); err != nil {
-			return *o, err
+			return pos, err
 		}
 		rest := fs.Args()
 		if len(rest) == 0 {
-			break
+			return pos, nil
 		}
 		if len(args) > len(rest) && args[len(args)-len(rest)-1] == "--" {
-			o.args = append(o.args, rest...)
-			break
+			return append(pos, rest...), nil
 		}
-		o.args, args = append(o.args, rest[0]), rest[1:]
+		pos, args = append(pos, rest[0]), rest[1:]
+	}
+}
+
+// parseCLI 는 명령 플래그를 읽고 기본값·범위를 맞춘다.
+func parseCLI(cmd string, args []string, tty bool, stderr io.Writer) (cliOpts, error) {
+	fs, o := newCLIFlags(cmd, stderr)
+	var err error
+	if o.args, err = parseInterleaved(fs, args); err != nil {
+		return *o, err
 	}
 	switch {
 	case o.format == "" && tty:
@@ -449,9 +470,17 @@ func namesResult(col string, names []string) *db.Result {
 func runCommand(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Clients, stdin io.Reader, stderr io.Writer) ([]cliResult, error) {
 	switch o.cmd {
 	case "conns":
-		res := &db.Result{Cols: []string{"name", "group", "kind", "env", "host", "db"}}
+		// 사람이 읽는 표는 db 전용 접속 이름에 (db) 를 붙인다(R59.1). 기계가 읽는 형식은 -c 에 그대로 넣게 이름만 두고 source 열로 가른다
+		res := &db.Result{Cols: []string{"name", "group", "kind", "env", "host", "db", "source"}}
 		for _, c := range proj.Conns {
-			res.Rows = append(res.Rows, []string{c.Name, c.Group, string(c.Kind), c.Env(), c.Host, c.DB})
+			name, source := c.Name, "datagrip"
+			if c.Source == db.SourceDB {
+				source = db.SourceDB
+			}
+			if o.format == "table" {
+				name = connLabel(c)
+			}
+			res.Rows = append(res.Rows, []string{name, c.Group, string(c.Kind), c.Env(), c.Host, c.DB, source})
 		}
 		return []cliResult{{res: res}}, nil
 

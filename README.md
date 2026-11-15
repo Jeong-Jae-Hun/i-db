@@ -8,9 +8,10 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 
 - Connection tree grouped like DataGrip, with schemas, tables, views, functions and Redis key namespaces
 - SQL editor with syntax highlighting, completion, live templates (`sel`, `ins`, `upd`, ...), formatting, `:name`/`$1` parameters, go-to-definition
-- Results grid: sort, filter, copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)`, charts, JSON tree, cell aggregates, result pinning and diff
+- Results grid: sort (`s` or header click), filter with `/` (`abc`, `!abc`, `col:abc`, `col=v`, `col>v`, `col=null`), copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)`, charts, JSON tree, cell aggregates, result pinning and diff
 - In-place editing of single-table results (preview SQL before submit, undo of the last submit), paste from spreadsheets, CSV import
-- Server-side table view with WHERE, paging, exact count; follow foreign keys in both directions
+- Server-side table view with a DataGrip-style WHERE / ORDER BY bar (column completion, `/` short filters), paging, exact count; follow foreign keys in both directions
+- Command palette (`Ctrl+P`) that runs any action or jumps to any table across connections, recently opened tables first
 - EXPLAIN / EXPLAIN ANALYZE as a plan tree, activity/locks/table sizes, cancel or terminate backends
 - Transactions in Auto or Manual mode, full-schema data search, schema diff between connections, run a statement on another connection and diff the results
 - Redis: key browser, value editor for every type, TTL/rename, monitor (INFO, SLOWLOG, big keys), pattern bulk delete
@@ -55,6 +56,7 @@ It reads:
 | `.idea/dataSources.local.xml` | user name per connection |
 | `.idea/data_source_mapping.xml` | which connection each `queries/*.sql` file belongs to |
 | `.env` | passwords and optional encryption keys (below) |
+| `.dbtui/connections.json` | optional extra connections added from `db` itself (see Connections) |
 | `.dbtui/favorites.json`, `.dbtui/user360.json` | optional, meant to be committed with the project |
 
 Passwords come from `.env`, URL-encoded, keyed by the connection name upper-cased with non-alphanumerics turned into `_`:
@@ -67,6 +69,26 @@ APP_AES_IV=00112233445566778899aabbccddeeff
 ```
 
 Other drivers (MySQL, ...) in the DataGrip project are skipped.
+
+### Connections
+
+Connections you add from `db` go to `.dbtui/connections.json`; `.idea` is never written. They show up with a `(db)` suffix in the tree, the palette and `db conns`. Passwords still go to `.env` (URL-encoded, same key scheme; a new `.env` is created with mode 0600, an existing one keeps its mode). If a name clashes with a DataGrip connection, the `db` one is skipped with a warning.
+
+```json
+[{"uuid":"…","name":"app-stg2","group":"app","kind":"postgresql","host":"db.stg.example.internal","port":5432,"db":"app","user":"app_ro"}]
+```
+
+In the TUI, `N` on a group or connection line (or `새 접속` in the palette) opens a form. Paste a URL such as `postgres://user:pw@host:5432/db`, `redis://:pw@host:6379/0` or `rediss://…` into the first field to fill the rest. `Ctrl+T` tests without saving, `Enter` tests and then saves (after a failed test it asks before saving). `E` edits a `(db)` connection (an empty password keeps the old one), `X` on a `(db)` PostgreSQL connection deletes it together with its `.env` password. On Redis lines `X` stays the pattern delete; use `Alt+X` (`접속 지우기` in the palette) for Redis connections. DataGrip connections are edited in DataGrip.
+
+```sh
+db conn add app-stg2 --url 'postgres://app_ro:pw@db.stg.example.internal:5432/app' --group app
+db conn edit app-stg2 --port 6432
+printf '%s' "$NEW_PW" | db conn edit app-stg2 --password-stdin
+db conn test app-stg2            # or: db conn test --url 'redis://localhost:6379/0'
+db conn rm app-stg2 --yes
+```
+
+Passwords are only taken from `--url` or `--password-stdin` and never printed. `add` and `edit` test the connection first and refuse to save on failure unless `--force` is given (exit code 1). `rm` asks on a terminal and needs `--yes` otherwise. Connecting to a prod connection needs `--prod`, as with the other commands.
 
 ## TUI
 
@@ -82,7 +104,8 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `F9` / `F10` / `F11` | Auto/Manual transactions / COMMIT / ROLLBACK |
 | `Ctrl+L` | unlock writes on a prod connection for a few minutes |
 | `Ctrl+H` | history |
-| tree `Enter` on a table | table view (`w` WHERE, `[` `]` pages) |
+| tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
+| tree `N` / `E` | add / edit a connection (see Connections) |
 
 On macOS, in terminals that speak the kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2), the same actions are bound to ⌘ keys. See SPEC R23 and R47.
 
@@ -99,6 +122,7 @@ db query -c app-stg -f queries/app/report.sql --param id=7
 db explain -c app-stg "select * from orders where id = 1"
 db redis -c app-stg-redis GET some:key
 db schema-diff -c app-stg --to app-prod --prod -s public
+db conn add app-stg2 --url 'postgres://app_ro:pw@db.stg.example.internal:5432/app'
 ```
 
 Output formats are `table`, `tsv`, `csv` and `json` (table on a terminal, tsv otherwise). Reads run inside a server-side READ ONLY transaction. Exit codes: 0 success, 1 execution error, 2 usage, 3 refused by a safety check. CLI runs are not written to history.

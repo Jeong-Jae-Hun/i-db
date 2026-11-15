@@ -110,7 +110,7 @@ func (m *model) refreshQueries() {
 	for _, f := range files {
 		uuid := m.proj.Mapping[f.rel]
 		i, ok := m.proj.ConnIndex(uuid)
-		if !ok || uuid == "" {
+		if !ok {
 			i = -1
 		}
 		m.qfiles[i] = append(m.qfiles[i], f.rel)

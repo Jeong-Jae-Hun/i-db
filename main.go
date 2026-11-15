@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -65,13 +64,8 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && isCLICommand(os.Args[1]) {
-		// 표준 입력이 터미널이면 SQL 을 기다리며 멈추지 않게 읽지 않는다
-		var stdin io.Reader = os.Stdin
-		if term.IsTerminal(os.Stdin.Fd()) {
-			stdin = nil
-		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		code := runCLI(ctx, os.Args[1:], stdin, os.Stdout, os.Stderr, term.IsTerminal(os.Stdout.Fd()))
+		code := runCLI(ctx, os.Args[1:], os.Stdin, term.IsTerminal(os.Stdin.Fd()), os.Stdout, os.Stderr, term.IsTerminal(os.Stdout.Fd()))
 		stop()
 		os.Exit(code)
 	}

@@ -14,14 +14,9 @@ import (
 
 // reveal 은 찾은 객체를 트리에서 고른다. 부모를 아직 안 읽었으면 읽기를 걸고, 읽은 뒤(childrenMsg) 다시 부른다.
 // 테이블·뷰는 테이블 보기로 연다. 정의로 이동(revealTab, R26)이면 포커스를 그대로 두고 요청한 탭에 구조를 연다.
-func (m *model) reveal(it finder.Item) tea.Cmd {
+// ci 는 그 객체의 접속 인덱스다. 이름이 같은 접속이 있어도 고른 접속으로 가게 이름이 아닌 인덱스로 받는다.
+func (m *model) reveal(ci int, it finder.Item) tea.Cmd {
 	m.jump = nil
-	ci := -1
-	for i, c := range m.proj.Conns {
-		if c.Name == it.Conn {
-			ci = i
-		}
-	}
 	switch it.Kind {
 	case finder.KindColumn:
 		// 열은 그 테이블을 찾아 테이블 보기로 연다(R56). 이름은 "테이블.열" 이고 테이블 이름에 점이 들 수 있어 마지막 점에서 자른다
@@ -56,7 +51,7 @@ func (m *model) reveal(it finder.Item) tea.Cmd {
 		m.filter = ""
 	}
 	if !cn.loaded {
-		m.jump = &it
+		m.jump, m.jumpConn = &it, ci
 		return m.expand(cn)
 	}
 	var target *node
@@ -68,7 +63,7 @@ func (m *model) reveal(it finder.Item) tea.Cmd {
 				continue
 			}
 			if !sn.loaded {
-				m.jump = &it
+				m.jump, m.jumpConn = &it, ci
 				return m.expand(sn)
 			}
 			for _, tn := range sn.children {

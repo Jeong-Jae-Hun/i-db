@@ -79,7 +79,7 @@ func runCLITest(t *testing.T, stdin string, args ...string) (int, string, string
 		in = strings.NewReader(stdin)
 	}
 	var out, errw bytes.Buffer
-	code := runCLI(context.Background(), args, in, &out, &errw, false)
+	code := runCLI(context.Background(), args, in, false, &out, &errw, false)
 	return code, out.String(), errw.String()
 }
 
@@ -471,7 +471,7 @@ func TestCLI_표준입력이_닫히지_않으면_timeout_에_1로_끝난다(t *t
 	t.Cleanup(func() { pw.Close() })
 	var out, errw bytes.Buffer
 	start := time.Now()
-	code := runCLI(context.Background(), []string{"query", "-p", dir, "-c", "app-stg", "--timeout", "200ms"}, pr, &out, &errw, false)
+	code := runCLI(context.Background(), []string{"query", "-p", dir, "-c", "app-stg", "--timeout", "200ms"}, pr, false, &out, &errw, false)
 	if code != exitErr || time.Since(start) > 2*time.Second || !strings.Contains(errw.String(), "시간 초과") {
 		t.Fatalf("%d %v %q", code, time.Since(start), errw.String())
 	}
@@ -565,7 +565,7 @@ func (panicWriter) Write([]byte) (int, error) { panic("boom " + cliPassword) }
 func TestCLI_패닉은_internal_error_와_1로_끝난다(t *testing.T) {
 	dir := fakeCLIProject(t)
 	var errw bytes.Buffer
-	code := runCLI(context.Background(), []string{"conns", "-p", dir}, nil, panicWriter{}, &errw, false)
+	code := runCLI(context.Background(), []string{"conns", "-p", dir}, nil, false, panicWriter{}, &errw, false)
 	if code != exitErr || errw.String() != "internal error\n" {
 		t.Fatalf("%d %q", code, errw.String())
 	}

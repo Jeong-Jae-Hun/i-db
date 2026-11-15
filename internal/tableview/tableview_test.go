@@ -274,7 +274,7 @@ func TestView_행_범위와_개수_표기(t *testing.T) {
 		}
 	}
 	got := m.View(300)
-	for _, want := range []string{"public.users", "WHERE 없음", "w 거르기"} {
+	for _, want := range []string{"public.users", "WHERE (없음)   ORDER BY (없음) ·", "w·/ WHERE", "O 정렬"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("want %q in %q", want, got)
 		}
@@ -290,7 +290,7 @@ func TestView_정렬_요약과_제어_문자_치환(t *testing.T) {
 	if strings.ContainsRune(got, '\x1b') || !strings.Contains(got, `t\x1b[31m`) {
 		t.Fatalf("control chars not sanitized: %q", got)
 	}
-	if !strings.Contains(got, "ORDER BY a↑, b↓") {
+	if !strings.Contains(got, "ORDER BY a, b DESC") {
 		t.Fatalf("order summary: %q", got)
 	}
 }
