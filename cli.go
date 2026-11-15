@@ -61,6 +61,7 @@ var cliCommands = []cliCommand{
 	{"user360", "db user360 --prod 이메일|uid|id|닉네임", "사용자 한눈에 보기(R51). prod 를 조회해 --prod 가 필요하다"},
 	{"search", "db search -c 접속 [-s 스키마] 찾을글", "스키마의 글자 열 전체 검색(테이블당 5행)"},
 	{"schema-diff", "db schema-diff -c 접속A --to 접속B [-s 스키마] [--to-schema 스키마2]", "두 스키마의 테이블·열·제약·인덱스 비교"},
+	{"status", "db status [-c 접속 …] [--format table|tsv|json] [--prod]", "모든 접속(또는 -c 로 고른 접속)을 동시에 확인해 상태·지연·버전·주요 수치를 찍음(R64.3). prod 는 --prod 일 때만, 하나라도 실패하면 1"},
 	{"conn", "db conn add|edit|rm|test …", "db 전용 접속 추가·고치기·지우기·시험(R59, .dbtui/connections.json). db help conn"},
 }
 
@@ -106,7 +107,18 @@ type cliOpts struct {
 	since, until                durFlag // Loki·Prometheus 범위(R62.2)
 	prod, write, force, decrypt bool
 	params                      paramFlag
+	conns                       namesFlag // status 의 -c(여러 번)
 	args                        []string
+}
+
+// namesFlag 는 반복되는 -c 이름이다(status).
+type namesFlag []string
+
+func (n *namesFlag) String() string { return strings.Join(*n, ",") }
+
+func (n *namesFlag) Set(s string) error {
+	*n = append(*n, s)
+	return nil
 }
 
 // paramFlag 는 반복되는 --param 이름=값 이다.
@@ -215,6 +227,9 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, 
 	defer cancel()
 	clients := db.NewClients()
 	defer clients.Close()
+	if o.cmd == "status" {
+		return runStatus(ctx, o, proj, clients, stdout, stderr)
+	}
 
 	start := time.Now()
 	results, err := runCommand(ctx, o, proj, clients, stdin, stderr)
@@ -308,7 +323,11 @@ func newCLIFlags(cmd string, out io.Writer) (*flag.FlagSet, *cliOpts) {
 	fs.SetOutput(out)
 	o := &cliOpts{cmd: cmd, params: paramFlag{}}
 	fs.StringVar(&o.dir, "p", defaultProjectDir(), projectUsage)
-	fs.StringVar(&o.conn, "c", "", "접속 이름(db conns)")
+	if cmd == "status" {
+		fs.Var(&o.conns, "c", "확인할 접속 이름(여러 번, 없으면 모두)")
+	} else {
+		fs.StringVar(&o.conn, "c", "", "접속 이름(db conns)")
+	}
 	fs.StringVar(&o.format, "format", "", "출력 형식 table|tsv|csv|json (기본: 터미널이면 table, 아니면 tsv)")
 	fs.IntVar(&o.maxRows, "max-rows", cliDefaultRows, fmt.Sprintf("최대 행 수(상한 %d)", cliMaxRows))
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Second, "전체 시간 제한")

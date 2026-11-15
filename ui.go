@@ -206,6 +206,7 @@ var helpSections = []struct {
 		{"F6", "스키마 고르기 (search_path)", "f6"},
 		{"F7", "마지막 표 결과 전체 내보내기 CSV (esc 취소)", "f7"},
 		{"Ctrl+U", "사용자 한눈에 보기 (이메일·uid·id·닉네임으로 여러 DB 조회)", "ctrl+u"},
+		{"Ctrl+G", "대시보드 (모든 접속 상태·지연·버전·수치, 30초마다 다시 확인)", "ctrl+g"},
 		{"Alt+C", "같은 쿼리 다른 접속에서 비교 (기본 stg↔prod)", "alt+c"},
 		{"Ctrl+L", "prod 쓰기 잠금 열기·닫기 (탭 접속, DB_PROD_UNLOCK_MIN 분)", "ctrl+l"},
 		{"Ctrl+]", "Loki·Prometheus 범위 15m·1h·6h·24h·7d (탭마다)", "ctrl+]"},
@@ -229,7 +230,7 @@ var helpSections = []struct {
 		{"⌘T ⌘W ⌘1..9 ⌘N ⌘H ⌘?", "= Ctrl+T Ctrl+W Alt+1..9 Ctrl+N Ctrl+H F1", ""},
 		{"⌘⇧O ⌘⇧S ⌘⇧D ⌘⇧E", "= F3 F4 F6 F7", ""},
 		{"⌥⌘L ⌘⇧M ⌘⇧↩ ⌘⇧⌫", "= F8(⌘⇧F 도) F9 F10 F11", ""},
-		{"⌘U ⌘L ⌘⇧C ⌘⇧R ⌘⇧P", "= Ctrl+U Ctrl+L Alt+C Alt+R Alt+P", ""},
+		{"⌘U ⌘L ⌘G ⌘⇧C ⌘⇧R ⌘⇧P", "= Ctrl+U Ctrl+L Ctrl+G Alt+C Alt+R Alt+P", ""},
 		{"⌘V", "결과 표에 시트 칸 붙여넣기", ""},
 		{"⌘←→ / ⌘↑↓", "줄 처음·끝 / 문서 처음·끝", ""},
 	}},
@@ -314,6 +315,12 @@ var helpSections = []struct {
 		{"D", "staticEncrypt 칸 복호화 보기 (다시 D 원래 값)", "D"},
 		{"+ / -", "테이블 보기 WHERE 에 칸 값 = / <> 더하기·빼기", "+"},
 		{"q", "종료", "q"},
+	}},
+	{"대시보드 (Ctrl+G)", fKeep, [][3]string{
+		{"r", "바로 다시 확인", ""},
+		{"Enter", "트리에서 그 접속 고르기", ""},
+		{"/ · esc", "그룹·이름·환경으로 거르기 · 해제", ""},
+		{"j k / ↑ ↓", "이동", ""},
 	}},
 	{"JSON 값 보기 (o)", fResult, [][3]string{
 		{"t", "나무 ↔ 원문", "t"},
@@ -688,6 +695,7 @@ type queryTab struct {
 	pinned     bool          // 고정한 탭(R57). 탭 줄 앞에 모이고 닫을 때 묻는다
 	undo       []*undoEntry  // 제출 되돌리기 묶음, 마지막이 가장 최근(R50)
 	since      time.Duration // Loki·Prometheus 범위(R62.2). 0 이면 1h
+	dash       *dashState    // 대시보드 탭이면 그 상태(R64). 편집기·결과 대신 대시보드를 그린다
 }
 
 // completer 는 편집기 자동완성 함수다. 탭의 접속이 바뀌어도 부를 때 다시 읽도록 탭을 가리킨다.
@@ -2535,6 +2543,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.ticking = false
 		return m, m.tick()
+	case dashProbeMsg:
+		m.dashProbed(msg)
+		return m, nil
+	case dashTickMsg:
+		return m, m.dashTicked(msg)
 	case autoSaveMsg:
 		if t := m.findTab(msg.tab); t != nil && t.editRev == msg.rev {
 			m.autoSaveStatus(t)
@@ -3109,6 +3122,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+u":
 		return m, m.userLookup()
+	case "ctrl+g":
+		return m, m.openDash()
 	case "ctrl+l":
 		return m, m.toggleLock()
 	case "alt+c":
@@ -3650,6 +3665,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// ─── 포커스 영역 ───
+	// 대시보드 탭(R64)은 편집기·결과 자리를 한 영역으로 쓴다
+	if t.dash != nil && m.focus != fTree {
+		return m, m.dashKey(k)
+	}
 	switch m.focus {
 	case fEditor:
 		var cmd tea.Cmd
@@ -4219,6 +4238,8 @@ func (m *model) View() string {
 		if b := m.lockBadge(t.conn); b != "" {
 			header += txBadge.Render("  " + b)
 		}
+	} else if t.dash != nil {
+		header += barStyle.Bold(true).Render("대시보드") + hintStyle.Render(fmt.Sprintf(" · 접속 %d", len(connOrder(m.proj.Conns))))
 	} else {
 		header += hintStyle.Render("접속 없음 · 트리에서 고르세요")
 	}
@@ -4356,14 +4377,25 @@ func (m *model) View() string {
 		resInfo = "실행 중…"
 	}
 
+	right := lipgloss.JoinVertical(lipgloss.Left,
+		tabBar,
+		pane(paneSpec{title: textutil.Printable(t.displayName(), false), info: edInfo, body: edBody, w: l.rightW, h: l.edH, focused: m.focus == fEditor,
+			hot: m.drag == bSplit}),
+		pane(paneSpec{title: "Result", info: resInfo, body: rb, w: l.rightW, h: l.resH, focused: m.focus == fResult}))
+	if t.dash != nil {
+		// 대시보드(R64)는 편집기·결과 두 영역(테두리 포함)을 한 영역으로 쓴다
+		h := l.edH + l.resH + 2
+		info := m.label("r 새로고침 · Enter 트리 · / 거르기")
+		if n := len(t.dash.pending); n > 0 {
+			info = fmt.Sprintf("확인 중 %d · ", n) + info
+		}
+		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
+			pane(paneSpec{title: "대시보드", info: info, body: m.dashView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
+	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		pane(paneSpec{title: "Explorer", info: treeInfo, body: strings.TrimRight(tb.String(), "\n"), w: l.treeW, h: l.treeH, focused: m.focus == fTree,
 			hot: m.drag == bTree}),
-		lipgloss.JoinVertical(lipgloss.Left,
-			tabBar,
-			pane(paneSpec{title: textutil.Printable(t.displayName(), false), info: edInfo, body: edBody, w: l.rightW, h: l.edH, focused: m.focus == fEditor,
-				hot: m.drag == bSplit}),
-			pane(paneSpec{title: "Result", info: resInfo, body: rb, w: l.rightW, h: l.resH, focused: m.focus == fResult})))
+		right)
 
 	switch m.overlay {
 	case oFilter:
@@ -4416,7 +4448,11 @@ func (m *model) View() string {
 
 	// ─── 상태 줄 ───
 	status := barStyle.Render(" " + textutil.Printable(m.status, false))
-	return header + "\n" + body + "\n" + m.bar(status, hintStyle.Render(m.label(focusHints[m.focus])+" "))
+	hint := focusHints[m.focus]
+	if t.dash != nil && m.focus != fTree {
+		hint = dashHint
+	}
+	return header + "\n" + body + "\n" + m.bar(status, hintStyle.Render(m.label(hint)+" "))
 }
 
 // bar 는 헤더·상태 줄처럼 왼쪽과 오른쪽 글을 화면 폭에 맞춰 배경색으로 채운 한 줄이다.
