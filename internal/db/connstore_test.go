@@ -250,7 +250,7 @@ func TestParseConnURL은_접속_값과_비밀번호로_나눈다(t *testing.T) {
 	}{
 		{"postgres://app_ro:pw@db.stg.example.internal:5432/app", "pw", Conn{Kind: KindPG, Host: "db.stg.example.internal", Port: 5432, DB: "app", User: "app_ro"}},
 		{"postgresql://u@h/d", "", Conn{Kind: KindPG, Host: "h", Port: 5432, DB: "d", User: "u"}},
-		{"postgres://u:p%40ss%2Fw%3Ard@h:6543/d?sslmode=require", "p@ss/w:rd", Conn{Kind: KindPG, Host: "h", Port: 6543, DB: "d", User: "u"}},
+		{"postgres://u:p%40ss%2Fw%3Ard@h:6543/d?sslmode=require", "p@ss/w:rd", Conn{Kind: KindPG, Host: "h", Port: 6543, DB: "d", User: "u", SSLMode: "require"}},
 		{"redis://:pw@cache:6380/2", "pw", Conn{Kind: KindRedis, Host: "cache", Port: 6380, DB: "2"}},
 		{"rediss://default:x@cache.amazonaws.com", "x", Conn{Kind: KindRedis, Host: "cache.amazonaws.com", Port: 6379, User: "default"}},
 		{"redis://[::1]:7000/0", "", Conn{Kind: KindRedis, Host: "::1", Port: 7000, DB: "0"}},
@@ -357,5 +357,18 @@ func TestForget은_Redis_연결도_닫아_다음에_고친_접속으로_새로_�
 	must(t, err)
 	if r2 == r1 || r2.opts.DB != 1 {
 		t.Fatalf("새 설정으로 연다: db=%d", r2.opts.DB)
+	}
+}
+
+func TestParseConnURL은_sslmode_를_접속에_남기고_모르는_값은_거절한다(t *testing.T) {
+	c, _, err := ParseConnURL("postgres://u:p@db.internal:5432/app?sslmode=prefer")
+	if err != nil || c.SSLMode != "prefer" {
+		t.Fatalf("sslmode: %+v %v", c, err)
+	}
+	if _, _, err := ParseConnURL("postgres://u@db.internal/app?sslmode=allow"); err == nil {
+		t.Fatal("모르는 sslmode 는 거절")
+	}
+	if c, _, _ := ParseConnURL("postgres://u@db.internal/app"); c.SSLMode != "" {
+		t.Fatal("없으면 비움")
 	}
 }

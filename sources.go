@@ -114,6 +114,10 @@ func sourceErrText(err error) string {
 // connWarning 은 저장·시험할 때 알릴 저장소 접속 위험이다(R60.1). 비면 없다.
 // basic·토큰은 http 면 비밀값이 평문으로 가고, DynamoDB 사용자 주소는 SigV4 서명(자격 증명으로 만든)을 그 주소로 보낸다.
 func connWarning(c db.Conn) string {
+	// TLS 를 끄거나 실패 시 평문으로 떨어지게 한 원격 PostgreSQL 은 비밀번호가 평문으로 갈 수 있다(R59.1)
+	if c.Kind == db.KindPG && (c.SSLMode == "disable" || c.SSLMode == "prefer") && c.Host != "localhost" && c.Host != "127.0.0.1" {
+		return msgPlainHTTP
+	}
 	u, err := url.Parse(c.URL)
 	if !c.Kind.IsSource() || c.URL == "" || err != nil {
 		return ""

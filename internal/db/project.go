@@ -56,6 +56,8 @@ type Conn struct {
 	Auth    string
 	Region  string
 	Profile string
+	// SSLMode 는 PostgreSQL 접속의 sslmode 를 덮어쓴다(R59.1). 비면 원격 require·로컬 prefer 다
+	SSLMode string
 	// Source 는 접속을 읽은 곳이다. SourceDB 면 .dbtui/connections.json(R59), 비면 DataGrip .idea 다
 	Source string
 }

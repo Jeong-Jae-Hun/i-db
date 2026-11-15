@@ -531,6 +531,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 단, 파일 잠금은 하지 않는다. 화면과 CLI가 같은 프로젝트를 동시에 고치면 나중 쓰기가 앞 쓰기를 덮을 수 있다.
   - 예: 트리·`db conns`·팔레트에서 db 전용 접속은 이름 뒤에 `(db)`가 붙는다. 환경 판정(R6.2)은 같다.
   - 단, `db conns`의 tsv·csv·json은 `-c`에 그대로 넣도록 이름에 `(db)`를 붙이지 않고 `source` 열(`db`·`datagrip`)로 가른다.
+  - 예: PostgreSQL URL의 `?sslmode=prefer`·`disable`·`require`·`verify-ca`·`verify-full`은 그 접속의 `sslmode`로 남는다(`.dbtui/connections.json`의 `sslmode`). 없으면 원격 `require`·로컬 `prefer`다. TLS를 받지 않는 사내 서버는 `prefer`로 붙이고, 원격에 `prefer`·`disable`이면 저장·시험 때 평문 경고를 보인다.
 - R59.2 트리의 그룹·접속 줄 `N`(또는 팔레트 `새 접속`)은 접속 창을 연다. 칸: 이름·그룹·종류·호스트·포트·DB(Redis는 번호)·사용자·비밀번호. 첫 칸에 `postgres://user:pw@host:5432/db`·`redis://:pw@host:6379/0`·`rediss://…` 같은 URL을 붙이면 나머지 칸을 채운다. `Ctrl+T`는 저장하지 않고 접속을 시험해 `접속됨 (PostgreSQL 16.4)`·오류를 보이고, `Enter`(저장)는 먼저 시험한 뒤 성공하면 저장한다. 시험이 실패해도 `저장할까요? y/N`으로 저장할 수 있다.
   - 예: 비밀번호는 화면에 `•`로만 보이고 `.env`에 URL 인코딩해 쓴다(파일 권한 0600 유지, 없으면 0600으로 만듦). 이름은 영숫자·`-`·`_`만 받는다.
 - R59.3 db 전용 접속 줄에서 `E`는 같은 창으로 고치고, `X`는 `<이름> 접속을 지울까요(.env 비밀번호도) y/N`을 물은 뒤 지운다. DataGrip 접속에서는 `E`·`X`가 `DataGrip 접속은 DataGrip 에서 고침`을 보인다. 이름을 바꾸면 `.env` 키도 옮긴다. 열린 탭·세션이 그 접속을 쓰고 있으면 고치기 전에 연결을 닫는다(R27.1 `Forget`).

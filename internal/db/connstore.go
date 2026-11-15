@@ -60,6 +60,7 @@ type connEntry struct {
 	Auth    string `json:"auth,omitempty"`
 	Region  string `json:"region,omitempty"`
 	Profile string `json:"profile,omitempty"`
+	SSLMode string `json:"sslmode,omitempty"`
 }
 
 func connsPath(dir string) string { return filepath.Join(dir, ".dbtui", "connections.json") }
@@ -155,12 +156,12 @@ func (p *Project) loadDBConns(env map[string]string) error {
 
 func (e connEntry) conn() Conn {
 	return Conn{UUID: e.UUID, Name: e.Name, Group: e.Group, Kind: e.Kind, Host: e.Host, Port: e.Port, DB: e.DB, User: e.User,
-		URL: e.URL, Auth: e.Auth, Region: e.Region, Profile: e.Profile, Source: SourceDB}
+		URL: e.URL, Auth: e.Auth, Region: e.Region, Profile: e.Profile, SSLMode: e.SSLMode, Source: SourceDB}
 }
 
 func entryOf(c Conn) connEntry {
 	return connEntry{UUID: c.UUID, Name: c.Name, Group: c.Group, Kind: c.Kind, Host: c.Host, Port: c.Port, DB: c.DB, User: c.User,
-		URL: c.URL, Auth: c.Auth, Region: c.Region, Profile: c.Profile}
+		URL: c.URL, Auth: c.Auth, Region: c.Region, Profile: c.Profile, SSLMode: c.SSLMode}
 }
 
 // authOptions 는 종류별로 받는 auth 값이다(R60.1). 첫 값이 접속 창의 기본값이다.
@@ -489,9 +490,18 @@ func ParseConnURL(raw string) (Conn, string, error) {
 			return Conn{}, "", errConnURL
 		}
 	}
+	if c.Kind == KindPG {
+		c.SSLMode = u.Query().Get("sslmode")
+		if c.SSLMode != "" && !sslModes[c.SSLMode] {
+			return Conn{}, "", errConnURL
+		}
+	}
 	pw, _ := u.User.Password()
 	return c, pw, nil
 }
+
+// sslModes 는 받는 PostgreSQL sslmode 값이다. allow 처럼 잘 안 쓰는 값은 받지 않는다
+var sslModes = map[string]bool{"disable": true, "prefer": true, "require": true, "verify-ca": true, "verify-full": true}
 
 // TestConn 은 c(비밀번호 c.Password)로 새로 붙어 서버 버전을 읽고 닫는다. 화면의 접속 풀은 쓰지 않는다.
 // 오류에 비밀번호가 나오지 않게 지운다.

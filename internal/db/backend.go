@@ -167,6 +167,10 @@ func (cs *Clients) PG(ctx context.Context, c Conn) (*PGConn, error) {
 	if ip := net.ParseIP(c.Host); c.Host == "localhost" || (ip != nil && ip.IsLoopback()) {
 		sslmode = "prefer"
 	}
+	// TLS 를 받지 않는 사내 서버는 접속 파일의 sslmode 로 낮춘다(R59.1)
+	if c.SSLMode != "" {
+		sslmode = c.SSLMode
+	}
 	u.RawQuery = "sslmode=" + sslmode + "&connect_timeout=8&application_name=db"
 	cfg, err := pgxpool.ParseConfig(u.String())
 	if err != nil {
