@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -27,11 +28,15 @@ const (
 	cfName = iota
 	cfGroup
 	cfKind
+	cfURL  // 읽기 전용 저장소(R60.1). DynamoDB 는 선택 엔드포인트
+	cfAuth // kind 처럼 space·←→ 로 고른다
 	cfHost
 	cfPort
 	cfDB
 	cfUser
 	cfPassword
+	cfRegion
+	cfProfile
 	cfCount
 
 	connTestTimeout = 10 * time.Second
@@ -39,15 +44,21 @@ const (
 )
 
 var (
-	connFieldLabels = [cfCount]string{"이름", "그룹", "종류", "호스트", "포트", "DB", "사용자", "비밀번호"}
+	connFieldLabels = [cfCount]string{"이름", "그룹", "종류", "URL", "인증", "호스트", "포트", "DB", "사용자", "비밀번호", "리전", "프로필"}
 	// 이름 칸 끝에 붙인 접속 URL. 앞의 글은 이름으로 남긴다
-	connURLRe = regexp.MustCompile(`(?i)(?:postgres|postgresql|redis|rediss)://\S*$`)
+	connURLRe = regexp.MustCompile(`(?i)(?:postgres|postgresql|redis|rediss|https?)://\S*$`)
+	// 접속 창 종류 칸이 도는 순서
+	formKinds = append([]db.Kind{db.KindPG, db.KindRedis}, db.SourceKinds...)
+	// http URL 을 붙였는데 종류가 PostgreSQL·Redis 면 흔한 기본 포트로 저장소 종류를 짐작한다. 모르면 OpenSearch 다
+	portKinds = map[string]db.Kind{"9200": db.KindOpenSearch, "3100": db.KindLoki, "9090": db.KindPrometheus, "3000": db.KindGrafana}
 )
 
-// connForm 은 접속 창이다. inputs[cfKind] 는 쓰지 않고 kind 를 space·←→ 로 바꾼다.
+// connForm 은 접속 창이다. inputs[cfKind]·inputs[cfAuth] 는 쓰지 않고 kind·auth 를 space·←→ 로 바꾼다.
+// 종류·인증에 따라 보이는 칸이 다르다(visible).
 type connForm struct {
 	edit    int // 고치는 접속 인덱스, 새 접속은 -1
 	kind    db.Kind
+	auth    string
 	inputs  [cfCount]textinput.Model
 	focus   int
 	status  string
@@ -61,6 +72,7 @@ type connTestMsg struct {
 	seq     int
 	save    bool
 	version string
+	warn    string // connWarning(R60.1)
 	err     error
 }
 
@@ -133,8 +145,9 @@ func (m *model) openConnForm(n *node, edit bool) {
 			m.status = why
 			return
 		}
-		f.edit, f.kind = n.conn, c.Kind
-		for i, v := range map[int]string{cfName: c.Name, cfGroup: c.Group, cfHost: c.Host, cfDB: c.DB, cfUser: c.User} {
+		f.edit, f.kind, f.auth = n.conn, c.Kind, c.Auth
+		for i, v := range map[int]string{cfName: c.Name, cfGroup: c.Group, cfHost: c.Host, cfDB: c.DB, cfUser: c.User,
+			cfURL: c.URL, cfRegion: c.Region, cfProfile: c.Profile} {
 			f.inputs[i].SetValue(v)
 		}
 		if c.Port > 0 {
@@ -165,6 +178,47 @@ func (m *model) openConnForm(n *node, edit bool) {
 	m.overlay = oConn
 }
 
+// visible 은 지금 종류·인증에서 칸 i 를 보이는지다(R59.2·R60.1).
+func (f *connForm) visible(i int) bool {
+	switch i {
+	case cfName, cfGroup, cfKind:
+		return true
+	case cfHost, cfPort, cfDB:
+		return !f.kind.IsSource()
+	case cfURL:
+		return f.kind.IsSource()
+	case cfAuth:
+		return f.kind.IsHTTP()
+	case cfUser:
+		return !f.kind.IsSource() || f.auth == "basic"
+	case cfPassword:
+		return !f.kind.IsSource() || f.auth == "basic" || f.auth == "token"
+	case cfRegion, cfProfile:
+		return f.kind == db.KindDynamoDB || f.auth == "sigv4"
+	}
+	return false
+}
+
+// step 은 보이는 칸 사이로 d(±1)만큼 옮긴다.
+func (f *connForm) step(d int) {
+	i := f.focus
+	for range cfCount {
+		i = (i + d + cfCount) % cfCount
+		if f.visible(i) {
+			break
+		}
+	}
+	f.setFocus(i)
+}
+
+// setKind 는 종류를 바꾸고 인증을 그 종류의 기본값으로 둔다.
+func (f *connForm) setKind(k db.Kind) {
+	f.kind, f.auth = k, ""
+	if opts := db.AuthOptions(k); len(opts) > 0 {
+		f.auth = opts[0]
+	}
+}
+
 func (f *connForm) setFocus(i int) {
 	f.focus = (i + cfCount) % cfCount
 	for j := range f.inputs {
@@ -177,10 +231,20 @@ func (f *connForm) setFocus(i int) {
 }
 
 // fillURL 은 이름 칸 끝의 접속 URL 을 읽어 나머지 칸을 채우고 이름 칸에는 앞의 글만 남긴다. 읽지 못하면 그대로 둔다.
+// http(s) URL 은 저장소 url 칸에 넣는다(R59.2). URL 칸에 사용자 정보가 든 URL 을 붙여도 사용자·비밀번호로 나눈다.
 func (f *connForm) fillURL() {
 	v := f.inputs[cfName].Value()
 	loc := connURLRe.FindStringIndex(v)
 	if loc == nil {
+		if f.focus == cfURL && strings.Contains(f.inputs[cfURL].Value(), "@") {
+			f.fillHTTPURL(f.inputs[cfURL].Value())
+		}
+		return
+	}
+	if raw := v[loc[0]:]; strings.HasPrefix(strings.ToLower(raw), "http") {
+		if f.fillHTTPURL(raw) {
+			f.inputs[cfName].SetValue(strings.TrimSpace(v[:loc[0]]))
+		}
 		return
 	}
 	c, pw, err := db.ParseConnURL(v[loc[0]:])
@@ -188,7 +252,7 @@ func (f *connForm) fillURL() {
 		f.status, f.failed = "URL 을 읽지 못함 (postgres://user:pw@host:5432/db · redis://:pw@host:6379/0)", true
 		return
 	}
-	f.kind = c.Kind
+	f.setKind(c.Kind)
 	f.inputs[cfName].SetValue(strings.TrimSpace(v[:loc[0]]))
 	for i, s := range map[int]string{cfHost: c.Host, cfPort: strconv.Itoa(c.Port), cfDB: c.DB, cfUser: c.User, cfPassword: pw} {
 		f.inputs[i].SetValue(s)
@@ -196,11 +260,66 @@ func (f *connForm) fillURL() {
 	f.status, f.failed = "URL 로 칸을 채웠음", false
 }
 
+// fillHTTPURL 은 http(s) URL 을 url 칸과 사용자·비밀번호로 나눠 넣는다. 종류가 저장소가 아니면 포트로 짐작한다.
+func (f *connForm) fillHTTPURL(raw string) bool {
+	u, user, pw, err := db.ParseHTTPURL(raw)
+	if err != nil {
+		f.status, f.failed = "URL 을 읽지 못함 (https://host[:port])", true
+		return false
+	}
+	if !f.kind.IsSource() {
+		k, ok := portKinds[portOf(u)]
+		if !ok {
+			k = db.KindOpenSearch
+		}
+		f.setKind(k)
+	}
+	f.inputs[cfURL].SetValue(u)
+	if user != "" || pw != "" {
+		f.inputs[cfUser].SetValue(user)
+		f.inputs[cfPassword].SetValue(pw)
+		if slices.Contains(db.AuthOptions(f.kind), "basic") {
+			f.auth = "basic"
+		}
+	}
+	f.status, f.failed = "URL 로 칸을 채웠음", false
+	return true
+}
+
+func portOf(raw string) string {
+	_, rest, _ := strings.Cut(raw, "://")
+	host, _, _ := strings.Cut(rest, "/")
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		return host[i+1:]
+	}
+	return ""
+}
+
 // conn 은 칸 값으로 만든 접속이다. 포트가 비면 종류의 기본 포트다. 비밀번호가 비면 그대로 비운다(고치기에서는 그대로 둠).
 func (f *connForm) conn() (db.Conn, error) {
 	var v [cfCount]string
 	for i := range f.inputs {
 		v[i] = strings.TrimSpace(f.inputs[i].Value())
+	}
+	if f.kind.IsSource() {
+		// 보이지 않는 칸 값은 저장하지 않는다(인증을 바꾸면 이전 사용자·비밀번호가 남지 않게)
+		c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, URL: v[cfURL], Auth: f.auth}
+		if f.visible(cfUser) {
+			c.User = v[cfUser]
+		}
+		if f.visible(cfPassword) {
+			c.Password = f.inputs[cfPassword].Value()
+		}
+		if f.visible(cfRegion) {
+			c.Region, c.Profile = v[cfRegion], v[cfProfile]
+		}
+		switch {
+		case f.kind.IsHTTP() && c.URL == "":
+			return c, errors.New("URL 이 필요함")
+		case f.visible(cfRegion) && c.Region == "":
+			return c, errors.New("리전이 필요함")
+		}
+		return c, nil
 	}
 	c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, Host: v[cfHost], DB: v[cfDB], User: v[cfUser],
 		Password: f.inputs[cfPassword].Value(), Port: db.DefaultPort(f.kind)}
@@ -237,13 +356,13 @@ func (m *model) connFormKey(k tea.KeyMsg) tea.Cmd {
 		m.status = "취소함"
 		return nil
 	case "tab", "down":
-		if f.focus == cfName {
+		if f.focus == cfName || f.focus == cfURL {
 			f.fillURL()
 		}
-		f.setFocus(f.focus + 1)
+		f.step(1)
 		return nil
 	case "shift+tab", "up":
-		f.setFocus(f.focus - 1)
+		f.step(-1)
 		return nil
 	case "ctrl+t", "enter":
 		if f.testing {
@@ -253,24 +372,29 @@ func (m *model) connFormKey(k tea.KeyMsg) tea.Cmd {
 		f.fillURL()
 		return m.testConnForm(ks == "enter")
 	}
-	if f.focus == cfKind {
-		if ks == " " || ks == "left" || ks == "right" || ks == "h" || ks == "l" {
+	// 종류·인증 칸은 space·→·l 은 다음, ←·h 는 앞 값이다
+	d := map[string]int{" ": 1, "right": 1, "l": 1, "left": -1, "h": -1}[ks]
+	switch f.focus {
+	case cfKind:
+		if d != 0 {
 			port := f.inputs[cfPort].Value()
-			if f.kind == db.KindPG {
-				f.kind = db.KindRedis
-			} else {
-				f.kind = db.KindPG
-			}
+			i := slices.Index(formKinds, f.kind)
+			f.setKind(formKinds[(i+d+len(formKinds))%len(formKinds)])
 			// 기본 포트를 그대로 두었으면 새 종류의 기본 포트로 바꾼다
 			if port == strconv.Itoa(db.DefaultPGPort) || port == strconv.Itoa(db.DefaultRedisPort) {
 				f.inputs[cfPort].SetValue("")
 			}
 		}
 		return nil
+	case cfAuth:
+		if opts := db.AuthOptions(f.kind); d != 0 && len(opts) > 0 {
+			f.auth = opts[(slices.Index(opts, f.auth)+d+len(opts))%len(opts)]
+		}
+		return nil
 	}
 	var cmd tea.Cmd
 	f.inputs[f.focus], cmd = f.inputs[f.focus].Update(k)
-	if k.Paste && f.focus == cfName {
+	if k.Paste && (f.focus == cfName || f.focus == cfURL) {
 		f.fillURL()
 	}
 	return cmd
@@ -291,13 +415,13 @@ func (m *model) testConnForm(save bool) tea.Cmd {
 		c.Password = m.conn(f.edit).Password
 	}
 	f.testSeq++
-	seq, life := f.testSeq, m.life
+	seq, life, warn := f.testSeq, m.life, connWarning(c)
 	f.testing, f.status, f.failed = true, "접속 시험 중…", false
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(life, connTestTimeout)
 		defer cancel()
-		v, err := db.TestConn(ctx, c)
-		return connTestMsg{seq: seq, save: save, version: v, err: err}
+		v, err := testConn(ctx, c)
+		return connTestMsg{seq: seq, save: save, version: v, warn: warn, err: err}
 	}
 }
 
@@ -307,14 +431,22 @@ func (m *model) connTested(msg connTestMsg) tea.Cmd {
 		return nil
 	}
 	f.testing = false
+	warn := ""
+	if msg.warn != "" {
+		warn = " · 경고: " + msg.warn
+	}
 	if msg.err != nil {
-		f.status, f.failed = "접속 실패: "+msg.err.Error(), true
+		f.status, f.failed = "접속 실패: "+msg.err.Error()+warn, true
 		f.askSave = msg.save
 		return nil
 	}
-	f.status, f.failed = "접속됨 ("+msg.version+")", false
+	f.status, f.failed = "접속됨 ("+msg.version+")"+warn, false
 	if msg.save {
-		return m.saveConnForm()
+		cmd := m.saveConnForm()
+		if msg.warn != "" && m.connForm == nil { // 저장하면 창이 닫혀 경고를 상태 줄로 옮긴다
+			m.status += " · 경고: " + msg.warn
+		}
+		return cmd
 	}
 	return nil
 }
@@ -534,12 +666,15 @@ func (m *model) reloadConns() tea.Cmd {
 	if len(forget) == 0 {
 		return tea.Batch(catalogs...)
 	}
-	clients, life := m.clients, m.life
+	clients, sources, life := m.clients, m.sources, m.life
 	// 연결을 닫은 뒤에 자동완성 목록을 읽어야 옛 풀(옛 호스트)을 다시 쓰지 않는다
 	return tea.Sequence(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(life, loadTimeout)
 		defer cancel()
 		for _, uuid := range forget {
+			if err := sources.forget(uuid); err != nil {
+				return statusMsg("이전 연결을 닫지 못함: " + err.Error())
+			}
 			if err := clients.Forget(ctx, uuid); err != nil {
 				return statusMsg("이전 연결을 닫지 못함: " + err.Error())
 			}
@@ -558,17 +693,41 @@ func (m *model) connFormView() string {
 	}
 	lines := []string{helpTitle.Render(title), ""}
 	for i := range cfCount {
+		if !f.visible(i) {
+			continue
+		}
 		label := connFieldLabels[i]
-		if i == cfDB && f.kind == db.KindRedis {
+		switch {
+		case i == cfDB && f.kind == db.KindRedis:
 			label = "DB 번호"
+		case i == cfPassword && f.auth == "token":
+			label = "토큰"
+		case i == cfURL && f.kind == db.KindDynamoDB:
+			label = "엔드포인트"
 		}
 		var v string
 		switch i {
-		case cfKind:
+		case cfKind, cfAuth:
 			v = "‹ " + connKinds[f.kind] + " ›"
-			if f.focus == cfKind {
+			if i == cfAuth {
+				v = "‹ " + cmp.Or(f.auth, "없음") + " ›"
+			}
+			if f.focus == i {
 				v = lipgloss.NewStyle().Reverse(true).Render(v) + dimStyle.Render("  space·←→")
 			}
+		case cfURL:
+			if f.inputs[i].Value() == "" {
+				f.inputs[i].Placeholder = "https://search.example.internal"
+				if f.kind == db.KindDynamoDB {
+					f.inputs[i].Placeholder = "비우면 AWS 기본"
+				}
+			}
+			v = f.inputs[i].View()
+		case cfProfile:
+			if f.inputs[i].Value() == "" {
+				f.inputs[i].Placeholder = "비우면 표준 체인"
+			}
+			v = f.inputs[i].View()
 		case cfPort:
 			if f.inputs[i].Value() == "" {
 				f.inputs[i].Placeholder = strconv.Itoa(db.DefaultPort(f.kind))

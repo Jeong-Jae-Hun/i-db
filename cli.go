@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/grid"
 	"github.com/Jeong-Jae-Hun/i-db/internal/params"
+	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 	"github.com/Jeong-Jae-Hun/i-db/internal/statcrypt"
 	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
@@ -48,10 +50,12 @@ type cliCommand struct{ name, usage, desc string }
 var cliCommands = []cliCommand{
 	{"conns", "db conns [-p 경로]", "접속 목록(이름·그룹·종류·환경·호스트·DB, 비밀번호 없음)"},
 	{"schemas", "db schemas -c 접속", "스키마 목록"},
-	{"tables", "db tables -c 접속 [-s 스키마]", "테이블·뷰 목록(기본 스키마 public)"},
+	{"tables", "db tables -c 접속 [-s 스키마]", "테이블·뷰 목록(기본 스키마 public). 저장소 접속은 맨 위 목록(인덱스·라벨·지표·테이블)"},
 	{"describe", "db describe -c 접속 [-s 스키마] 테이블", "열·제약·인덱스(tsv·csv 에서 제약·인덱스는 stderr). 테이블은 스키마.테이블 로도 쓴다"},
 	{"ddl", "db ddl -c 접속 [-s 스키마] 테이블", "CREATE 문"},
-	{"query", "db query -c 접속 [SQL | -f 파일 | < 표준입력] [--param 이름=값] [--write [--force]]", "SQL 한 문장 실행(기본 READ ONLY)"},
+	{"query", "db query -c 접속 [SQL | -f 파일 | < 표준입력] [--param 이름=값] [--write [--force]]", "SQL 한 문장 실행(기본 READ ONLY). 저장소 접속은 그 질의(OpenSearch·LogQL·PromQL·PartiQL)를 보내고 비싼 질의는 --force"},
+	{"logs", "db logs -c Loki접속 'LogQL' [--since 1h] [--until 0] [--force]", "Loki 로그 질의(query 와 같고 범위 플래그를 받음, Grafana 접속도)"},
+	{"metrics", "db metrics -c Prometheus접속 'PromQL' [--since 1h] [--until 0] [--force]", "Prometheus 지표 질의(Grafana 접속도)"},
 	{"explain", "db explain -c 접속 [SQL | -f 파일 | < 표준입력]", "실행 계획(ANALYZE 없음)"},
 	{"redis", "db redis -c 접속 명령 [인자…] [--write [--force]]", "Redis 명령 하나(기본 읽기 명령만). - 로 시작하는 인자는 -- 뒤에 쓴다"},
 	{"user360", "db user360 --prod 이메일|uid|id|닉네임", "사용자 한눈에 보기(R51). prod 를 조회해 --prod 가 필요하다"},
@@ -63,10 +67,12 @@ var cliCommands = []cliCommand{
 // cliCmdFlags 는 일부 명령만 받는 플래그와 그 명령들이다. 다른 명령에는 플래그를 정의하지 않아
 // 주면 사용법 오류(2)이고 도움말에도 나오지 않는다. 여기 없는 플래그(-p·-c·--format·--prod 등)는 모든 명령이 받는다.
 var cliCmdFlags = map[string][]string{
-	"write":   {"query", "redis"}, // --force 도 같다
+	"write":   {"query", "redis"},
+	"force":   {"query", "redis", "logs", "metrics"},
+	"since":   {"query", "logs", "metrics"}, // --until 도 같다
 	"decrypt": {"query", "user360", "search"},
 	"param":   {"query", "explain"},
-	"f":       {"query", "explain", "redis"},
+	"f":       {"query", "explain", "redis", "logs", "metrics"},
 	"s":       {"tables", "describe", "ddl", "search", "schema-diff"},
 	"to":      {"schema-diff"}, // --to-schema 도 같다
 }
@@ -95,7 +101,9 @@ type cliOpts struct {
 	dir, conn, format, file     string
 	schema, to, toSchema        string
 	maxRows                     int
+	maxRowsSet                  bool // --max-rows 를 줬다. 저장소 기본 1,000행(R62.2)과 가른다
 	timeout                     time.Duration
+	since, until                durFlag // Loki·Prometheus 범위(R62.2)
 	prod, write, force, decrypt bool
 	params                      paramFlag
 	args                        []string
@@ -112,6 +120,31 @@ func (p paramFlag) Set(s string) error {
 		return fmt.Errorf("--param must be name=value: %q", s)
 	}
 	p[k] = v
+	return nil
+}
+
+// durFlag 는 --since·--until 값이다. Go 기간 꼴(1h·15m)에 더해 날짜(7d)를 받는다.
+// 날짜는 maxFlagDays(10년)까지다. 더 크면 time.Duration(약 292년)을 넘쳐 음수·작은 범위로 바뀔 수 있다.
+type durFlag time.Duration
+
+const maxFlagDays = 3650
+
+func (d *durFlag) String() string { return time.Duration(*d).String() }
+
+func (d *durFlag) Set(s string) error {
+	if n, ok := strings.CutSuffix(s, "d"); ok {
+		days, err := strconv.Atoi(n)
+		if err != nil || days < 0 || days > maxFlagDays {
+			return fmt.Errorf("invalid duration %q (days 0..%d)", s, maxFlagDays)
+		}
+		*d = durFlag(time.Duration(days) * 24 * time.Hour)
+		return nil
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil || v < 0 {
+		return fmt.Errorf("invalid duration %q", s)
+	}
+	*d = durFlag(v)
 	return nil
 }
 
@@ -173,6 +206,10 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, 
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return exitErr
+	}
+	// 저장소 결과 한도는 따로 주지 않으면 1,000행이다(R62.2)
+	if i := connByName(proj, o.conn); i >= 0 && proj.Conns[i].Kind.IsSource() && !o.maxRowsSet {
+		o.maxRows = sourceDefaultRows
 	}
 	ctx, cancel := context.WithTimeout(ctx, o.timeout)
 	defer cancel()
@@ -278,7 +315,13 @@ func newCLIFlags(cmd string, out io.Writer) (*flag.FlagSet, *cliOpts) {
 	fs.BoolVar(&o.prod, "prod", false, "prod 접속 허용(읽기만)")
 	if cmdTakes(cmd, "write") {
 		fs.BoolVar(&o.write, "write", false, "쓰기 허용(prod 는 거절)")
-		fs.BoolVar(&o.force, "force", false, "--write 에서 위험 문장(R25)·숨은 쓰기 허용")
+	}
+	if cmdTakes(cmd, "force") {
+		fs.BoolVar(&o.force, "force", false, "--write 에서 위험 문장(R25)·숨은 쓰기 허용, 저장소는 비싼 질의 허용(R60.2)")
+	}
+	if cmdTakes(cmd, "since") {
+		fs.Var(&o.since, "since", "Loki·Prometheus 범위 시작(지금부터 거슬러, 1h·15m·7d, 기본 1h)")
+		fs.Var(&o.until, "until", "범위 끝(지금부터 거슬러, 기본 0)")
 	}
 	if cmdTakes(cmd, "decrypt") {
 		fs.BoolVar(&o.decrypt, "decrypt", false, "staticEncrypt 칸을 접속 그룹 키로 풀어 찍기")
@@ -330,6 +373,7 @@ func parseCLI(cmd string, args []string, tty bool, stderr io.Writer) (cliOpts, e
 	if o.args, err = parseInterleaved(fs, args); err != nil {
 		return *o, err
 	}
+	fs.Visit(func(f *flag.Flag) { o.maxRowsSet = o.maxRowsSet || f.Name == "max-rows" })
 	switch {
 	case o.format == "" && tty:
 		o.format = "table"
@@ -345,9 +389,6 @@ func parseCLI(cmd string, args []string, tty bool, stderr io.Writer) (cliOpts, e
 	if o.timeout <= 0 {
 		return *o, usageErr("--timeout must be positive")
 	}
-	if o.force && !o.write {
-		return *o, usageErr("--force 는 --write 와 함께 씀")
-	}
 	return *o, nil
 }
 
@@ -360,6 +401,8 @@ func pickConn(proj *db.Project, o cliOpts, flagName, name string, kind db.Kind) 
 	switch {
 	case i < 0:
 		return db.Conn{}, usageErr("접속 없음: %s (db conns)", name)
+	case proj.Conns[i].Kind != kind && proj.Conns[i].Kind.IsSource():
+		return db.Conn{}, usageErr("%s(%s): %s", name, proj.Conns[i].Kind, msgUnsupported)
 	case proj.Conns[i].Kind != kind:
 		return db.Conn{}, usageErr("%s 는 %s 접속이 아님", name, kind)
 	case proj.Conns[i].Env() == "prod" && !o.prod:
@@ -468,6 +511,16 @@ func namesResult(col string, names []string) *db.Result {
 }
 
 func runCommand(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Clients, stdin io.Reader, stderr io.Writer) ([]cliResult, error) {
+	if i := connByName(proj, o.conn); i >= 0 && proj.Conns[i].Kind.IsSource() && o.cmd != "conns" && o.cmd != "user360" {
+		return runSourceCommand(ctx, o, proj, proj.Conns[i].Kind, stdin)
+	}
+	// --force 는 PostgreSQL·Redis 에서는 --write 와 함께만 쓴다(R58.1). 저장소는 비싼 질의 허용이라 따로 받는다
+	if o.force && !o.write {
+		return nil, usageErr("--force 는 --write 와 함께 씀")
+	}
+	if o.cmd == "logs" || o.cmd == "metrics" {
+		return nil, usageErr("%s 는 %s 접속에서만 됨 (db conns)", o.cmd, map[string]string{"logs": "Loki·Grafana", "metrics": "Prometheus·Grafana"}[o.cmd])
+	}
 	switch o.cmd {
 	case "conns":
 		// 사람이 읽는 표는 db 전용 접속 이름에 (db) 를 붙인다(R59.1). 기계가 읽는 형식은 -c 에 그대로 넣게 이름만 두고 source 열로 가른다
@@ -480,7 +533,7 @@ func runCommand(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Cl
 			if o.format == "table" {
 				name = connLabel(c)
 			}
-			res.Rows = append(res.Rows, []string{name, c.Group, string(c.Kind), c.Env(), c.Host, c.DB, source})
+			res.Rows = append(res.Rows, []string{name, c.Group, string(c.Kind), c.Env(), cmp.Or(c.Host, c.URL), c.DB, source})
 		}
 		return []cliResult{{res: res}}, nil
 
@@ -891,4 +944,72 @@ func writeTableLine(b *strings.Builder, cells []string, widths []int, types []st
 		}
 	}
 	b.WriteByte('\n')
+}
+
+// ─── 읽기 전용 저장소 (R60~R63) ───
+
+// sourceDefaultRows 는 저장소 질의의 기본 한도다(R62.2). --max-rows 를 주면 그 값이다.
+const sourceDefaultRows = 1000
+
+// sourceCmdKinds 는 logs·metrics 가 받는 접속 종류다.
+var sourceCmdKinds = map[string][]db.Kind{
+	"logs":    {db.KindLoki, db.KindGrafana},
+	"metrics": {db.KindPrometheus, db.KindGrafana},
+}
+
+// runSourceCommand 는 저장소 접속의 query·logs·metrics·tables 를 Backend 로 돌린다. 다른 명령은 사용법 오류다.
+// prod 는 읽기도 --prod 가 필요하고(R58.2), 쓰기로 보이는 질의(ErrWrite)와 --force 없는 비싼 질의는 3이다(R60.2).
+func runSourceCommand(ctx context.Context, o cliOpts, proj *db.Project, kind db.Kind, stdin io.Reader) ([]cliResult, error) {
+	switch o.cmd {
+	case "query", "tables":
+	case "logs", "metrics":
+		if !slices.Contains(sourceCmdKinds[o.cmd], kind) {
+			return nil, usageErr("%s 는 %s 접속이 아님 (%s)", o.conn, o.cmd, kind)
+		}
+	default:
+		return nil, usageErr("%s(%s): %s", o.cmd, kind, msgUnsupported)
+	}
+	switch {
+	case o.write:
+		return nil, usageErr("읽기 전용 저장소라 --write 를 받지 않음")
+	case len(o.params) > 0:
+		return nil, usageErr("--param 은 %s", msgUnsupported)
+	}
+	c, err := pickConn(proj, o, "-c", o.conn, kind)
+	if err != nil {
+		return nil, err
+	}
+	var q source.Query
+	if o.cmd != "tables" {
+		text, err := readInput(ctx, o, stdin)
+		if err != nil {
+			return nil, err
+		}
+		q = source.Query{Text: strings.TrimSpace(text), Since: time.Duration(o.since), Until: time.Duration(o.until), Limit: o.maxRows, Force: o.force}
+	}
+	b, err := newSource(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	defer b.Close()
+	var res *db.Result
+	if o.cmd == "tables" {
+		nodes, err := b.Children(ctx, "")
+		if err != nil {
+			return nil, err
+		}
+		res = &db.Result{Cols: []string{"name", "info"}}
+		for _, n := range nodes {
+			res.Rows = append(res.Rows, []string{n.Name, n.Info})
+		}
+	} else if res, err = b.Run(ctx, q); err != nil {
+		switch {
+		case errors.Is(err, source.ErrWrite):
+			return nil, refused(msgReadOnlySource)
+		case errors.Is(err, source.ErrNeedsConfirm):
+			return nil, refused(sourceErrText(err) + " (--force)")
+		}
+		return nil, err
+	}
+	return []cliResult{{conn: c, res: res}}, nil
 }

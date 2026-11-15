@@ -22,6 +22,7 @@ var (
 	colBlack  = lipgloss.Color("16")
 	colPG     = lipgloss.Color("75")
 	colRedis  = lipgloss.Color("174")
+	colSource = lipgloss.Color("150") // 읽기 전용 저장소(R60)
 )
 
 var (
@@ -48,10 +49,13 @@ var envBadges = map[string]lipgloss.Style{
 
 // 트리 아이콘은 Nerd Font 없이도 나오는 기하 도형만 쓴다. 모두 2칸(글자+공백)이라 마우스 위치 계산이 깊이로만 정해진다.
 var (
-	kindIcons = map[nodeKind]string{nSchema: "▣ ", nTable: "▦ ", nKey: "◇ ", nFolder: "▤ ", nQueries: "▥ ", nFile: "▢ "}
-	connIcons = map[db.Kind]string{db.KindPG: "◆ ", db.KindRedis: "◈ "}
-	connColor = map[db.Kind]lipgloss.Color{db.KindPG: colPG, db.KindRedis: colRedis}
-	connKinds = map[db.Kind]string{db.KindPG: "PostgreSQL", db.KindRedis: "Redis"}
+	kindIcons = map[nodeKind]string{nSchema: "▣ ", nTable: "▦ ", nKey: "◇ ", nFolder: "▤ ", nQueries: "▥ ", nFile: "▢ ", nSource: "▫ "}
+	connIcons = map[db.Kind]string{db.KindPG: "◆ ", db.KindRedis: "◈ ", db.KindOpenSearch: "◇ ", db.KindLoki: "◇ ",
+		db.KindPrometheus: "◇ ", db.KindGrafana: "◇ ", db.KindDynamoDB: "◇ "}
+	connColor = map[db.Kind]lipgloss.Color{db.KindPG: colPG, db.KindRedis: colRedis, db.KindOpenSearch: colSource, db.KindLoki: colSource,
+		db.KindPrometheus: colSource, db.KindGrafana: colSource, db.KindDynamoDB: colSource}
+	connKinds = map[db.Kind]string{db.KindPG: "PostgreSQL", db.KindRedis: "Redis", db.KindOpenSearch: "OpenSearch", db.KindLoki: "Loki",
+		db.KindPrometheus: "Prometheus", db.KindGrafana: "Grafana", db.KindDynamoDB: "DynamoDB"}
 )
 
 type paneSpec struct {

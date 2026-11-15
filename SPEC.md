@@ -17,9 +17,9 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `.idea/dataSources.xml` | 이름·uuid·그룹·드라이버(`postgresql`/`redis`)·JDBC URL |
 | `.idea/dataSources.local.xml` | uuid별 사용자명 |
 | `.idea/data_source_mapping.xml` | `queries/` 파일별 접속 uuid |
-| `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
+| `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 저장소 비밀값 `OS_`·`LOKI_`·`PROM_<이름>_PASSWORD`·`GRAFANA_<이름>_TOKEN`(R60.1), 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
 | `.dbtui/user360.json` | 사용자 한눈에 보기 조회 목록(R51, 없으면 빈 목록) |
-| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록) |
+| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`, R60.1) |
 
 `<이름>`은 접속 이름을 대문자로 바꾸고 영숫자 외 문자를 `_`로 바꾼 것이다.
 
@@ -93,9 +93,10 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 읽기 전용: SQL 첫 단어가 `select`·`with`·`show`·`table`·`values`, 또는 `ANALYZE`·`ANALYSE`가 어디에도 없는 `explain`. Redis 명령이 읽기 명령(`GET`·`HGETALL`·`SCAN`·`TTL`·`TYPE` 등)이고, 관리 명령은 읽기 하위 명령(`SLOWLOG GET`, `CLIENT LIST`, `MEMORY USAGE` 등)일 때만.
   - 예: prod에서 `update ...` → 확인. `select ...` → 바로 실행. `explain (analyze) delete ...` → 확인(실제로 실행되므로). `SLOWLOG RESET` → 확인.
   - 단, `with ... update`(CTE 안 쓰기), `select ... into`, 부수효과가 있는 함수 호출은 잡지 못한다. 잠긴 prod(R54)에서는 이런 문장을 READ ONLY 트랜잭션으로 돌려 서버가 거절한다.
-- R6.2 접속 이름에 `prod`·`prd`가 들어 있거나(대소문자 무시) 호스트를 `.`·`-`로 나눈 마디 하나가 `prod`·`prd`면 db는 그 접속을 prod로 봐야 한다. 이름에 환경이 없는 접속도 안전 쪽으로 막으려는 것이다.
+- R6.2 접속 이름이나 AWS 프로필(`profile`, R60.1)에 `prod`·`prd`가 들어 있거나(대소문자 무시) 호스트를 `.`·`-`로 나눈 마디 하나가 `prod`·`prd`면 db는 그 접속을 prod로 봐야 한다. 셋 가운데 하나라도 prod면 prod다. 이름에 환경이 없는 접속도 안전 쪽으로 막으려는 것이다.
   - 예: 이름 `session-redis`, 호스트 `redis01.prod.example.internal` → prod. 호스트 `prod-app-main.cluster-x.example.com` → prod. 이름 `x-stg`, 호스트 `db.PRD.local` → prod.
   - 예: 호스트 `producer.local`·`reprod-1.local` → prod 아님(마디가 통째로 같아야 함).
+  - 예: 이름 `orders`, 프로필 `prod-admin`인 DynamoDB 접속 → prod(CLI는 `--prod`가 필요하다).
 
 ### R7 편집기
 
@@ -542,6 +543,42 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: `rm`은 터미널에서 묻고, 표준 입력이 터미널이 아니면 `--yes`가 없을 때 2다. prod 접속(R6.2)에 붙는 `add`·`edit`·`test`는 `--prod`가 없으면 3이다(R58.2).
   - 단, `rediss://`의 TLS는 따로 저장하지 않는다. Redis는 평문 응답이 없으면 TLS로 다시 붙는다(R4.3).
 
+### R60 읽기 전용 저장소 공통
+
+- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
+  - 예: `{"name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"}`.
+  - 접속을 시험·저장할 때 `basic`·`token`(Grafana 포함)이 `http://` 주소면 `경고: 비밀번호가 평문 http 로 감`을, DynamoDB `url`이 `localhost`·`*.amazonaws.com`이 아니면 `경고: AWS 서명을 AWS 밖 주소로 보냄`을 보인다(막지는 않음). 인증 없음인데 주소에 `user:pass@`가 있으면 오류다.
+  - HTTP 요청은 리다이렉트를 따라가지 않는다. 3xx는 `redirect not followed: 302 Found` 같은 오류다(인증 헤더를 다른 주소로 다시 보내거나 허용 경로를 우회하지 않게). 응답 본문은 16 MiB까지 받는다.
+- R60.2 이 저장소들은 읽기 전용이다. 쓰기로 보이는 질의는 보내기 전에 거절한다(`읽기 전용 저장소라 보내지 않음`). 비싼 질의(DynamoDB 전체 스캔, OpenSearch `size`·`from+size` 1만 초과, Loki·Prometheus 범위 7일 초과)는 까닭을 붙여 확인을 받는다(`비싼 질의: 전체 스캔: y/N`, CLI는 `비싼 질의: 범위 7일 초과 (--force)`로 3). prod 판정(R6.2)과 CLI `--prod`(R58.2)는 같다.
+  - OpenSearch `size`·`from`은 본문(문자열 `"20"`·실수·지수 꼴도)과 질의 문자열을 모두 읽는다. 읽을 수 없거나 같은 키가 두 번 나오면(본문과 질의 문자열에 함께 있어도) `size·from 을 읽을 수 없음`으로 확인을 받는다.
+  - 단, 다른 비싼 꼴(집계 `terms.size`, `track_total_hits`, 큰 `_source`, 넓은 인덱스 패턴)은 보지 않는다. 응답 16 MiB 상한과 서버 설정이 막는다.
+- R60.3 트리·편집기·결과 표·CLI(`db query -c`)는 PostgreSQL과 같은 자리에서 쓴다. 결과는 표(`db.Result`)이고 중첩 값은 JSON 칸이라 값 보기(R32)로 연다. 실행 기록(R8)·알림(R30)은 같다. 표 편집(R15)·트랜잭션(R17)·테이블 보기(R16)는 없다.
+
+### R61 OpenSearch
+
+- R61.1 트리는 인덱스(별칭은 `→ 인덱스`)와 그 아래 매핑 필드(`이름 타입`, 중첩은 `a.b`)다. 인덱스 `Enter`는 최근 문서 50개(`sort: _doc desc`가 아니라 `match_all`, `size: 50`)를 연다. 인증은 `basic`(user·비밀번호) 또는 `sigv4`(서비스 `es`).
+- R61.2 편집기는 두 꼴을 받는다. `SELECT …`(대소문자 무시)는 SQL 플러그인(`POST _plugins/_sql`)으로, `GET <인덱스>/_search`·`GET <인덱스>/_count`·`GET _cat/<이름>[/<인덱스>]`·`GET <인덱스>/_mapping` 첫 줄 뒤 JSON 본문은 REST로 보낸다. 다른 메서드·경로는 R60.2로 거절한다(`_search`의 POST는 받음).
+  - 경로 마디는 비거나 `.`·`..`이거나 `%`·`\`·제어 문자를 가질 수 없다. `_cat` 이름은 영숫자·`_`만이다. 인덱스 자리(쉼표 목록의 각 이름)는 `_`(`_all` 빼고)나 `.`으로 시작할 수 없다. `.opendistro_security`·`.kibana` 같은 시스템 인덱스를 편집기에서 읽지 않게 한다.
+  - 예: `GET _cat/a/../..`, `GET ../_search`, `GET %2e%2e/_search`, `GET logs,.opendistro_security/_search` → 거절.
+  - `SELECT`는 끝의 `;`·공백·주석을 뗀 뒤에도 문자열·주석 밖에 `;`가 남거나 `delete`·`update`·`insert`·`drop`·`create`·`alter`·`truncate`·`replace` 낱말이 있으면(하위 질의 안이어도) 거절한다. 백틱으로 감싼 같은 이름의 열도 걸린다(안전 쪽). 결과 열은 `_index`·`_id`·`_score`와 `_source` 최상위 필드(첫 1,000건의 필드 합집합)이고 집계(`aggregations`)는 JSON 칸 한 줄로 보인다.
+  - 예: `GET logs-*/_search` + `{"query":{"match":{"status":500}},"size":20}` → 20행.
+  - 단, `SELECT`는 `fetch_size`로 `--max-rows`(기본 1,000, 상한 1만)까지 첫 페이지를 받는다(플러그인 기본 200행 상한을 넘김). REST `_search`는 본문의 `size`를 그대로 따르고 없으면 OpenSearch 기본 10건이다.
+
+### R62 Loki·Prometheus·Grafana
+
+- R62.1 Loki 트리는 라벨 이름 → 값(최근 1시간), 값 `Enter`는 `{라벨="값"}` 최근 100줄이다. Prometheus 트리는 지표 이름(앞 1,000개)이고 `Enter`는 그 지표의 즉시값이다. Grafana 접속은 Loki·Prometheus 데이터 소스 목록을 보이고 그 아래는 같은 트리다(`/api/datasources/proxy/uid/<uid>/…`로 보냄, 토큰 `Authorization: Bearer`).
+- R62.2 편집기는 Loki면 LogQL, Prometheus면 PromQL이다. 편집기 위 한 줄에 범위(`최근 1h`)를 보이고 `Ctrl+]`로 `15m·1h·6h·24h·7d`를 돈다(CLI `--since`·`--until`, Go 기간 꼴 또는 `<일>d`이고 날짜는 3,650일까지). 로그 결과 열은 `time`(KST)·스트림 라벨·`line`, 지표 결과는 `time`·라벨·`value`이고 범위 질의는 차트(R28)로 볼 수 있다. 한도는 `--max-rows`(기본 1,000, Loki 서버 상한 5,000).
+  - 예: `{app="api"} |= "error"` → 최근 1시간 로그. `sum by (status) (rate(http_requests_total[5m]))` → 범위 질의 표.
+  - Prometheus 실행은 늘 범위 질의다(step은 범위/250, 최소 15초). 즉시값은 트리 지표 `Enter`로 본다.
+  - Grafana 접속은 편집기 첫 줄 `# datasource: <이름|uid>`로 데이터 소스를 고른다(LogQL·PromQL 주석이라 서버에 가도 무해, 보내기 전에 지움). 없으면 이름순 첫 Loki, 없으면 첫 Prometheus다.
+
+### R63 DynamoDB
+
+- R63.1 트리는 테이블(`항목 수≈`) → 키(`PK`·`SK` 이름·타입)와 GSI·LSI다. 테이블 `Enter`는 앞 50개 항목(스캔이라 R60.2 확인).
+- R63.2 편집기는 PartiQL `SELECT`만 받는다(`ExecuteStatement`, 페이지를 이어 `--max-rows`까지). `WHERE`에 파티션 키 조건(`=`·`IN`)이 없으면 전체 스캔이라 확인을 받는다. 맨 바깥이나 괄호 안 `OR`로 갈린 조건은 가지마다 키가 있어도 스캔으로 본다(AWS 문서가 `OR`를 Query로 바꾼다고 적지 않아 안전 쪽, 여러 값은 `IN`).
+  - 페이지는 50개, 시간은 60초(호출부 기한이 있으면 그 기한)에서 멈추고 받은 데까지 잘림으로 보인다(`페이지 50개에서 멈춤 (키 조건으로 좁히세요)`). 거르기 조건만 있는 질의가 큰 테이블을 끝까지 읽지 않게 한다. 결과 열은 키 열 먼저, 나머지 속성 이름순이고 값은 DynamoDB JSON을 풀어 보인다(`M`·`L`은 JSON 칸, 숫자는 원문).
+  - 예: `SELECT * FROM "orders" WHERE "pk" = 'u#42'` → 그 파티션 항목. `SELECT * FROM "orders"` → `비싼 질의: 전체 스캔: y/N`. `… WHERE pk = 'a' OR pk = 'b'` → 확인, `… WHERE pk IN ['a','b']` → 바로.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |
@@ -570,9 +607,11 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Ctrl+U` (⌘U) | 사용자 한눈에 보기: 이메일·uid·id·닉네임으로 여러 DB 조회(R51) |
 | `Alt+C` (⌘⇧C) | 같은 쿼리를 다른 접속에서 실행해 비교(R53.1) |
 | `Ctrl+L` (⌘L) | 활성 탭 prod 접속의 쓰기 잠금 열기·닫기(R54) |
+| `Ctrl+]` | Loki·Prometheus·Grafana 탭의 범위 `15m·1h·6h·24h·7d` 돌리기(탭마다, 편집기 위 줄에 `최근 1h`, R62.2) |
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |
 | 트리 `Enter` `/` `r` `d` `D` `I` `A` `L` `S` | 펼치기·테이블 보기·값 편집·쿼리 파일 열기(접속은 최근 파일 자동 열기, R44) / 거르기 / 새로고침(쿼리 파일 목록도) / 구조 / DDL / CSV 가져오기 / 활동·잠금·크기(Redis 는 INFO·SLOWLOG·큰 키) |
+| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔) / 펼치기(R60~R63) |
 | 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄) |
 | 트리 `X` | Redis 패턴 키 일괄 삭제(접속·이름공간 줄, `esc` 멈춤, R42). db 전용 PostgreSQL 접속 줄은 접속 지우기(R59.3) |
 | 트리 `N` `E` `Alt+X` | 새 접속(URL 붙여넣기·`Ctrl+T` 시험) / db 전용 접속 고치기 / 지우기(Redis 포함, 팔레트 `접속 지우기`, R59) |

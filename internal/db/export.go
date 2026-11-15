@@ -203,7 +203,7 @@ func (p *PGConn) SearchData(ctx context.Context, schema, text string) (res *Resu
 			return nil, nil, err
 		}
 		for _, h := range hits {
-			res.Rows = append(res.Rows, []string{t.Name, h.Col, h.PK, capCell(h.Val)})
+			res.Rows = append(res.Rows, []string{t.Name, h.Col, h.PK, CapCell(h.Val)})
 		}
 	}
 	if _, err = c.Exec(ctx, "ROLLBACK"); err != nil {

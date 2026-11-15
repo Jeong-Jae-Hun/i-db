@@ -33,8 +33,11 @@ var connNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // ValidConnName 은 db 전용 접속 이름 규칙(영숫자·-·_, R59.2)에 맞는지다.
 func ValidConnName(name string) bool { return connNameRe.MatchString(name) }
 
-// DefaultPort 는 종류의 기본 포트다.
+// DefaultPort 는 종류의 기본 포트다. 읽기 전용 저장소는 포트를 URL 에 두어 0 이다.
 func DefaultPort(k Kind) int {
+	if k.IsSource() {
+		return 0
+	}
 	if k == KindRedis {
 		return DefaultRedisPort
 	}
@@ -51,6 +54,11 @@ type connEntry struct {
 	Port  int    `json:"port"`
 	DB    string `json:"db"`
 	User  string `json:"user"`
+	// R60.1 읽기 전용 저장소 칸. PostgreSQL·Redis 줄에는 쓰지 않는다
+	URL     string `json:"url,omitempty"`
+	Auth    string `json:"auth,omitempty"`
+	Region  string `json:"region,omitempty"`
+	Profile string `json:"profile,omitempty"`
 }
 
 func connsPath(dir string) string { return filepath.Join(dir, ".dbtui", "connections.json") }
@@ -130,7 +138,7 @@ func (p *Project) loadDBConns(env map[string]string) error {
 			continue
 		}
 		// a-b 와 a_b 는 .env 키가 같아 비밀번호를 나눠 쓰게 되므로 뒤의 것을 뺀다(AddConn 의 checkName 과 같은 규칙)
-		if slices.ContainsFunc(p.Conns, func(o Conn) bool { return PasswordKey(o.Kind, o.Name) == PasswordKey(c.Kind, c.Name) }) {
+		if slices.ContainsFunc(p.Conns, func(o Conn) bool { return sameSecretKey(o, c) }) {
 			p.Warnings = append(p.Warnings, fmt.Sprintf("%s: same .env password key as another connection (connections.json)", c.Name))
 			continue
 		}
@@ -145,20 +153,64 @@ func (p *Project) loadDBConns(env map[string]string) error {
 }
 
 func (e connEntry) conn() Conn {
-	return Conn{UUID: e.UUID, Name: e.Name, Group: e.Group, Kind: e.Kind, Host: e.Host, Port: e.Port, DB: e.DB, User: e.User, Source: SourceDB}
+	return Conn{UUID: e.UUID, Name: e.Name, Group: e.Group, Kind: e.Kind, Host: e.Host, Port: e.Port, DB: e.DB, User: e.User,
+		URL: e.URL, Auth: e.Auth, Region: e.Region, Profile: e.Profile, Source: SourceDB}
 }
 
 func entryOf(c Conn) connEntry {
-	return connEntry{UUID: c.UUID, Name: c.Name, Group: c.Group, Kind: c.Kind, Host: c.Host, Port: c.Port, DB: c.DB, User: c.User}
+	return connEntry{UUID: c.UUID, Name: c.Name, Group: c.Group, Kind: c.Kind, Host: c.Host, Port: c.Port, DB: c.DB, User: c.User,
+		URL: c.URL, Auth: c.Auth, Region: c.Region, Profile: c.Profile}
+}
+
+// authOptions 는 종류별로 받는 auth 값이다(R60.1). 첫 값이 접속 창의 기본값이다.
+var authOptions = map[Kind][]string{
+	KindOpenSearch: {"", "basic", "sigv4"},
+	KindLoki:       {"", "basic"},
+	KindPrometheus: {"", "basic"},
+	KindGrafana:    {"token"},
+	KindDynamoDB:   {""},
+}
+
+// AuthOptions 는 종류 k 가 받는 auth 값이다. "" 는 인증 없음이다.
+func AuthOptions(k Kind) []string { return authOptions[k] }
+
+// checkHTTPURL 은 저장소 URL 이 http(s)://호스트 꼴이고 사용자 정보(비밀번호)가 없는지 본다. 원문은 오류에 싣지 않는다.
+func checkHTTPURL(raw string) error {
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "":
+		return errors.New("url must be http(s)://host")
+	case u.User != nil:
+		return errors.New("url must not contain user or password (use user and .env)")
+	}
+	return nil
+}
+
+// ParseHTTPURL 은 접속 창·CLI 에 붙인 http(s) URL 을 사용자 정보를 뺀 URL·사용자·비밀번호로 나눈다.
+func ParseHTTPURL(raw string) (string, string, string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return "", "", "", errors.New("invalid url (https://host[:port])")
+	}
+	user, pw := u.User.Username(), ""
+	if u.User != nil {
+		pw, _ = u.User.Password()
+	}
+	u.User = nil
+	return strings.TrimSuffix(u.String(), "/"), user, pw, nil
 }
 
 // ValidateConn 은 저장할 접속 값을 검사한다. 이름은 영숫자·-·_ 만 받는다(R59.2). 포트 0 은 종류의 기본 포트다.
 func ValidateConn(c Conn) error {
-	switch {
-	case !ValidConnName(c.Name):
+	if !ValidConnName(c.Name) {
 		return errors.New("name must be letters, digits, - or _")
+	}
+	if c.Kind.IsSource() {
+		return validateSource(c)
+	}
+	switch {
 	case c.Kind != KindPG && c.Kind != KindRedis:
-		return fmt.Errorf("kind must be postgresql or redis: %q", c.Kind)
+		return fmt.Errorf("kind must be postgresql, redis, opensearch, loki, prometheus, grafana or dynamodb: %q", c.Kind)
 	case c.Host == "":
 		return errors.New("host is required")
 	case c.Port < 0 || c.Port > 65535:
@@ -168,6 +220,25 @@ func ValidateConn(c Conn) error {
 		if n, err := strconv.Atoi(c.DB); err != nil || n < 0 {
 			return fmt.Errorf("redis db must be a number: %q", c.DB)
 		}
+	}
+	return nil
+}
+
+// validateSource 는 읽기 전용 저장소 접속 값을 검사한다(R60.1). HTTP 종류는 url, SigV4·DynamoDB 는 region 이 필요하다.
+func validateSource(c Conn) error {
+	if !slices.Contains(authOptions[c.Kind], c.Auth) {
+		return fmt.Errorf("%s auth must be one of %q: %q", c.Kind, authOptions[c.Kind], c.Auth)
+	}
+	switch {
+	case c.Kind.IsHTTP() && c.URL == "":
+		return errors.New("url is required")
+	case c.URL != "":
+		if err := checkHTTPURL(c.URL); err != nil {
+			return err
+		}
+	}
+	if (c.Kind == KindDynamoDB || c.Auth == "sigv4") && c.Region == "" {
+		return errors.New("region is required (dynamodb, sigv4)")
 	}
 	return nil
 }
@@ -182,7 +253,7 @@ func checkName(conns []Conn, c Conn, self string) error {
 		if o.Name == c.Name || o.UUID == c.UUID {
 			return fmt.Errorf("connection already exists: %s", c.Name)
 		}
-		if PasswordKey(o.Kind, o.Name) == PasswordKey(c.Kind, c.Name) {
+		if sameSecretKey(o, c) {
 			return fmt.Errorf("%s uses the same .env key as %s", c.Name, o.Name)
 		}
 	}
@@ -214,8 +285,7 @@ func AddConn(dir string, c Conn) (Conn, error) {
 	if err := checkName(all, c, ""); err != nil {
 		return c, err
 	}
-	if c.Password != "" {
-		key := PasswordKey(c.Kind, c.Name)
+	if key := PasswordKey(c.Kind, c.Name); c.Password != "" && key != "" {
 		if err := setEnv(dir, []string{key}, key+"="+url.QueryEscape(c.Password)); err != nil {
 			return c, err
 		}
@@ -259,15 +329,17 @@ func UpdateConn(dir, oldName string, c Conn) (Conn, error) {
 	}
 	oldKey, newKey := PasswordKey(old.Kind, old.Name), PasswordKey(c.Kind, c.Name)
 	switch {
-	case c.Password != "":
+	case c.Password != "" && newKey != "":
 		err = setEnv(dir, []string{oldKey, newKey}, newKey+"="+url.QueryEscape(c.Password))
+	case oldKey != newKey && oldKey == "":
+		// 비밀값이 없던 종류(DynamoDB)에서 바꾸면 옮길 값이 없다
 	case oldKey != newKey:
-		// 비밀번호를 그대로 두고 키만 옮긴다. 값은 인코딩된 원문 그대로 옮긴다
+		// 비밀번호를 그대로 두고 키만 옮긴다. 값은 인코딩된 원문 그대로 옮긴다. 비밀값이 없는 종류로 바꾸면 옛 줄만 지운다
 		var raw string
 		var found bool
 		if raw, found, err = envValue(dir, oldKey); err == nil {
 			line := ""
-			if found {
+			if found && newKey != "" {
 				line = newKey + "=" + raw
 			}
 			err = setEnv(dir, []string{oldKey, newKey}, line)
@@ -296,6 +368,9 @@ func RemoveConn(dir, name string) error {
 	key := PasswordKey(es[i].Kind, es[i].Name)
 	if err := writeConnEntries(dir, slices.Delete(es, i, i+1)); err != nil {
 		return err
+	}
+	if key == "" {
+		return nil
 	}
 	return setEnv(dir, []string{key}, "")
 }
@@ -346,6 +421,8 @@ func envValue(dir, key string) (string, bool, error) {
 // 다른 줄·주석·순서는 그대로 둔다. 파일이 없으면 0600 으로 만들고, 있으면 권한을 그대로 둔다(R59.2).
 // 심볼릭 링크면 가리키는 파일을 고친다(writeTarget). 파일이 CRLF 줄바꿈이면 새 줄도 CRLF 로 쓴다.
 func setEnv(dir string, keys []string, line string) error {
+	// 빈 키는 주석·빈 줄(envKeyOf "")과 맞아 그 줄들을 지우게 되므로 뺀다
+	keys = slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return k == "" })
 	path, perm, err := writeTarget(filepath.Join(dir, ".env"), 0o600)
 	if err != nil {
 		return err
@@ -456,6 +533,7 @@ func testConn(ctx context.Context, cs *Clients, c Conn) (string, error) {
 		}
 		return redisVersion(info), nil
 	}
+	// 읽기 전용 저장소는 internal/source 를 알아야 해 main 의 testConn 이 시험한다(db 는 source 를 가져올 수 없다)
 	return "", fmt.Errorf("kind must be postgresql or redis: %q", c.Kind)
 }
 

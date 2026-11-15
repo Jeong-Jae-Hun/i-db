@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,12 +23,14 @@ import (
 // db 전용 접속을 화면 없이 더하고 고치고 지우고 시험한다. 비밀번호는 --url·--password-stdin 으로만 받고 찍지 않는다.
 
 const connUsage = `사용법:
-  db conn add <이름> --url URL [--group 그룹] [--kind postgresql|redis] [--password-stdin] [--force]
-  db conn edit <이름> [--url URL] [--host 호스트] [--port 포트] [--db DB] [--user 사용자] [--group 그룹] [--password-stdin] [--force]
+  db conn add <이름> --url URL [--group 그룹] [--kind 종류] [--user 사용자] [--auth A] [--region R] [--profile P] [--password-stdin] [--force]
+  db conn edit <이름> [--url URL] [--host 호스트] [--port 포트] [--db DB] [--user 사용자] [--group 그룹] [--auth A] [--region R] [--profile P] [--password-stdin] [--force]
   db conn rm <이름> [--yes]
   db conn test <이름> | --url URL
 
   접속은 .dbtui/connections.json, 비밀번호는 .env 의 PG_<이름>_PASSWORD·REDIS_<이름>_PASSWORD(URL 인코딩)에 둔다.
+  읽기 전용 저장소(R60)는 --kind opensearch|loki|prometheus|grafana|dynamodb 와 http(s) --url 로 더한다(DynamoDB 의 --url 은 선택 엔드포인트).
+  --auth 는 basic·sigv4(OpenSearch)·token(Grafana), sigv4·DynamoDB 는 --region 이 필요하다. 비밀값 키는 OS_·LOKI_·PROM_·GRAFANA_<이름>_TOKEN 이다.
   비밀번호는 --url 또는 --password-stdin 으로만 받고 찍지 않는다. edit 에서 주지 않으면 그대로 둔다.
   add·edit 는 저장 전에 접속을 시험하고, 실패하면 --force 없이는 저장하지 않는다(종료 코드 1).
   rm 은 묻고 지운다. 표준 입력이 터미널이 아니면 --yes 가 필요하다. DataGrip 접속은 DataGrip 에서 고친다.
@@ -42,6 +45,7 @@ const connMaxPassword = 64 << 10
 
 type connCLIOpts struct {
 	dir, url, group, kind, host, port, db, user string
+	auth, region, profile                       string
 	pwStdin, force, yes, prod                   bool
 	timeout                                     time.Duration
 	given                                       map[string]bool // 명령줄에 준 플래그
@@ -77,13 +81,16 @@ func runConnCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bo
 		fs.BoolVar(&o.pwStdin, "password-stdin", false, "비밀번호를 표준 입력에서 읽기")
 		fs.BoolVar(&o.force, "force", false, "접속 시험이 실패해도 저장")
 		fs.BoolVar(&o.prod, "prod", false, "prod 접속 허용")
+		fs.StringVar(&o.user, "user", "", "사용자")
+		fs.StringVar(&o.auth, "auth", "", "저장소 인증 basic|sigv4|token (없으면 비움)")
+		fs.StringVar(&o.region, "region", "", "AWS 리전 (sigv4·DynamoDB)")
+		fs.StringVar(&o.profile, "profile", "", "AWS 프로필 (비우면 표준 체인)")
 		if sub == "add" {
-			fs.StringVar(&o.kind, "kind", "", "postgresql|redis (URL 과 같아야 함)")
+			fs.StringVar(&o.kind, "kind", "", "postgresql|redis (URL 과 같아야 함)|opensearch|loki|prometheus|grafana|dynamodb")
 		} else {
 			fs.StringVar(&o.host, "host", "", "호스트")
 			fs.StringVar(&o.port, "port", "", "포트")
 			fs.StringVar(&o.db, "db", "", "DB (Redis 는 번호)")
-			fs.StringVar(&o.user, "user", "", "사용자")
 		}
 	case "rm":
 		fs.BoolVar(&o.yes, "yes", false, "묻지 않고 지우기")
@@ -132,7 +139,7 @@ func connCommand(ctx context.Context, sub string, o connCLIOpts, pos []string, s
 			return usageErr("%v", err)
 		}
 		c.Password = pw
-		return connTest(ctx, o, c, stdout)
+		return connTest(ctx, o, c, stdout, stderr)
 	}
 	if len(pos) != 1 {
 		return usageErr("접속 이름 하나가 필요함 (db help conn)")
@@ -156,7 +163,7 @@ func connCommand(ctx context.Context, sub string, o connCLIOpts, pos []string, s
 	case i < 0:
 		return usageErr("접속 없음: %s (db conns)", name)
 	case sub == "test":
-		return connTest(ctx, o, proj.Conns[i], stdout)
+		return connTest(ctx, o, proj.Conns[i], stdout, stderr)
 	case editRefusal(proj.Conns[i]) != "":
 		return usageErr("%s", editRefusal(proj.Conns[i]))
 	case sub == "edit":
@@ -188,23 +195,49 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 		c, keep = proj.Conns[i], proj.Conns[i].Password
 		c.Password = "" // 비우면 UpdateConn 이 .env 값을 그대로 둔다
 		changed := false
-		for _, f := range []string{"url", "host", "port", "db", "user", "group", "password-stdin"} {
+		for _, f := range []string{"url", "host", "port", "db", "user", "group", "password-stdin", "auth", "region", "profile"} {
 			changed = changed || o.given[f]
 		}
 		if !changed {
-			return usageErr("고칠 값이 없음 (--url --host --port --db --user --group --password-stdin)")
+			return usageErr("고칠 값이 없음 (--url --host --port --db --user --group --auth --region --profile --password-stdin)")
 		}
-	} else if o.url == "" {
-		return usageErr("--url 이 필요함")
+	} else {
+		c.Kind = db.Kind(o.kind)
+		if o.url == "" && c.Kind != db.KindDynamoDB {
+			return usageErr("--url 이 필요함")
+		}
 	}
-	if o.url != "" {
+	if c.Kind.IsSource() {
+		// 저장소는 http(s) URL 이고 사용자 정보는 user·.env 로 나눈다(R60.1)
+		if o.url != "" {
+			u, user, pw, err := db.ParseHTTPURL(o.url)
+			if err != nil {
+				return usageErr("%v", err)
+			}
+			c.URL = u
+			if user != "" || pw != "" {
+				c.User, c.Password = user, pw
+			}
+		}
+		if i < 0 && !o.given["auth"] {
+			c.Auth = db.AuthOptions(c.Kind)[0]
+			if (c.User != "" || c.Password != "") && slices.Contains(db.AuthOptions(c.Kind), "basic") {
+				c.Auth = "basic"
+			}
+		}
+		for f, dst := range map[string]*string{"auth": &c.Auth, "region": &c.Region, "profile": &c.Profile} {
+			if o.given[f] {
+				*dst = map[string]string{"auth": o.auth, "region": o.region, "profile": o.profile}[f]
+			}
+		}
+	} else if o.url != "" {
 		u, pw, err := db.ParseConnURL(o.url)
 		if err != nil {
 			return usageErr("%v", err)
 		}
 		c.Kind, c.Host, c.Port, c.DB, c.User, c.Password = u.Kind, u.Host, u.Port, u.DB, u.User, pw
 	}
-	if o.kind != "" && db.Kind(o.kind) != c.Kind {
+	if o.kind != "" && db.Kind(o.kind) != c.Kind && !db.Kind(o.kind).IsSource() {
 		return usageErr("--kind %s 가 URL 종류(%s)와 다름", o.kind, c.Kind)
 	}
 	c.Name = name
@@ -244,8 +277,11 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 	if test.Password == "" {
 		test.Password = keep
 	}
+	if w := connWarning(c); w != "" {
+		fmt.Fprintln(stderr, "경고: "+w)
+	}
 	note := ""
-	if v, err := db.TestConn(ctx, test); err != nil {
+	if v, err := testConn(ctx, test); err != nil {
 		if !o.force {
 			return fmt.Errorf("접속 시험 실패 (저장하지 않음, --force 로 저장): %w", err)
 		}
@@ -269,11 +305,14 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 	return err
 }
 
-func connTest(ctx context.Context, o connCLIOpts, c db.Conn, stdout io.Writer) error {
+func connTest(ctx context.Context, o connCLIOpts, c db.Conn, stdout, stderr io.Writer) error {
 	if c.Env() == "prod" && !o.prod {
 		return refused("prod 접속은 --prod 가 필요함")
 	}
-	v, err := db.TestConn(ctx, c)
+	if w := connWarning(c); w != "" {
+		fmt.Fprintln(stderr, "경고: "+w)
+	}
+	v, err := testConn(ctx, c)
 	if err != nil {
 		return fmt.Errorf("접속 실패: %w", err)
 	}
@@ -281,8 +320,12 @@ func connTest(ctx context.Context, o connCLIOpts, c db.Conn, stdout io.Writer) e
 	return nil
 }
 
-// connSummary 는 비밀번호 없는 접속 요약이다(PostgreSQL ro@host:5432/app).
+// connSummary 는 비밀번호 없는 접속 요약이다(PostgreSQL ro@host:5432/app, OpenSearch https://h sigv4 ap-northeast-2).
 func connSummary(c db.Conn) string {
+	if c.Kind.IsSource() {
+		return strings.Join(slices.DeleteFunc([]string{connKinds[c.Kind], c.URL, c.Auth, c.Region, c.Profile},
+			func(s string) bool { return s == "" }), " ")
+	}
 	user := ""
 	if c.User != "" {
 		user = c.User + "@"

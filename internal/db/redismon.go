@@ -263,7 +263,7 @@ func (r *RedisConn) BigKeys(ctx context.Context, sample, top int) (*Result, erro
 		if b.ttl >= 0 {
 			ttl = b.ttl.String()
 		}
-		res.Rows = append(res.Rows, []string{capCell(b.key), b.typ, humanBytes(b.bytes), strconv.FormatInt(b.bytes, 10), ttl})
+		res.Rows = append(res.Rows, []string{CapCell(b.key), b.typ, humanBytes(b.bytes), strconv.FormatInt(b.bytes, 10), ttl})
 	}
 	res.Elapsed = time.Since(start)
 	return res, nil
