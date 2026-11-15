@@ -94,6 +94,7 @@ func main() {
 		m.addStatus("실행 기록을 열지 못함: " + err.Error())
 	}
 	m.restoreSession()
+	m.boot = tea.Batch(m.boot, updateNoticeCmd(os.Getenv, version, updateCheckPath(), fetchLatestTag))
 	// 경계 끌기(R46.1)는 버튼을 누른 채 움직임만 있으면 된다. AllMotion 은 마우스가 지날 때마다 Update·View 를 돌려
 	// 경계 위 강조를 빼고 CellMotion 을 쓴다
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}

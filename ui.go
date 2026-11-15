@@ -1925,6 +1925,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.reveal(m.jumpConn, *m.jump)
 		}
 		return m, nil
+	case updateNoticeMsg:
+		m.addStatus(fmt.Sprintf("새 판 %s — db update", msg.tag))
+		return m, nil
 	case catalogMsg:
 		if msg.gen != m.catGen[msg.conn] {
 			return m, nil

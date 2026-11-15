@@ -62,6 +62,7 @@ var cliCommands = []cliCommand{
 	{"search", "db search -c 접속 [-s 스키마] 찾을글", "스키마의 글자 열 전체 검색(테이블당 5행)"},
 	{"schema-diff", "db schema-diff -c 접속A --to 접속B [-s 스키마] [--to-schema 스키마2]", "두 스키마의 테이블·열·제약·인덱스 비교"},
 	{"status", "db status [-c 접속 …] [--format table|tsv|json] [--prod]", "모든 접속(또는 -c 로 고른 접속)을 동시에 확인해 상태·지연·버전·주요 수치를 찍음(R64.3). prod 는 --prod 일 때만, 하나라도 실패하면 1"},
+	{"update", "db update [--check] [--version vX.Y.Z] [--force]", "GitHub 릴리스의 최신 판으로 db 를 바꿈(R65). --check 는 새 판이 있으면 10. db help update"},
 	{"conn", "db conn add|edit|rm|test …", "db 전용 접속 추가·고치기·지우기·시험(R59, .dbtui/connections.json). db help conn"},
 }
 
@@ -198,6 +199,8 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, 
 		return cliHelp(args[1:], stdout, stderr)
 	case "conn":
 		return runConnCLI(ctx, args[1:], stdin, stdinTTY, stdout, stderr)
+	case "update":
+		return runUpdateCLI(ctx, defaultUpdater(), args[1:], stdout, stderr)
 	}
 	if stdinTTY {
 		stdin = nil
@@ -294,6 +297,10 @@ func cliErrText(ctx context.Context, proj *db.Project, o cliOpts, err error, con
 func cliHelp(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "conn" {
 		fmt.Fprint(stdout, connUsage)
+		return exitOK
+	}
+	if len(args) > 0 && args[0] == "update" {
+		fmt.Fprint(stdout, updateUsage)
 		return exitOK
 	}
 	if len(args) > 0 {

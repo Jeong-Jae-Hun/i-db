@@ -590,6 +590,15 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R64.3 CLI `db status [--format table|tsv|json] [--prod] [-c 이름…]`는 같은 확인을 한 번 돌려 표를 찍는다. prod 접속은 `--prod`가 없으면 확인하지 않고 `--prod 로 확인`으로 보인다(R58.2). 하나라도 실패하면 종료 코드 1이다.
   - 예: 열은 `group`·`name`·`env`·`kind`·`ok`·`latency_ms`·`version`·`metrics`다. json 은 접속마다 객체인 배열이고 `metrics`는 `{name,value,warn}` 배열, 확인하지 않은 prod 는 `"ok":null`·`"note":"--prod 로 확인"`이다. `-c`는 여러 번 줄 수 있고 없으면 모든 접속이다.
 
+### R65 스스로 갱신
+
+- R65.1 `db update`는 GitHub 릴리스(`Jeong-Jae-Hun/i-db`)의 최신 판을 받아 지금 실행 중인 바이너리를 바꾼다. gh·로그인 없이 공개 API로 받고(`GITHUB_TOKEN`이 있으면 붙여 요청 한도를 늘림), 이 OS·CPU의 `db_<os>_<arch>.tar.gz`를 `checksums.txt`의 sha256으로 검증한 뒤, 실행 파일과 같은 폴더의 임시 파일에 쓰고 권한을 맞춰 바꿔 끼운다. 끝나면 `v0.9.0 → v0.12.0`을 보인다. 이미 최신이면 `이미 최신 (v0.12.0)`이다.
+  - 예: `db update --check`는 바꾸지 않고 새 판 여부만 보인다(새 판이 있으면 종료 코드 10). `db update --version v0.11.0`은 그 판으로 바꾼다(낮은 판으로 내릴 때는 `--force`).
+  - 예: 실행 파일이 심볼릭 링크면 링크가 가리키는 파일을 바꾼다. 쓸 권한이 없으면 `쓸 수 없음: <경로> (sudo 로 다시)`로 끝낸다. 체크섬이 다르거나 받은 파일에 `db`가 없으면 아무것도 바꾸지 않는다.
+  - 단, 소스에서 빌드한 판(`dev`)은 `--force` 없이는 바꾸지 않고, `--check`는 비교할 수 없어 종료 코드 1이다.
+  - 예: 받은 태그가 판 꼴(`vX.Y.Z[-pre][+build]`, 영숫자·`.`·`-`만)이 아니거나 `--version`과 다르면 바꾸지 않고 끝낸다. 기본 클라이언트는 https의 `api.github.com`·`github.com`·`*.githubusercontent.com`로만 넘어가고, 토큰은 API 호스트 밖으로 보내지 않는다. 묶음 안의 풀린 크기 합은 200MiB가 상한이다.
+- R65.2 TUI는 켤 때 하루에 한 번만(마지막 확인 시각은 개인 상태 폴더) 최신 판을 조용히 확인해, 새 판이 있으면 상태 줄에 `새 판 v0.13.0 — db update` 를 한 번 보인다. 지금 판이 최신보다 낮은 이유가 되돌아간 설치든 아니든 같다. `DB_UPDATE_CHECK=0`이면 확인하지 않는다. 네트워크 오류는 알리지 않는다.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |
