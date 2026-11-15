@@ -71,6 +71,7 @@ It reads:
 | `.idea/data_source_mapping.xml` | which connection each `queries/*.sql` file belongs to |
 | `.env` | passwords and optional encryption keys (below) |
 | `.dbtui/connections.json` | optional extra connections added from `db` itself (see Connections) |
+| `.dbtui/folders.json` | optional tree folders you moved connections into (see Folders) |
 | `.dbtui/favorites.json`, `.dbtui/user360.json` | optional, meant to be committed with the project |
 
 Passwords come from `.env`, URL-encoded, keyed by the connection name upper-cased with non-alphanumerics turned into `_`:
@@ -103,6 +104,16 @@ db conn rm app-stg2 --yes
 ```
 
 Passwords are only taken from `--url` or `--password-stdin` and never printed. `add` and `edit` test the connection first and refuse to save on failure unless `--force` is given (exit code 1). `rm` asks on a terminal and needs `--yes` otherwise. Connecting to a prod connection needs `--prod`, as with the other commands.
+
+### Folders
+
+The tree groups connections into folders by their group, sorted by name with ungrouped ones (`기타`) last; inside a folder they go local → stg → prod. `E` on a folder line renames it, `M` on a connection line moves it to another folder (empty = back to its group). This works for DataGrip connections too: only `.dbtui/folders.json` is written, and the group itself is kept, so encryption keys (`<GROUP>_AES_KEY`) still resolve the same way.
+
+```sh
+db conn folder app-stg2 ops          # move
+db conn folder app-stg2 --reset      # back to its group
+db conn folder --rename mon monitoring
+```
 
 ### Sources
 

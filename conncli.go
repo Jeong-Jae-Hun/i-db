@@ -27,6 +27,7 @@ const connUsage = `사용법:
   db conn edit <이름> [--url URL] [--host 호스트] [--port 포트] [--db DB] [--user 사용자] [--group 그룹] [--auth A] [--region R] [--profile P] [--password-stdin] [--force]
   db conn rm <이름> [--yes]
   db conn test <이름> | --url URL
+  db conn folder <이름> <폴더> | <이름> --reset | --rename <옛 폴더> <새 폴더>
 
   접속은 .dbtui/connections.json, 비밀번호는 .env 의 PG_<이름>_PASSWORD·REDIS_<이름>_PASSWORD(URL 인코딩)에 둔다.
   읽기 전용 저장소(R60)는 --kind opensearch|loki|prometheus|grafana|dynamodb 와 http(s) --url 로 더한다(DynamoDB 의 --url 은 선택 엔드포인트).
@@ -35,6 +36,7 @@ const connUsage = `사용법:
   add·edit 는 저장 전에 접속을 시험하고, 실패하면 --force 없이는 저장하지 않는다(종료 코드 1).
   rm 은 묻고 지운다. 표준 입력이 터미널이 아니면 --yes 가 필요하다. DataGrip 접속은 DataGrip 에서 고친다.
   prod 접속(R6.2)에 붙는 add·edit·test 는 --prod 가 필요하다.
+  folder 는 트리에 보일 폴더만 바꾼다(.dbtui/folders.json, DataGrip 접속도). 그룹·암호화 키는 그대로다.
 
 공통 플래그: -p 경로 --timeout 30s
 종료 코드: 0 성공 · 1 실행 오류(시험 실패 포함) · 2 사용법 · 3 안전장치 거절
@@ -46,7 +48,7 @@ const connMaxPassword = 64 << 10
 type connCLIOpts struct {
 	dir, url, group, kind, host, port, db, user string
 	auth, region, profile                       string
-	pwStdin, force, yes, prod                   bool
+	pwStdin, force, yes, prod, reset, rename    bool
 	timeout                                     time.Duration
 	given                                       map[string]bool // 명령줄에 준 플래그
 }
@@ -94,6 +96,9 @@ func runConnCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bo
 		}
 	case "rm":
 		fs.BoolVar(&o.yes, "yes", false, "묻지 않고 지우기")
+	case "folder":
+		fs.BoolVar(&o.reset, "reset", false, "원래 그룹으로 되돌리기")
+		fs.BoolVar(&o.rename, "rename", false, "폴더 이름 바꾸기 (<옛 폴더> <새 폴더>)")
 	case "test":
 		fs.StringVar(&o.url, "url", "", "저장하지 않고 시험할 URL")
 		fs.BoolVar(&o.prod, "prod", false, "prod 접속 허용")
@@ -130,6 +135,9 @@ func runConnCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bo
 }
 
 func connCommand(ctx context.Context, sub string, o connCLIOpts, pos []string, stdin io.Reader, stdinTTY bool, stdout, stderr io.Writer) error {
+	if sub == "folder" {
+		return connFolder(o, pos, stdout)
+	}
 	if sub == "test" && o.url != "" {
 		if len(pos) > 0 {
 			return usageErr("<이름> 과 --url 중 하나만 씀")
@@ -359,4 +367,56 @@ func readPasswordStdin(stdin io.Reader, tty bool, stderr io.Writer) (string, err
 		return "", usageErr("비밀번호가 비었음")
 	}
 	return pw, nil
+}
+
+// connFolder 는 `db conn folder` 다(R66.4). 접속에 붙지 않아 --prod 가 필요 없다.
+func connFolder(o connCLIOpts, pos []string, stdout io.Writer) error {
+	proj, err := loadProject(o.dir)
+	if err != nil {
+		return err
+	}
+	if o.rename {
+		if o.reset || len(pos) != 2 || strings.TrimSpace(pos[1]) == "" {
+			return usageErr("--rename <옛 폴더> <새 폴더>")
+		}
+		var conns []db.Conn
+		for _, c := range proj.Conns {
+			if c.Kind != "" && db.FolderOf(c) == pos[0] {
+				conns = append(conns, c)
+			}
+		}
+		if len(conns) == 0 {
+			return usageErr("폴더 없음: %s (db conns)", textutil.Printable(pos[0], true))
+		}
+		if err := db.SetFolder(proj.Dir, conns, pos[1]); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "폴더 이름 바꿈: %s → %s (접속 %d)\n", textutil.Printable(pos[0], false), strings.TrimSpace(pos[1]), len(conns))
+		return nil
+	}
+	want := 2
+	if o.reset {
+		want = 1
+	}
+	// DataGrip 접속 이름은 공백·. 이 있을 수 있어 이름 규칙을 보지 않는다. 오류·출력에는 Printable 로만 되풀이한다
+	if len(pos) != want {
+		return usageErr("db conn folder <이름> <폴더> | <이름> --reset")
+	}
+	i := connByName(proj, pos[0])
+	if i < 0 {
+		return usageErr("접속 없음: %s (db conns)", textutil.Printable(pos[0], false))
+	}
+	c, folder := proj.Conns[i], ""
+	if !o.reset {
+		folder = pos[1]
+	}
+	if err := db.SetFolder(proj.Dir, []db.Conn{c}, folder); err != nil {
+		return err
+	}
+	if o.reset || strings.TrimSpace(folder) == "" {
+		fmt.Fprintf(stdout, "되돌림: %s → %s\n", textutil.Printable(c.Name, false), textutil.Printable(db.GroupOf(c), false))
+		return nil
+	}
+	fmt.Fprintf(stdout, "옮김: %s → %s\n", textutil.Printable(c.Name, false), strings.TrimSpace(folder))
+	return nil
 }

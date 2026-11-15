@@ -274,7 +274,8 @@ var helpSections = []struct {
 		{"F", "데이터 검색 (PostgreSQL 접속·스키마)", "F"},
 		{"X", "패턴 맞는 키 일괄 삭제 (Redis 접속·이름공간, esc 멈춤)", "X"},
 		{"N", "새 접속 (URL 붙여넣기 · Ctrl+T 시험, .dbtui/connections.json)", "N"},
-		{"E", "접속 고치기 (db 전용 접속)", "E"},
+		{"E", "접속 고치기 (db 전용 접속) · 폴더 줄은 폴더 이름 바꾸기", "E"},
+		{"M", "접속을 다른 폴더로 옮기기 (빈 값이면 원래 그룹, .dbtui/folders.json)", "M"},
 		{"X (PostgreSQL·저장소 접속)", "접속 지우기 (db 전용 접속, .env 비밀번호도)", ""},
 		{"Alt+X", "접속 지우기 (db 전용 접속, Redis 포함)", "alt+X"},
 		{"=", "다른 접속과 스키마 비교 (PostgreSQL 접속·스키마)", "="},
@@ -4034,7 +4035,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.openConnForm(n, false)
 		return m, nil
 	case "E":
+		if n != nil && n.kind == nGroup {
+			m.renameFolderAsk(n)
+			return m, nil
+		}
 		m.openConnForm(n, true)
+		return m, nil
+	case "M":
+		m.moveFolderAsk(n)
 		return m, nil
 	case "alt+X":
 		return m, m.removeConnKey(n)

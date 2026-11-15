@@ -60,7 +60,7 @@ func runStatus(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Cli
 	var wg sync.WaitGroup
 	for r, i := range order {
 		c := proj.Conns[i]
-		rows[r] = statusRow{Group: db.GroupOf(c), Name: c.Name, Env: c.Env(), Kind: string(c.Kind), Metrics: []statusMetric{}}
+		rows[r] = statusRow{Group: db.FolderOf(c), Name: c.Name, Env: c.Env(), Kind: string(c.Kind), Metrics: []statusMetric{}}
 		if c.Env() == "prod" && !o.prod {
 			rows[r].Note = dashProdHint
 			continue

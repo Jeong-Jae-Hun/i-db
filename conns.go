@@ -102,7 +102,7 @@ func connRoots(conns []db.Conn, reuse map[int]*node, groupOpen map[string]bool) 
 		if c.Kind == "" {
 			continue
 		}
-		g := db.GroupOf(c)
+		g := db.FolderOf(c)
 		gn := byGroup[g]
 		if gn == nil {
 			open, ok := groupOpen[g]
@@ -201,7 +201,16 @@ func (m *model) openConnForm(n *node, edit bool) {
 				break
 			}
 			if p.kind == nGroup {
-				if p.label != db.GroupOf(db.Conn{}) {
+				// 폴더 이름은 옮긴 폴더일 수 있어(R66.2) 자식들의 그룹이 하나일 때만 그 그룹을 채운다
+				groups := map[string]bool{}
+				for _, cn := range p.children {
+					groups[m.conn(cn.conn).Group] = true
+				}
+				if len(groups) == 1 {
+					for g := range groups {
+						f.inputs[cfGroup].SetValue(g)
+					}
+				} else if len(p.children) == 0 && p.label != db.GroupOf(db.Conn{}) {
 					f.inputs[cfGroup].SetValue(p.label)
 				}
 				break
@@ -532,6 +541,10 @@ func (m *model) saveConnForm() tea.Cmd {
 	cmd := m.reloadConns()
 	if i, ok := m.proj.ConnIndex(c.UUID); ok {
 		if cn := m.connNode(i); cn != nil {
+			if cn.parent != nil && !cn.parent.expanded {
+				cn.parent.expanded = true
+				m.rebuild()
+			}
 			m.selectNode(cn)
 		}
 	}
@@ -604,6 +617,74 @@ func (m *model) removeConnKey(n *node) tea.Cmd {
 	return nil
 }
 
+// ─── 폴더 (R66.2) ───
+
+// moveFolderAsk 는 접속 줄의 M 이다. 지금 폴더를 채운 한 줄 입력을 열고, 빈 값이면 원래 그룹으로 되돌린다.
+func (m *model) moveFolderAsk(n *node) {
+	if n == nil || n.kind != nConn {
+		m.status = "M(폴더로 옮기기)은 접속 줄에서 누르세요"
+		return
+	}
+	i := n.conn
+	c := m.conn(i)
+	m.prompt("옮길 폴더: ", db.FolderOf(c), func(v string) tea.Cmd {
+		if err := db.SetFolder(m.proj.Dir, []db.Conn{c}, v); err != nil {
+			m.status = "폴더를 옮기지 못함: " + err.Error()
+			return nil
+		}
+		cmd := m.reloadConns()
+		if m.status != "" && m.conn(i).Folder == c.Folder {
+			return cmd // 다시 읽지 못했으면 그 오류를 남긴다
+		}
+		if cn := m.connNode(i); cn != nil {
+			m.selectNode(cn)
+			m.status = "옮김: " + c.Name + " → " + db.FolderOf(m.conn(i))
+		}
+		return cmd
+	})
+}
+
+// renameFolderAsk 는 폴더 줄의 E 다. 그 폴더에 보이는 접속을 모두 새 폴더로 옮긴다. 있는 폴더 이름이면 합쳐진다.
+func (m *model) renameFolderAsk(n *node) {
+	old := n.label
+	var conns []db.Conn
+	for _, cn := range n.children {
+		conns = append(conns, m.conn(cn.conn))
+	}
+	m.prompt("폴더 이름: ", old, func(v string) tea.Cmd {
+		v = strings.TrimSpace(v)
+		if v == "" || v == old {
+			return nil
+		}
+		if err := db.SetFolder(m.proj.Dir, conns, v); err != nil {
+			m.status = "폴더 이름을 바꾸지 못함: " + err.Error()
+			return nil
+		}
+		cmd := m.reloadConns()
+		g := m.groupNode(v)
+		if g == nil {
+			return cmd // 다시 읽지 못했으면 그 오류를 남긴다
+		}
+		// 새 이름은 펼친 채로 생긴다. 접힌 폴더에 합쳤으면 옮긴 접속이 보이게 편다
+		if !g.expanded {
+			g.expanded = true
+			m.rebuild()
+		}
+		m.selectNode(g)
+		m.status = fmt.Sprintf("폴더 이름 바꿈: %s → %s (접속 %d)", old, v, len(conns))
+		return cmd
+	})
+}
+
+func (m *model) groupNode(label string) *node {
+	for _, g := range m.roots {
+		if g.kind == nGroup && g.label == label {
+			return g
+		}
+	}
+	return nil
+}
+
 // ─── 다시 읽기 ───
 
 // reloadConns 는 접속 파일을 다시 읽어 uuid 로 맞춘다. 그대로인 접속은 자리·트리 노드·캐시를 두고, 새 접속은 끝에 붙인다.
@@ -627,6 +708,7 @@ func (m *model) reloadConns() tea.Cmd {
 		}
 		seen[i] = true
 		same := c
+		same.Folder = conns[i].Folder // 폴더만 옮긴 접속은 연결·캐시를 그대로 둔다(R66.3)
 		// B 로 바꾼 DB 는 메모리에만 있어 비교에서 뺀다. 단 파일의 DB 자체를 고쳤으면 바뀐 접속이다(B 는 풀린다)
 		if orig, ok := m.dbOrig[i]; ok && m.dbOver[i] != "" && c.DB == orig {
 			same.DB = conns[i].DB
@@ -636,6 +718,7 @@ func (m *model) reloadConns() tea.Cmd {
 			conns[i] = c
 			changed = append(changed, i)
 		}
+		conns[i].Folder = c.Folder
 	}
 	for i, o := range conns {
 		if o.Kind != "" && !seen[i] {

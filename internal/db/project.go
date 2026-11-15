@@ -58,6 +58,8 @@ type Conn struct {
 	Profile string
 	// SSLMode 는 PostgreSQL 접속의 sslmode 를 덮어쓴다(R59.1). 비면 원격 require·로컬 prefer 다
 	SSLMode string
+	// Folder 는 트리에서 옮긴 폴더다(R66.2, .dbtui/folders.json). 비면 Group 으로 보인다. AES 키는 늘 Group 으로 찾는다
+	Folder string
 	// Source 는 접속을 읽은 곳이다. SourceDB 면 .dbtui/connections.json(R59), 비면 DataGrip .idea 다
 	Source string
 }
@@ -206,6 +208,7 @@ func LoadProject(dir string) (*Project, error) {
 	if err := p.loadDBConns(env); err != nil {
 		return nil, err
 	}
+	p.loadFolders()
 
 	var mp xmlMapping
 	if err := readOptionalXML(filepath.Join(dir, ".idea", "data_source_mapping.xml"), &mp); err != nil {

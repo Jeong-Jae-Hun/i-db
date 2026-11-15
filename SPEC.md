@@ -604,6 +604,10 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 - R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
   - 예: `shop` 폴더 → `shop-local`, `shop-local-redis`, `shop-stg`, `shop-stg-read`, `shop-stg-redis`, `shop-stg-os`, `shop-prod`, `shop-prod-read-redis`, `shop-prod-os`.
+- R66.2 폴더는 보이는 묶음이고 접속의 `group`과 따로 둘 수 있다. 옮긴 폴더는 db 전용 파일 `.dbtui/folders.json`(`{"<접속 uuid>": "폴더"}`, uuid 가 없으면 `"name:<이름>"`)에 두고 DataGrip 접속도 같은 파일로 옮긴다. `.idea`·`connections.json`의 `group`은 고치지 않는다. 트리·정렬(R66.1)·대시보드(R64)·`db status`·`db conns`의 `folder` 열은 옮긴 폴더를, 암호화 키(`<GROUP>_AES_KEY`, R37)·접속 창의 그룹 칸·MCP는 `group`을 쓴다. 폴더가 원래 그룹과 같아지면 기록을 지운다.
+  - 예: `dg-stg`(그룹 `grp`)를 `ops`로 옮기면 트리에선 `ops` 폴더에 보이고 `enc()`는 여전히 `GRP_AES_KEY`로 암호화한다.
+- R66.3 폴더 줄 `E`는 `폴더 이름: <지금 이름>` 한 줄 입력을 열고, Enter 면 그 폴더에 보이는 접속을 모두 새 폴더로 옮긴 뒤 `폴더 이름 바꿈: mon → monitoring (접속 3)`을 보인다. 이미 있는 폴더 이름이면 합쳐진다. 접속 줄 `M`은 `옮길 폴더: <지금 폴더>`를 열고 빈 값이면 원래 그룹으로 되돌린다. 펼침 상태는 새 이름으로 이어받고 옮긴 접속(또는 폴더)을 고른다. 폴더만 바뀐 접속은 연결·자동완성 목록을 닫지 않는다. `folders.json`이 깨졌으면 경고만 하고 그룹대로 보이며, 덮어쓰지 않고 `폴더를 옮기지 못함`을 보인다. 폴더 이름은 64자 이하, 제어 문자 없음.
+- R66.4 CLI `db conn folder <이름> <폴더>` · `db conn folder <이름> --reset` · `db conn folder --rename <옛 폴더> <새 폴더>`. 접속에 붙지 않아 `--prod`가 필요 없다. 없는 접속·폴더는 종료 코드 2다.
 
 ## 4. 화면과 키
 

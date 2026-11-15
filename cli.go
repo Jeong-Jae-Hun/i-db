@@ -550,7 +550,7 @@ func runCommand(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Cl
 	switch o.cmd {
 	case "conns":
 		// 사람이 읽는 표는 db 전용 접속 이름에 (db) 를 붙인다(R59.1). 기계가 읽는 형식은 -c 에 그대로 넣게 이름만 두고 source 열로 가른다
-		res := &db.Result{Cols: []string{"name", "group", "kind", "env", "host", "db", "source"}}
+		res := &db.Result{Cols: []string{"name", "group", "kind", "env", "host", "db", "source", "folder"}}
 		for _, c := range proj.Conns {
 			name, source := c.Name, "datagrip"
 			if c.Source == db.SourceDB {
@@ -559,7 +559,7 @@ func runCommand(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Cl
 			if o.format == "table" {
 				name = connLabel(c)
 			}
-			res.Rows = append(res.Rows, []string{name, c.Group, string(c.Kind), c.Env(), cmp.Or(c.Host, c.URL), c.DB, source})
+			res.Rows = append(res.Rows, []string{name, c.Group, string(c.Kind), c.Env(), cmp.Or(c.Host, c.URL), c.DB, source, db.FolderOf(c)})
 		}
 		return []cliResult{{res: res}}, nil
 

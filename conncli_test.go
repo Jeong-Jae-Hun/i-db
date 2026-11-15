@@ -58,7 +58,7 @@ func TestConnCLI_add_는_시험이_실패하면_force_없이_저장하지_않는
 		t.Fatalf("conns 표는 (db) 를 붙인다: %q", out)
 	}
 	_, out, _ = runCLITest(t, "", "conns", "-p", dir, "--format", "tsv")
-	if !strings.Contains(out, "app-stg2\tapp\tpostgresql\tstg\t127.0.0.1\tapp\tdb\n") || !strings.Contains(out, "dg-stg\tgrp\tpostgresql\tstg\t127.0.0.1\tapp\tdatagrip\n") {
+	if !strings.Contains(out, "app-stg2\tapp\tpostgresql\tstg\t127.0.0.1\tapp\tdb\tapp\n") || !strings.Contains(out, "dg-stg\tgrp\tpostgresql\tstg\t127.0.0.1\tapp\tdatagrip\tgrp\n") {
 		t.Fatalf("tsv 는 이름 그대로 source 열: %q", out)
 	}
 	if code, _, errw := runCLITest(t, "", "conn", "add", "app-stg2", "--url", u, "-p", dir, "--force"); code != exitUsage || !strings.Contains(errw, "이미 있음") {

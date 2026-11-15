@@ -151,7 +151,7 @@ func (m *model) dashRows(d *dashState) []int {
 	var out []int
 	for _, i := range connOrder(m.proj.Conns) {
 		c := m.conn(i)
-		if f == "" || strings.Contains(strings.ToLower(db.GroupOf(c)+"\x00"+c.Name+"\x00"+c.Env()), f) {
+		if f == "" || strings.Contains(strings.ToLower(db.FolderOf(c)+"\x00"+c.Name+"\x00"+c.Env()), f) {
 			out = append(out, i)
 		}
 	}
@@ -368,7 +368,7 @@ func dashTable(m *model, d *dashState, rows []int, w, h int, focused bool) []str
 				lat = fmt.Sprintf("%dms", hh.Latency.Milliseconds())
 			}
 		}
-		cells[r] = []string{db.GroupOf(c), connLabel(c), c.Env(), connKinds[c.Kind], st, lat, ver}
+		cells[r] = []string{db.FolderOf(c), connLabel(c), c.Env(), connKinds[c.Kind], st, lat, ver}
 		for i := range widths {
 			cells[r][i] = textutil.Printable(cells[r][i], false)
 			widths[i] = min(dashWidth[i], max(widths[i], ansi.StringWidth(cells[r][i])))
