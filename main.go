@@ -116,6 +116,7 @@ func main() {
 	}
 	m.stop()
 	m.clients.Close()
+	m.sources.close()
 	for _, n := range m.quitNotes {
 		fmt.Fprintln(os.Stderr, n)
 	}

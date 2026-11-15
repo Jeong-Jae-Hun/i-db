@@ -328,9 +328,9 @@ func (m *model) autoSaveStatus(t *queryTab) {
 }
 
 // savableNew 는 파일 없는 탭의 글을 새 쿼리 파일로 저장할 수 있는지다(R45.1). 접속이 있고 PostgreSQL 이고 글이 있어야 한다.
-// Redis 명령은 SQL 파일이 아니라 세션(R41)에만 남긴다.
+// Redis 명령·저장소 질의(R60)는 SQL 파일이 아니라 세션(R41)에만 남긴다.
 func (m *model) savableNew(t *queryTab) bool {
-	return t.file == "" && t.conn >= 0 && m.conn(t.conn).Kind != db.KindRedis && strings.TrimSpace(t.editor.Value()) != ""
+	return t.file == "" && t.conn >= 0 && m.conn(t.conn).Kind == db.KindPG && strings.TrimSpace(t.editor.Value()) != ""
 }
 
 // saveNew 는 파일 없는 탭의 글을 queries/<그룹>/<접속>-<시각>.sql 에 저장하고, 탭 접속을 매핑에 붙이고,

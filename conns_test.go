@@ -99,9 +99,9 @@ func TestConnForm_종류_칸은_space_로_바꾸고_기본_포트를_따라간�
 	if f.kind != db.KindRedis || !strings.Contains(ansi.Strip(m.View()), "6379") {
 		t.Fatalf("Redis 로 바뀌고 포트 자리 글은 6379: %s", f.kind)
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	if f.kind != db.KindPG {
-		t.Fatal("→ 로 다시 PostgreSQL")
+		t.Fatal("← 로 다시 PostgreSQL")
 	}
 }
 

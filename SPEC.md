@@ -17,9 +17,9 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `.idea/dataSources.xml` | 이름·uuid·그룹·드라이버(`postgresql`/`redis`)·JDBC URL |
 | `.idea/dataSources.local.xml` | uuid별 사용자명 |
 | `.idea/data_source_mapping.xml` | `queries/` 파일별 접속 uuid |
-| `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
+| `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 저장소 비밀값 `OS_`·`LOKI_`·`PROM_<이름>_PASSWORD`·`GRAFANA_<이름>_TOKEN`(R60.1), 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
 | `.dbtui/user360.json` | 사용자 한눈에 보기 조회 목록(R51, 없으면 빈 목록) |
-| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록) |
+| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`, R60.1) |
 
 `<이름>`은 접속 이름을 대문자로 바꾸고 영숫자 외 문자를 `_`로 바꾼 것이다.
 
@@ -595,9 +595,11 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Ctrl+U` (⌘U) | 사용자 한눈에 보기: 이메일·uid·id·닉네임으로 여러 DB 조회(R51) |
 | `Alt+C` (⌘⇧C) | 같은 쿼리를 다른 접속에서 실행해 비교(R53.1) |
 | `Ctrl+L` (⌘L) | 활성 탭 prod 접속의 쓰기 잠금 열기·닫기(R54) |
+| `Ctrl+]` | Loki·Prometheus·Grafana 탭의 범위 `15m·1h·6h·24h·7d` 돌리기(탭마다, 편집기 위 줄에 `최근 1h`, R62.2) |
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |
 | 트리 `Enter` `/` `r` `d` `D` `I` `A` `L` `S` | 펼치기·테이블 보기·값 편집·쿼리 파일 열기(접속은 최근 파일 자동 열기, R44) / 거르기 / 새로고침(쿼리 파일 목록도) / 구조 / DDL / CSV 가져오기 / 활동·잠금·크기(Redis 는 INFO·SLOWLOG·큰 키) |
+| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: y/N` 뒤 스캔) / 펼치기(R60~R63) |
 | 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄) |
 | 트리 `X` | Redis 패턴 키 일괄 삭제(접속·이름공간 줄, `esc` 멈춤, R42). db 전용 PostgreSQL 접속 줄은 접속 지우기(R59.3) |
 | 트리 `N` `E` `Alt+X` | 새 접속(URL 붙여넣기·`Ctrl+T` 시험) / db 전용 접속 고치기 / 지우기(Redis 포함, 팔레트 `접속 지우기`, R59) |
