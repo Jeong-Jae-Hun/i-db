@@ -586,7 +586,8 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있으면 그 칸을 경고 색으로 그린다.
 - R64.2 확인은 모든 접속에 동시에, 접속마다 5초 제한으로 보낸다. 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO`, OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
   - 단, 아직 열지 않은 접속도 확인 때문에 연결을 연다(풀 연결 하나). 확인 오류는 비밀값을 지워 한 줄로 보인다.
-- R64.3 CLI `db status [--format table|json] [--prod] [-c 이름…]`는 같은 확인을 한 번 돌려 표를 찍는다. prod 접속은 `--prod`가 없으면 확인하지 않고 `--prod 로 확인`으로 보인다(R58.2). 하나라도 실패하면 종료 코드 1이다.
+- R64.3 CLI `db status [--format table|tsv|json] [--prod] [-c 이름…]`는 같은 확인을 한 번 돌려 표를 찍는다. prod 접속은 `--prod`가 없으면 확인하지 않고 `--prod 로 확인`으로 보인다(R58.2). 하나라도 실패하면 종료 코드 1이다.
+  - 예: 열은 `group`·`name`·`env`·`kind`·`ok`·`latency_ms`·`version`·`metrics`다. json 은 접속마다 객체인 배열이고 `metrics`는 `{name,value,warn}` 배열, 확인하지 않은 prod 는 `"ok":null`·`"note":"--prod 로 확인"`이다. `-c`는 여러 번 줄 수 있고 없으면 모든 접속이다.
 
 ## 4. 화면과 키
 
@@ -616,6 +617,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Ctrl+U` (⌘U) | 사용자 한눈에 보기: 이메일·uid·id·닉네임으로 여러 DB 조회(R51) |
 | `Alt+C` (⌘⇧C) | 같은 쿼리를 다른 접속에서 실행해 비교(R53.1) |
 | `Ctrl+L` (⌘L) | 활성 탭 prod 접속의 쓰기 잠금 열기·닫기(R54) |
+| `Ctrl+G` (⌘G) | 대시보드: 모든 접속의 상태·지연·버전·수치(`r` 다시 확인, `Enter` 트리에서 고르기, `/` 거르기, R64) |
 | `Ctrl+]` | Loki·Prometheus·Grafana 탭의 범위 `15m·1h·6h·24h·7d` 돌리기(탭마다, 편집기 위 줄에 `최근 1h`, R62.2) |
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |

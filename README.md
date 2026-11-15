@@ -18,6 +18,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - `queries/` folder integration: files are attached to connections via DataGrip's `data_source_mapping.xml`, auto-save, session restore
 - Optional client-side decryption view and `enc('...')` expansion for AES-CBC values stored as `<iv hex>^|^<ciphertext hex>` (pgcrypto `encrypt_iv` compatible). Keys come from `.env` (`<GROUP>_AES_KEY`, `<GROUP>_AES_IV`); nothing is installed in your database. Without a key/IV, `enc(...)` is sent as a call to an existing `staticEncrypt(...)` function, so it only works if your database already has one
 - Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources) and DynamoDB in the same tree, editor and results grid (see Sources)
+- Dashboard (`Ctrl+G`) and `db status`: every connection's state, latency, version and key numbers at a glance (see Dashboard)
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
 ## Install
@@ -129,12 +130,29 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `Ctrl+O` / `Ctrl+S` | open / save a file under `queries/` |
 | `F9` / `F10` / `F11` | Auto/Manual transactions / COMMIT / ROLLBACK |
 | `Ctrl+L` | unlock writes on a prod connection for a few minutes |
+| `Ctrl+G` | dashboard of all connections (see Dashboard) |
 | `Ctrl+]` | Loki/Prometheus range 15m · 1h · 6h · 24h · 7d (per tab) |
 | `Ctrl+H` | history |
 | tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
 | tree `N` / `E` | add / edit a connection (see Connections) |
 
 On macOS, in terminals that speak the kitty keyboard protocol (Ghostty, kitty, WezTerm, iTerm2), the same actions are bound to ⌘ keys. See SPEC R23 and R47.
+
+### Dashboard
+
+`Ctrl+G` (⌘G, palette `대시보드`) opens a single dashboard tab. The top row has summary cards: connections by kind, connections by environment, connected / failed, the sum of PostgreSQL active sessions and Redis clients, open transactions and prod connections whose write lock is currently open. Below is one row per connection: group, name, environment, kind, state (`●` up, `✕` failed, `…` checking), latency, version and the main numbers (numbers over their threshold are highlighted).
+
+Every connection is checked at the same time with a 5 second limit each, again every 30 seconds while the dashboard is the active tab. The checks only ask for read-only metadata (PostgreSQL `pg_stat_activity` counts and `version()`, Redis `INFO`, OpenSearch cluster health, and so on; see SPEC R64). In the dashboard `r` checks again now, `Enter` selects the connection in the tree, `/` filters by group, name or environment and `esc` clears the filter.
+
+From a shell, `db status` runs the same checks once:
+
+```sh
+db status                          # every non-prod connection
+db status --prod --format json     # include prod
+db status -c app-stg -c app-stg-redis --format tsv
+```
+
+Columns are `group`, `name`, `env`, `kind`, `ok`, `latency_ms`, `version` and `metrics` (in JSON, `metrics` is an array of `{name, value, warn}` and `ok` is `null` for skipped connections). Prod connections are not contacted without `--prod` and show `--prod 로 확인`. The exit code is 1 if any checked connection failed.
 
 ## CLI
 
@@ -149,6 +167,7 @@ db query -c app-stg -f queries/app/report.sql --param id=7
 db explain -c app-stg "select * from orders where id = 1"
 db redis -c app-stg-redis GET some:key
 db schema-diff -c app-stg --to app-prod --prod -s public
+db status --format json
 db conn add app-stg2 --url 'postgres://app_ro:pw@db.stg.example.internal:5432/app'
 ```
 

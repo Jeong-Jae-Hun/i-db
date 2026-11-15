@@ -73,10 +73,18 @@ func (m *model) saveSession() error {
 	if restoreOff() {
 		return session.Save(path, m.proj.Dir, st)
 	}
-	st.Active, st.Tabs = m.tab, make([]session.Tab, len(m.tabs))
-	for i, t := range m.tabs {
-		st.Tabs[i] = session.Tab{Title: t.title, Text: t.editor.Value(), File: t.file, Cursor: t.editor.CursorOffset(),
-			Name: t.name, Pinned: t.pinned}
+	// 대시보드 탭(R64)은 글이 없어 되살리지 않는다. 활성 탭 자리는 남은 탭 기준으로 맞춘다
+	st.Active, st.Tabs = 0, nil
+	for _, t := range m.tabs {
+		if t.dash != nil {
+			continue
+		}
+		if t == m.cur() {
+			st.Active = len(st.Tabs)
+		}
+		i := len(st.Tabs)
+		st.Tabs = append(st.Tabs, session.Tab{Title: t.title, Text: t.editor.Value(), File: t.file, Cursor: t.editor.CursorOffset(),
+			Name: t.name, Pinned: t.pinned})
 		// 파일 탭은 저장 안 한 고침이 있을 때만 글을 두고, 되살릴 때 파일이 그사이 바뀌었는지 가를 디스크 해시를 같이 둔다
 		if t.file != "" {
 			if b, err := os.ReadFile(filepath.Join(m.proj.Dir, t.file)); err == nil {
