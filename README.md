@@ -33,6 +33,18 @@ curl -fsSL "https://github.com/Jeong-Jae-Hun/i-db/releases/latest/download/db_${
 db -version
 ```
 
+### Updating
+
+`db update` downloads the latest release for this OS and CPU, verifies it against `checksums.txt` and replaces the running binary in place (through a symlink, it replaces the target). No `gh` or login is needed; `GITHUB_TOKEN`, when set, raises the API rate limit.
+
+```sh
+db update --check            # prints "새 판 v0.11.0 → v0.12.0" and exits 10 when a newer release exists
+db update                    # v0.11.0 → v0.12.0
+db update --version v0.11.0 --force   # go back to an older release
+```
+
+If the binary's folder is not writable, it stops with `쓸 수 없음: <path> (sudo 로 다시)`. Builds from source (`dev`) are only replaced with `--force`. The TUI checks for a new release once a day at startup and shows `새 판 vX — db update` in the status line (`DB_UPDATE_CHECK=0` turns this off).
+
 ### go install
 
 ```sh
@@ -202,7 +214,9 @@ claude mcp add db -- db mcp -p ~/work/db-project --max-rows 100
 | `DB_RESTORE=0` | do not save or restore tabs |
 | `DB_KITTY_KEYS=0`/`1` | force the kitty keyboard protocol off/on |
 | `DB_KEYS=cmd`/`ctrl` | show key hints as ⌘ or Ctrl |
-| `XDG_STATE_HOME` | where history, session, parameter values and undo log live (default `~/.local/state/db/`) |
+| `DB_UPDATE_CHECK=0` | do not check GitHub for a new release at startup |
+| `GITHUB_TOKEN` | sent with `db update` and the startup check to GitHub API requests (higher rate limit) |
+| `XDG_STATE_HOME` | where history, session, parameter values, undo log and the last update check live (default `~/.local/state/db/`) |
 
 ## Development
 
