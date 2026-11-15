@@ -44,24 +44,8 @@ func (r *RedisConn) InfoSummary(ctx context.Context) (*Result, error) {
 // summarizeInfo 는 INFO 글을 표로 만든다. ElastiCache·Valkey 는 일부 필드를 숨기거나 이름을 더하므로
 // 없는 값은 "-" 로 둔다.
 func summarizeInfo(text string) *Result {
-	info := map[string]string{}
-	var dbs []string
-	for _, line := range strings.Split(text, "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if !ok || strings.HasPrefix(k, "#") {
-			continue
-		}
-		info[k] = v
-		if num, isDB := strings.CutPrefix(k, "db"); isDB && digits(num) != "-" {
-			dbs = append(dbs, k)
-		}
-	}
-	version := "-"
-	if v := info["valkey_version"]; v != "" {
-		version = "Valkey " + v
-	} else if v := info["redis_version"]; v != "" {
-		version = "Redis " + v
-	}
+	info, dbs := parseInfo(text)
+	version := cmp.Or(infoVersion(info), "-")
 	uptime := "-"
 	if s, err := strconv.ParseInt(info["uptime_in_seconds"], 10, 64); err == nil {
 		uptime = formatUptime(s)
@@ -98,15 +82,48 @@ func summarizeInfo(text string) *Result {
 		return a < b
 	})
 	for _, name := range dbs {
-		// 형식: keys=1,expires=0,avg_ttl=0[,subexpiry=0]
-		fields := map[string]string{}
-		for _, kv := range strings.Split(info[name], ",") {
-			k, v, _ := strings.Cut(kv, "=")
-			fields[k] = v
-		}
+		fields := keyspaceFields(info[name])
 		res.Rows = append(res.Rows, []string{name, fmt.Sprintf("키 %s · 만료 있음 %s", digits(fields["keys"]), digits(fields["expires"]))})
 	}
 	return res
+}
+
+// parseInfo 는 INFO 글을 필드 맵과 키 공간 이름(db0·db1…, 나온 순서)으로 가른다.
+func parseInfo(text string) (info map[string]string, dbs []string) {
+	info = map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || strings.HasPrefix(k, "#") {
+			continue
+		}
+		info[k] = v
+		if num, isDB := strings.CutPrefix(k, "db"); isDB && digits(num) != "-" {
+			dbs = append(dbs, k)
+		}
+	}
+	return info, dbs
+}
+
+// infoVersion 은 서버 이름과 버전(`Valkey 8.0.1`·`Redis 7.2.4`)이다. Valkey 는 호환용 redis_version 도 내므로
+// valkey_version 을 먼저 본다. 모르면 빈 글이다.
+func infoVersion(info map[string]string) string {
+	if v := info["valkey_version"]; v != "" {
+		return "Valkey " + v
+	}
+	if v := info["redis_version"]; v != "" {
+		return "Redis " + v
+	}
+	return ""
+}
+
+// keyspaceFields 는 키 공간 한 줄(keys=1,expires=0,avg_ttl=0[,subexpiry=0])을 맵으로 편다.
+func keyspaceFields(line string) map[string]string {
+	fields := map[string]string{}
+	for _, kv := range strings.Split(line, ",") {
+		k, v, _ := strings.Cut(kv, "=")
+		fields[k] = v
+	}
+	return fields
 }
 
 // digits 는 숫자 글에 쉼표를 넣고, 숫자가 아니면 "-" 를 돌려준다.

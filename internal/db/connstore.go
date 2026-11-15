@@ -537,16 +537,8 @@ func testConn(ctx context.Context, cs *Clients, c Conn) (string, error) {
 	return "", fmt.Errorf("kind must be postgresql or redis: %q", c.Kind)
 }
 
-// redisVersion 은 INFO server 에서 서버 이름과 버전을 고른다. Valkey 는 호환용 redis_version 도 내므로 valkey_version 을 먼저 본다.
-func redisVersion(info string) string {
-	fields := map[string]string{}
-	for _, line := range strings.Split(info, "\n") {
-		if k, v, ok := strings.Cut(strings.TrimSpace(line), ":"); ok {
-			fields[k] = v
-		}
-	}
-	if v := fields["valkey_version"]; v != "" {
-		return "Valkey " + v
-	}
-	return "Redis " + fields["redis_version"]
+// redisVersion 은 INFO server 글에서 서버 이름과 버전을 고른다.
+func redisVersion(text string) string {
+	info, _ := parseInfo(text)
+	return infoVersion(info)
 }
