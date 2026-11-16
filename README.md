@@ -19,7 +19,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Optional client-side decryption view and `enc('...')` expansion for AES-CBC values stored as `<iv hex>^|^<ciphertext hex>` (pgcrypto `encrypt_iv` compatible). Keys come from `.env` (`<GROUP>_AES_KEY`, `<GROUP>_AES_IV`); nothing is installed in your database. Without a key/IV, `enc(...)` is sent as a call to an existing `staticEncrypt(...)` function, so it only works if your database already has one
 - Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources), DynamoDB and Athena in the same tree, editor and results grid, plus a tree-only `aws` view of SNS, SQS (with DLQ counts), Lambda, EventBridge, Scheduler, Step Functions and S3 (see Sources)
 - Dashboard (`Ctrl+G`) and `db status`: every connection's state, latency, version and key numbers at a glance (see Dashboard)
-- Event flows (`Alt+F`) and `db flows`: an outbox table → SNS topic → SQS queues → DLQ · Lambda diagram with live counts, configured in `.dbtui/flows.json` (see Flows)
+- Event flows (`Alt+F`) and `db flows`: an outbox table → SNS topic → SQS queues → DLQ · Lambda diagram with live counts and per-event-type outbox retry limits, configured in `.dbtui/flows.json` (see Flows)
 - Query boards (`Alt+B`) and `db board`: your own grid of read-only query panels (numbers, tables, charts, flows) across PostgreSQL, Redis and every source, configured in `.dbtui/boards/<name>.json` (see Boards)
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
@@ -208,25 +208,39 @@ A flow follows one event path: an outbox table in PostgreSQL → an SNS topic �
 [
   { "name": "shop-hub-stg",
     "outbox": { "conn": "shop-stg", "table": "public.t_outbox", "type": "event_type", "retry": "retry_count", "due": "check_needed_at", "where": "event_type like 'DATA_%'" },
-    "aws": "aws-stg", "topic": "stg-shop-hub" }
+    "aws": "aws-stg", "topic": "stg-shop-hub" },
+  { "name": "shop-outbox-stg",
+    "outbox": { "conn": "shop-stg", "table": "public.t_outbox", "type": "event_type", "retry": "retry_count", "due": "check_needed_at", "limit": 5,
+      "types": { "CREATE_PAYOUT": { "limit": 20, "consumer": "consume-outbox-create-payout" }, "CLIP": { "consumer": "consume-outbox-clip" } } } }
 ]
 ```
 
-`outbox` is optional (a flow may be just a topic), and inside it `retry`, `due` and `where` are optional. `conn` must name a PostgreSQL connection and `aws` an `aws` connection; `topic` is a topic name or full ARN. Table and column names are quoted as identifiers. `where` is raw SQL added with `AND`, must be a single condition without `;`, and every outbox query runs in a READ ONLY transaction with a 5 second limit. The outbox numbers are `대기` (rows matching `where`), `재시도` (`retry > 0`) and `오래됨` (`due` older than 5 minutes). A missing file just means no flows; a broken entry shows `설정 오류: <reason>` and the others keep working.
+A flow needs an `outbox`, a `topic` or both: a flow may be just a topic, or just an outbox whose events are consumed directly by jobs (no `topic`, no `aws`). Inside `outbox`, `retry`, `due`, `where`, `limit` and `types` are optional. `conn` must name a PostgreSQL connection and `aws` an `aws` connection (only used with a `topic`); `topic` is a topic name or full ARN. Table and column names are quoted as identifiers. `where` is raw SQL added with `AND`, must be a single condition without `;`, and every outbox query runs in a READ ONLY transaction with a 5 second limit. Rows are counted per event type in one query. With a `retry` column every type has a retry limit (`limit`, default 5, overridden per type in `types`; both need `retry` and must be at least 1) and rows that reached it are never picked up again, so the numbers are `대기` (retry below the limit), `재시도` (retried but still below the limit), `한도 소진` (retry at or above the limit) and `오래됨` (`due` older than 5 minutes and still below the limit; abandoned rows are not counted as stale). Without `retry`, `대기` is every row matching `where` and `오래됨` only looks at `due`. A missing file just means no flows; a broken entry shows `설정 오류: <reason>` and the others keep working.
 
 `Alt+F` (palette `흐름`) opens a single flow tab, and `F` on an SNS topic in an `aws` tree adds that topic as an extra flow. Flows are listed on the left (`●` fine, `!` warning, `✕` failed, `…` not checked yet) and the selected one is drawn on the right:
 
 ```text
-[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 오래됨 1] ──▶ [SNS stg-shop-hub] ─┬─▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]
-                                                                                              │   └─ DLQ q1-dlq 4
-                                                                                              └─▶ [https https://hook.example.com]
+[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1] ──▶ [SNS stg-shop-hub] ─┬─▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]
+                                                                                                               │   └─ DLQ q1-dlq 4
+                                                                                                               └─▶ [https https://hook.example.com]
 ```
 
-When the pane is too narrow the boxes stack top to bottom. DLQ messages, retries, stale rows, a disabled Lambda mapping and a failing last result are highlighted. Flows are resolved again every 30 seconds while the tab is active; `r` refreshes now, `↑↓` picks a flow, `←→` picks a box and `Enter` opens its details in a result tab (outbox counts per type, queue attributes, topic subscriptions or the function's event source mappings). Resolution uses the same read-only AWS calls as the tree (`sns:ListTopics` for a name, `sns:ListSubscriptionsByTopic`, `sqs:GetQueueUrl`, `sqs:GetQueueAttributes`, `lambda:ListEventSourceMappings`). Email subscriptions are shown masked as `a***@domain`. The dashboard adds `DLQ 쌓인 큐` and, when flows have a `retry` column, `아웃박스 재시도` cards.
+Below the diagram an outbox gets one line per event type (configured types plus the types found in the table), sorted by `한도 소진`, then `대기`, then name; configured types with no rows are dimmed and only shown when there is room:
+
+```text
+[아웃박스 shop-stg public.t_outbox | 대기 9 · 재시도 2 · 한도 소진 3 · 오래됨 1]
+  ├─ CREATE_PAYOUT  대기 3 · 재시도 1 · 한도 소진 3  → consume-outbox-create-payout
+  ├─ CLIP                대기 4 · 재시도 1 · 한도 소진 0 · 오래됨 1  → consume-outbox-clip
+  └─ DONATION_CHAT       대기 2 · 재시도 0 · 한도 소진 0  → ?
+```
+
+`→` shows the configured `consumer` (`?` when unknown). Type lines are selectable like boxes, and `Enter` on one opens the 50 rows of that type with `retry > 0` (highest retry first) in a read-only result tab.
+
+When the pane is too narrow the boxes stack top to bottom. DLQ messages, retries, exhausted rows, stale rows, a disabled Lambda mapping and a failing last result are highlighted. Flows are resolved again every 30 seconds while the tab is active; `r` refreshes now, `↑↓` picks a flow, `←→` picks a box and `Enter` opens its details in a result tab (outbox counts per type, the retrying rows of a type, queue attributes, topic subscriptions or the function's event source mappings). Resolution uses the same read-only AWS calls as the tree (`sns:ListTopics` for a name, `sns:ListSubscriptionsByTopic`, `sqs:GetQueueUrl`, `sqs:GetQueueAttributes`, `lambda:ListEventSourceMappings`). Email subscriptions are shown masked as `a***@domain`. The dashboard adds `DLQ 쌓인 큐` and, when flows have a `retry` column, `아웃박스 한도 소진` (rows that hit their retry limit) cards.
 
 ```sh
 db flows                                  # every flow, prod connections skipped
-db flows -f shop-hub-stg --format json    # one row per box: flow, stage, name, metrics, warn
+db flows -f shop-hub-stg --format json    # one row per box: flow, stage, name, metrics, warn (stage outbox-type per event type)
 db flows --prod
 ```
 
@@ -249,7 +263,7 @@ A board is a grid of query panels you define in `.dbtui/boards/<name>.json` (one
 }
 ```
 
-`view` is `number` (first cell of the first row, highlighted when the optional `warn` rule such as `">0"` or `">=100"` matches), `table` (as many rows as fit), `chart` (the result chart) or `flow` (a flow from `.dbtui/flows.json`, one line per box). `refresh` defaults to `60s` and cannot go below `10s`; `since` sets the Loki / Prometheus / Grafana range like `--since`. Panels only read: PostgreSQL panels must be a single read-only statement and run in a READ ONLY transaction, Redis panels must be one bounded read command (single values and counts such as `GET`, `MGET`, `HGET`, `LLEN`, `INFO`, `LRANGE`/`ZRANGE` with an explicit range of at most 50, `SCAN` with `COUNT` up to 50; `KEYS`, `HGETALL`, `SMEMBERS` and `LRANGE k 0 -1` are refused) and are cut to 50 rows, and sources go through the same read-only checks as the editor. Expensive source queries (full scans, ranges over 7 days) are never forced; the panel shows `비싼 질의라 보드에서 돌리지 않음: <reason>` instead. `aws` connections cannot be query panels, use a `flow` panel. Each panel has a 15 second limit. A broken file or panel shows `설정 오류: <reason>` in place and `db` keeps running.
+`view` is `number` (first cell of the first row, highlighted when the optional `warn` rule such as `">0"` or `">=100"` matches), `table` (as many rows as fit), `chart` (the result chart) or `flow` (a flow from `.dbtui/flows.json`, one line per box plus up to 10 outbox event types that have rows). `refresh` defaults to `60s` and cannot go below `10s`; `since` sets the Loki / Prometheus / Grafana range like `--since`. Panels only read: PostgreSQL panels must be a single read-only statement and run in a READ ONLY transaction, Redis panels must be one bounded read command (single values and counts such as `GET`, `MGET`, `HGET`, `LLEN`, `INFO`, `LRANGE`/`ZRANGE` with an explicit range of at most 50, `SCAN` with `COUNT` up to 50; `KEYS`, `HGETALL`, `SMEMBERS` and `LRANGE k 0 -1` are refused) and are cut to 50 rows, and sources go through the same read-only checks as the editor. Expensive source queries (full scans, ranges over 7 days) are never forced; the panel shows `비싼 질의라 보드에서 돌리지 않음: <reason>` instead. `aws` connections cannot be query panels, use a `flow` panel. Each panel has a 15 second limit. A broken file or panel shows `설정 오류: <reason>` in place and `db` keeps running.
 
 `Alt+B` (⌘⇧B, palette `보드`) picks a board and opens it in its own tab. Panels are laid out in 1 column below 80 columns of board width, 2 below 140 and 3 above. Each panel header shows its title, connection (with a red `prod` badge for prod connections), when it last ran and how long it took. Panels on the same connection run one after another and different connections run in parallel (4 at a time). The board refreshes every `refresh` while its tab is active; `r` re-reads the file and refreshes now, arrows or `hjkl` move between panels, and `Enter` opens the panel's query in a new query tab and runs it there (a flow panel opens the flow tab on that flow). `Ctrl+B` stays "go to definition", so boards use `Alt+B`.
 

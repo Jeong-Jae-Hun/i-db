@@ -54,7 +54,7 @@ type dashState struct {
 	// cursor 는 거른 줄 수를 넘을 수 있다(접속을 다시 읽어 줄었을 때). 그릴 때는 잘라 쓰고 키를 받을 때 맞춘다
 	cursor int
 	filter string
-	// outbox 는 흐름(R69) 아웃박스의 재시도 수다. 흐름 이름으로 들고 재시도 열이 있는 아웃박스만 센다
+	// outbox 는 흐름(R69) 아웃박스의 한도 소진 수다. 흐름 이름으로 들고 재시도 열이 있는 아웃박스만 센다
 	outbox map[string]int64
 }
 
@@ -65,12 +65,12 @@ type dashProbeMsg struct {
 	h        db.Health
 }
 
-// dashOutboxMsg 는 흐름 아웃박스 하나의 재시도 수다. 실패하면 ok 가 거짓이고 합에서 뺀다.
+// dashOutboxMsg 는 흐름 아웃박스 하나의 한도 소진 수다. 실패하면 ok 가 거짓이고 합에서 뺀다.
 type dashOutboxMsg struct {
-	tab, gen int
-	name     string
-	retry    int64
-	ok       bool
+	tab, gen  int
+	name      string
+	exhausted int64
+	ok        bool
 }
 
 // dashTickMsg 는 다시 확인할 때가 됐다는 알림이다. 탭을 닫았거나 gen 이 낡았으면 버려 타이머가 멈춘다.
@@ -126,7 +126,7 @@ func (m *model) dashRefresh(t *queryTab) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// dashOutboxes 는 흐름(R69) 아웃박스 가운데 재시도 열이 있는 것의 재시도 수를 확인과 같은 제한(5초)으로 센다.
+// dashOutboxes 는 흐름(R69) 아웃박스 가운데 재시도 열이 있는 것의 한도 소진 수를 확인과 같은 제한(5초)으로 센다.
 // 대시보드는 prod 접속도 확인하므로 prod 아웃박스도 센다. flows.json 이 없거나 깨졌으면 아무것도 하지 않는다.
 func (m *model) dashOutboxes(ctx context.Context, t *queryTab) []tea.Cmd {
 	d := t.dash
@@ -152,7 +152,7 @@ func (m *model) dashOutboxes(ctx context.Context, t *queryTab) []tea.Cmd {
 		}
 		cmds = append(cmds, func() tea.Msg {
 			st, err := flowOutbox(ctx, clients, c, *o)
-			return dashOutboxMsg{tab: id, gen: gen, name: name, retry: st.Retry, ok: err == nil}
+			return dashOutboxMsg{tab: id, gen: gen, name: name, exhausted: st.Exhausted, ok: err == nil}
 		})
 	}
 	for name := range d.outbox {
@@ -170,7 +170,7 @@ func (m *model) dashOutboxed(msg dashOutboxMsg) {
 	}
 	t.dash.outbox[msg.name] = -1
 	if msg.ok {
-		t.dash.outbox[msg.name] = msg.retry
+		t.dash.outbox[msg.name] = msg.exhausted
 	}
 	m.dashSettle(t.dash, "outbox:"+msg.name)
 }
@@ -288,9 +288,9 @@ type dashSummary struct {
 	ok, fail                 int
 	pgActive, redisClients   int
 	openTx, unlocked         int
-	// aws 는 aws 접속 수, dlq 는 그 접속들의 `DLQ 쌓임` 합이다. outboxes 는 재시도를 세는 흐름 아웃박스 수, retry 는 그 합이다(R69)
-	aws, dlq        int
-	outboxes, retry int
+	// aws 는 aws 접속 수, dlq 는 그 접속들의 `DLQ 쌓임` 합이다. outboxes 는 한도 소진을 세는 흐름 아웃박스 수, exhausted 는 그 합이다(R69)
+	aws, dlq            int
+	outboxes, exhausted int
 }
 
 func (m *model) dashSum(d *dashState) dashSummary {
@@ -343,7 +343,7 @@ func (m *model) dashSum(d *dashState) dashSummary {
 	}
 	for _, n := range d.outbox {
 		s.outboxes++
-		s.retry += int(max(0, n))
+		s.exhausted += int(max(0, n))
 	}
 	return s
 }
@@ -385,7 +385,7 @@ func (m *model) dashView(t *queryTab, w, h int) string {
 		cards = append(cards, dashCard("DLQ 쌓인 큐", warnIf(s.dlq)))
 	}
 	if s.outboxes > 0 {
-		cards = append(cards, dashCard("아웃박스 재시도", warnIf(s.retry)))
+		cards = append(cards, dashCard("아웃박스 한도 소진", warnIf(s.exhausted)))
 	}
 	lines := strings.Split(wrapCards(cards, w), "\n")
 	var extra []string
@@ -403,14 +403,14 @@ func (m *model) dashView(t *queryTab, w, h int) string {
 	return strings.Join(append(lines, table...), "\n")
 }
 
-// dashFlowSummary 는 접은 한 줄 요약에 붙일 DLQ·아웃박스 재시도다. 카드가 없으면 빈 글이다.
+// dashFlowSummary 는 접은 한 줄 요약에 붙일 DLQ·아웃박스 한도 소진이다. 카드가 없으면 빈 글이다.
 func dashFlowSummary(s dashSummary) string {
 	var out string
 	if s.aws > 0 {
 		out += fmt.Sprintf(" · DLQ 쌓인 큐 %d", s.dlq)
 	}
 	if s.outboxes > 0 {
-		out += fmt.Sprintf(" · 아웃박스 재시도 %d", s.retry)
+		out += fmt.Sprintf(" · 아웃박스 한도 소진 %d", s.exhausted)
 	}
 	return out
 }

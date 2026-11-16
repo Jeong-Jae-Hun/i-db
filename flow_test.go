@@ -129,7 +129,7 @@ func TestFlowBoxes_아웃박스_SNS_큐_DLQ_Lambda_순서와_경고(t *testing.T
 		got = append(got, b.stage+":"+b.name+":"+b.metrics+w)
 	}
 	want := []string{
-		"outbox:shop-stg public.t_outbox:대기 120 · 재시도 3 · 오래됨 1!",
+		"outbox:shop-stg public.t_outbox:대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1!",
 		"sns:stg-hub:구독 3",
 		"sqs:q1:대기 0 · 처리 중 2 · 지연 0",
 		"dlq:q1-dlq:4!",
@@ -187,7 +187,7 @@ func TestFlowBoxes_설정_오류와_아직_결과_없음과_prod_미확인(t *te
 func TestFlowLayout_넓으면_왼쪽에서_오른쪽으로_DLQ_는_큐_아래_가지다(t *testing.T) {
 	st := flows.Stat{Pending: 120, Retry: 3, Stale: 1}
 	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, topic: sampleTopic()}, true)
-	head := "[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 오래됨 1] ──▶ [SNS stg-hub]"
+	head := "[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1] ──▶ [SNS stg-hub]"
 	pad := strings.Repeat(" ", ansi.StringWidth(head))
 	want := strings.Join([]string{
 		head + " ─┬─▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]",
@@ -210,7 +210,7 @@ func TestFlowLayout_좁으면_위에서_아래로_쌓는다(t *testing.T) {
 	st := flows.Stat{Pending: 120, Retry: 3, Stale: 1}
 	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, topic: sampleTopic()}, true)
 	want := strings.Join([]string{
-		"[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 오래됨 1]",
+		"[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1]",
 		"  ▼",
 		"[SNS stg-hub]",
 		"  ├─▶ [SQS q1 | 대기 0 · 처리 중 2]",
@@ -266,7 +266,7 @@ func TestFlow_Alt_F_와_팔레트는_흐름_탭을_하나만_열고_설정_오�
 		t.Fatalf("설정 오류 흐름은 풀지 않는다: %d %d", no.Load(), nt.Load())
 	}
 	v := ansi.Strip(m.View())
-	for _, want := range []string{"! hub", "✕ bad", "[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 오래됨 1]", "DLQ q1-dlq 4"} {
+	for _, want := range []string{"! hub", "✕ bad", "[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1]", "DLQ q1-dlq 4"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("%q 가 없다:\n%s", want, v)
 		}
@@ -395,8 +395,8 @@ func TestFlow_트리의_SNS_토픽에서_F_는_그_토픽의_흐름을_연다(t 
 
 // ─── 대시보드 카드 ───
 
-func TestDash_DLQ_쌓인_큐와_아웃박스_재시도_카드를_더한다(t *testing.T) {
-	fakeFlow(t, flows.Stat{Pending: 9, Retry: 3, Stale: -1}, nil, nil)
+func TestDash_DLQ_쌓인_큐와_아웃박스_한도_소진_카드를_더한다(t *testing.T) {
+	fakeFlow(t, flows.Stat{Pending: 9, Retry: 3, Stale: -1, Exhausted: 2}, nil, nil)
 	fakeProbe(t, func(c db.Conn) db.Health {
 		if c.Kind == db.KindAWS {
 			return db.Health{OK: true, Metrics: []db.Metric{{Name: "큐", Value: "10"}, {Name: awsres.MetricDLQ, Value: "2 (앞 200개)", Warn: true}}}
@@ -411,22 +411,22 @@ func TestDash_DLQ_쌓인_큐와_아웃박스_재시도_카드를_더한다(t *te
 	}
 	feedFlow(m, cmd)
 	s := m.dashSum(m.cur().dash)
-	if s.aws != 2 || s.dlq != 4 || s.outboxes != 1 || s.retry != 3 {
+	if s.aws != 2 || s.dlq != 4 || s.outboxes != 1 || s.exhausted != 2 {
 		t.Fatalf("요약: %+v", s)
 	}
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, "DLQ 쌓인 큐") || !strings.Contains(v, "아웃박스 재시도") {
+	if !strings.Contains(v, "DLQ 쌓인 큐") || !strings.Contains(v, "아웃박스 한도 소진") || strings.Contains(v, "아웃박스 재시도") {
 		t.Fatalf("카드가 없다:\n%s", v)
 	}
 	// 흐름이 없으면 아웃박스 카드도 없다
 	must(t, os.Remove(filepath.Join(m.proj.Dir, ".dbtui", "flows.json")))
 	feedFlow(m, m.dashRefresh(m.cur()))
-	if s := m.dashSum(m.cur().dash); s.outboxes != 0 || strings.Contains(ansi.Strip(m.View()), "아웃박스 재시도") {
+	if s := m.dashSum(m.cur().dash); s.outboxes != 0 || strings.Contains(ansi.Strip(m.View()), "아웃박스 한도 소진") {
 		t.Fatalf("아웃박스 카드가 남았다: %+v", s)
 	}
 }
 
-func TestDash_아웃박스를_못_읽으면_재시도_합에서_뺀다(t *testing.T) {
+func TestDash_아웃박스를_못_읽으면_한도_소진_합에서_뺀다(t *testing.T) {
 	fakeFlow(t, flows.Stat{}, nil, nil)
 	flowOutbox = func(context.Context, *db.Clients, db.Conn, flows.Outbox) (flows.Stat, error) {
 		return flows.Stat{}, errors.New("timeout")
@@ -435,7 +435,7 @@ func TestDash_아웃박스를_못_읽으면_재시도_합에서_뺀다(t *testin
 	m := flowModel(t)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
 	feedFlow(m, cmd)
-	if s := m.dashSum(m.cur().dash); s.outboxes != 1 || s.retry != 0 || len(m.cur().dash.pending) != 0 {
+	if s := m.dashSum(m.cur().dash); s.outboxes != 1 || s.exhausted != 0 || len(m.cur().dash.pending) != 0 {
 		t.Fatalf("요약: %+v pending=%v", s, m.cur().dash.pending)
 	}
 }
@@ -468,7 +468,7 @@ func TestFlowCLI_json_은_상자마다_한_줄이고_prod_는_묻지_않는다(t
 	if len(rows) != 9 || no.Load() != 1 || nt.Load() != 1 {
 		t.Fatalf("줄 %d, 아웃박스 %d, 토픽 %d: %s", len(rows), no.Load(), nt.Load(), out)
 	}
-	if r := rows[0]; r.Flow != "hub" || r.Stage != "outbox" || r.Metrics != "대기 5 · 재시도 1" || !r.Warn {
+	if r := rows[0]; r.Flow != "hub" || r.Stage != "outbox" || r.Metrics != "대기 5 · 재시도 1 · 한도 소진 0" || !r.Warn {
 		t.Fatalf("아웃박스 줄: %+v", r)
 	}
 	if r := rows[3]; r.Stage != "dlq" || r.Name != "q1-dlq" || r.Metrics != "4" || !r.Warn {
@@ -479,7 +479,7 @@ func TestFlowCLI_json_은_상자마다_한_줄이고_prod_는_묻지_않는다(t
 	}
 	// -f 로 고르고 --prod 면 prod 도 묻는다
 	code, out, _ = runCLITest(t, "", "flows", "-p", dir, "-f", "live", "--prod", "--format", "tsv")
-	if code != exitOK || !strings.HasPrefix(out, "flow\tstage\tname\tmetrics\twarn\nlive\toutbox\tapp-prod t_outbox\t대기 5 · 재시도 1\ttrue\n") {
+	if code != exitOK || !strings.HasPrefix(out, "flow\tstage\tname\tmetrics\twarn\nlive\toutbox\tapp-prod t_outbox\t대기 5 · 재시도 1 · 한도 소진 0\ttrue\n") {
 		t.Fatalf("--prod: %d %q", code, out)
 	}
 }
@@ -502,5 +502,189 @@ func TestFlowCLI_실패와_설정_오류는_1_이고_없는_흐름은_2다(t *te
 	}
 	if code, _, _ := runCLITest(t, "", "flows", "-p", dir, "--format", "csv"); code != exitUsage {
 		t.Fatalf("csv: %d", code)
+	}
+}
+
+// ─── 아웃박스 종류 (R69.6) ───
+
+func intp(n int) *int { return &n }
+
+// typeFlow 는 토픽 없는 아웃박스 흐름이다. EARN 은 한도 20·소비자, CLIP 은 소비자만, IDLE 은 설정에만 있는 종류다.
+func typeFlow() flows.Flow {
+	return flows.Flow{Name: "shop-outbox-stg", Outbox: &flows.Outbox{Conn: "shop-stg", Table: "public.t_outbox", Type: "event_type", Retry: "retry_count", Due: "check_needed_at",
+		Types: map[string]flows.TypeConf{
+			"EARN": {Limit: intp(20), Consumer: "consume-outbox-earn"},
+			"CLIP": {Consumer: "consume-outbox-clip"},
+			"IDLE": {Consumer: "consume-outbox-idle"},
+		}}}
+}
+
+func typeStat() flows.Stat {
+	return flows.Stat{Pending: 9, Retry: 2, Stale: 1, Exhausted: 3, Types: []flows.TypeStat{
+		{Name: "CLIP", Rows: 4, Waiting: 4, Retrying: 1, Exhausted: 0, Stale: 1},
+		{Name: "LONG_UNKNOWN", Rows: 2, Waiting: 2, Retrying: 0, Exhausted: 0},
+		{Name: "EARN", Rows: 6, Waiting: 3, Retrying: 1, Exhausted: 3},
+	}}
+}
+
+func TestFlowBoxes_아웃박스_종류_줄은_한도_소진_대기_이름_순이고_행_없는_설정_종류는_맨_뒤다(t *testing.T) {
+	st := typeStat()
+	boxes := flowBoxes(typeFlow(), flowSnap{outbox: &st}, true)
+	var got []string
+	for _, b := range boxes {
+		w := ""
+		if b.warn {
+			w = "!"
+		}
+		if b.idle {
+			w += "(idle)"
+		}
+		got = append(got, b.stage+":"+b.name+":"+b.metrics+w)
+	}
+	want := []string{
+		"outbox:shop-stg public.t_outbox:대기 9 · 재시도 2 · 한도 소진 3 · 오래됨 1!",
+		"outbox-type:EARN:대기 3 · 재시도 1 · 한도 소진 3 · → consume-outbox-earn!",
+		"outbox-type:CLIP:대기 4 · 재시도 1 · 한도 소진 0 · 오래됨 1 · → consume-outbox-clip!",
+		"outbox-type:LONG_UNKNOWN:대기 2 · 재시도 0 · 한도 소진 0 · → ?",
+		"outbox-type:IDLE:대기 0 · 재시도 0 · 한도 소진 0 · → consume-outbox-idle(idle)",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("상자:\n%s", strings.Join(got, "\n"))
+	}
+	// 토픽 없는 흐름은 SNS 상자 없이 아웃박스와 종류 줄만 그린다. 종류 이름 뒤를 맞춰 수치 열이 가지런하다
+	wantPlain := strings.Join([]string{
+		"[아웃박스 shop-stg public.t_outbox | 대기 9 · 재시도 2 · 한도 소진 3 · 오래됨 1]",
+		"  ├─ EARN          대기 3 · 재시도 1 · 한도 소진 3  → consume-outbox-earn",
+		"  ├─ CLIP          대기 4 · 재시도 1 · 한도 소진 0 · 오래됨 1  → consume-outbox-clip",
+		"  ├─ LONG_UNKNOWN  대기 2 · 재시도 0 · 한도 소진 0  → ?",
+		"  └─ IDLE          대기 0 · 재시도 0 · 한도 소진 0  → consume-outbox-idle",
+	}, "\n")
+	for _, w := range []int{200, 30} {
+		if got := plain(flowLayout(boxes, w)); got != wantPlain {
+			t.Fatalf("w=%d 그림:\n%s", w, got)
+		}
+	}
+	// 토픽이 있는 흐름은 토픽 그림 아래에 종류 줄을 붙인다
+	f := typeFlow()
+	f.AWS, f.Topic = "aws-stg", "stg-hub"
+	withTopic := plain(flowLayout(flowBoxes(f, flowSnap{outbox: &st, topic: sampleTopic()}, true), 400))
+	if lines := strings.Split(withTopic, "\n"); !strings.Contains(lines[0], "──▶ [SNS stg-hub]") || !strings.HasPrefix(lines[len(lines)-1], "  └─ IDLE") {
+		t.Fatalf("토픽 + 종류:\n%s", withTopic)
+	}
+}
+
+func TestResolveFlow_토픽_없는_흐름은_토픽을_풀지_않는다(t *testing.T) {
+	no, nt := fakeFlow(t, typeStat(), sampleTopic(), nil)
+	m := flowModel(t)
+	s := resolveFlow(context.Background(), m.clients, m.sources, m.proj, typeFlow(), true)
+	if no.Load() != 1 || nt.Load() != 0 || s.topicErr != "" || s.topic != nil || s.outbox == nil {
+		t.Fatalf("아웃박스 %d 토픽 %d: %+v", no.Load(), nt.Load(), s)
+	}
+}
+
+func TestFlowView_종류_줄은_경고색이고_행_없는_설정_종류는_자리가_있을_때만_흐리게_보인다(t *testing.T) {
+	m := flowModel(t)
+	st := typeStat()
+	s := &flowState{list: []flows.Flow{typeFlow()}, snaps: map[string]flowSnap{"shop-outbox-stg": {outbox: &st}}}
+	tab := &queryTab{flow: s}
+	v := m.flowView(tab, 160, 20)
+	if !strings.Contains(ansi.Strip(v), "IDLE") {
+		t.Fatalf("자리가 있으면 보인다:\n%s", ansi.Strip(v))
+	}
+	earn := dashWarnStyle.Render("EARN          대기 3 · 재시도 1 · 한도 소진 3  → consume-outbox-earn")
+	idle := dimStyle.Render("IDLE          대기 0 · 재시도 0 · 한도 소진 0  → consume-outbox-idle")
+	if !strings.Contains(v, earn) || !strings.Contains(v, idle) {
+		t.Fatalf("한도 소진 줄은 경고색, 행 없는 줄은 흐림이어야 한다:\n%q", v)
+	}
+	// 이름·빈 줄 + 아웃박스 + 종류 넷 = 7줄이라 6줄이면 IDLE 을 뺀다. 상자 수도 같이 줄어 고르기가 안 넘친다
+	v = ansi.Strip(m.flowView(tab, 160, 6))
+	if strings.Contains(v, "IDLE") || !strings.Contains(v, "LONG_UNKNOWN") {
+		t.Fatalf("자리가 없으면 뺀다:\n%s", v)
+	}
+	if _, boxes, _ := s.curBoxes(); len(boxes) != 4 {
+		t.Fatalf("고를 상자: %d", len(boxes))
+	}
+}
+
+func TestFlow_종류_줄을_고르고_Enter_는_그_종류의_재시도_행을_READ_ONLY_로_연다(t *testing.T) {
+	fakeFlow(t, typeStat(), nil, nil)
+	m := flowModel(t)
+	writeFlowsFile(t, m.proj.Dir, `[{"name":"shop-outbox-stg","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at",
+		"types":{"EARN":{"limit":20,"consumer":"consume-outbox-earn"}}}}]`)
+	feedFlow(m, m.openFlows(nil))
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "! shop-outbox-stg") || !strings.Contains(v, "├─ EARN") || !strings.Contains(v, "└─ LONG_UNKNOWN") {
+		t.Fatalf("종류 줄:\n%s", v)
+	}
+	flowTab := m.cur()
+	m.Update(key("right"))
+	if flowTab.flow.box != 1 {
+		t.Fatalf("→ 는 첫 종류 줄로 간다: %d", flowTab.flow.box)
+	}
+	n := len(m.tabs)
+	_, cmd := m.Update(key("enter"))
+	if len(m.tabs) != n+1 || m.cur().conn != 0 || m.cur().running == nil || !m.cur().runningReadOnly {
+		t.Fatalf("종류 상세: tabs=%d conn=%d running=%v", len(m.tabs), m.cur().conn, m.cur().running != nil)
+	}
+	o := *flowTab.flow.list[0].Outbox
+	var sql string
+	for _, msg := range collect(cmd) {
+		if r, ok := msg.(resultMsg); ok {
+			sql = r.sql
+		}
+	}
+	if sql != flows.RetrySQL(o, "EARN") {
+		t.Fatalf("종류 상세 질의: %q", sql)
+	}
+}
+
+func TestFlowCLI_종류마다_outbox_type_줄을_더한다(t *testing.T) {
+	fakeFlow(t, typeStat(), sampleTopic(), nil)
+	dir := flowCLIProject(t)
+	writeFlowsFile(t, dir, `[{"name":"ob","outbox":{"conn":"app-stg","table":"t_outbox","type":"event_type","retry":"retry_count",
+		"types":{"EARN":{"limit":20,"consumer":"consume-outbox-earn"}}}}]`)
+	code, out, errw := runCLITest(t, "", "flows", "-p", dir, "--format", "json")
+	if code != exitOK {
+		t.Fatalf("%d %q", code, errw)
+	}
+	var rows []flowRow
+	must(t, json.Unmarshal([]byte(out), &rows))
+	if len(rows) != 4 || rows[0].Stage != "outbox" {
+		t.Fatalf("줄: %s", out)
+	}
+	want := []flowRow{
+		{Flow: "ob", Stage: "outbox-type", Name: "EARN", Metrics: "대기 3 · 재시도 1 · 한도 소진 3 · → consume-outbox-earn", Warn: true},
+		{Flow: "ob", Stage: "outbox-type", Name: "CLIP", Metrics: "대기 4 · 재시도 1 · 한도 소진 0 · 오래됨 1 · → ?", Warn: true},
+		{Flow: "ob", Stage: "outbox-type", Name: "LONG_UNKNOWN", Metrics: "대기 2 · 재시도 0 · 한도 소진 0 · → ?"},
+	}
+	for i, w := range want {
+		if rows[i+1] != w {
+			t.Errorf("%d: %+v, want %+v", i, rows[i+1], w)
+		}
+	}
+}
+
+func TestRunPanel_흐름_패널은_행이_있는_종류만_10개까지_보인다(t *testing.T) {
+	st := flows.Stat{Pending: 12, Retry: 0, Stale: 0, Exhausted: 0}
+	for i := range 12 {
+		st.Types = append(st.Types, flows.TypeStat{Name: fmt.Sprintf("T%02d", i), Rows: 1, Waiting: 1})
+	}
+	fakeFlow(t, st, nil, nil)
+	f := typeFlow() // IDLE·EARN·CLIP 은 행이 없다
+	r := runPanel(context.Background(), nil, nil, boardProject(t), boardPanel{View: "flow", flow: f}, true)
+	var types []string
+	for _, b := range r.boxes {
+		if b.stage == stageType {
+			types = append(types, b.name)
+		}
+	}
+	if len(r.boxes) != 11 || r.boxes[0].stage != "outbox" || len(types) != boardFlowTypes || types[0] != "T00" || types[9] != "T09" {
+		t.Fatalf("패널 상자: %v", types)
+	}
+	if body := ansi.Strip(strings.Join(panelBody(boardPanel{View: "flow"}, r, 80, 20), "\n")); !strings.Contains(body, "T00  대기 1 · 재시도 0 · 한도 소진 0  → ?") {
+		t.Fatalf("패널 본문:\n%s", body)
+	}
+	if h := panelHeight(boardPanel{View: "flow", flow: f}, r); h != 13 {
+		t.Fatalf("패널 높이: %d", h)
 	}
 }
