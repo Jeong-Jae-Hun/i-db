@@ -8,7 +8,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 
 - Connection tree grouped like DataGrip, with schemas, tables, views, functions and Redis key namespaces
 - SQL editor with syntax highlighting, completion, live templates (`sel`, `ins`, `upd`, ...), formatting, `:name`/`$1` parameters, go-to-definition
-- Results grid: sort (`s` or header click), filter with `/` (`abc`, `!abc`, `col:abc`, `col=v`, `col>v`, `col=null`), re-read from the server when possible (PostgreSQL, OpenSearch `_search`, Loki `time`, DynamoDB sort key; otherwise the status line says why), `]` loads the next 1,000 rows of a truncated PostgreSQL result, copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)`, charts, JSON tree, cell aggregates, result pinning and diff
+- Results grid: sort (`s` or header click), filter with `/` (`abc`, `!abc`, `col:abc`, `col=v`, `col>v`, `col=null`), re-read from the server when possible (PostgreSQL, OpenSearch `_search`, Loki `time`, DynamoDB sort key; otherwise the status line says why), `]` loads the next 1,000 rows of a truncated PostgreSQL result, copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)` (a `Ctrl+K` or right-click menu picks row / selection / visible rows / column × TSV or CSV with header, JSON, Markdown table, INSERT, `IN` list; copies go to OSC 52 and the system clipboard), charts, JSON tree, cell aggregates, result pinning and diff
 - In-place editing of single-table results (preview SQL before submit, undo of the last submit), paste from spreadsheets, CSV import
 - Server-side table view with a DataGrip-style WHERE / ORDER BY bar (column completion, `/` short filters), paging, exact count; follow foreign keys in both directions
 - Command palette (`Ctrl+P`) that runs any action or jumps to any table across connections, recently opened tables first
@@ -178,6 +178,7 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `Ctrl+]` | Loki/Prometheus range 15m · 1h · 6h · 24h · 7d (per tab) |
 | `Ctrl+H` | history |
 | tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
+| result `Ctrl+K` (⌘K) · right-click | copy menu: target × format, remembers the last format |
 | result `]` | load the next 1,000 rows of a truncated PostgreSQL result (up to 10,000) |
 | tree `N` / `E` | add / edit a connection (see Connections) |
 
@@ -312,6 +313,7 @@ claude mcp add db -- db mcp -p ~/work/db-project --max-rows 100
 | `DB_RESTORE=0` | do not save or restore tabs |
 | `DB_KITTY_KEYS=0`/`1` | force the kitty keyboard protocol off/on |
 | `DB_KEYS=cmd`/`ctrl` | show key hints as ⌘ or Ctrl |
+| `DB_CLIPBOARD=osc52`/`system`/`both` | where copies go: OSC 52 only, the system clipboard only (`pbcopy`, `clip.exe` on WSL, `wl-copy`/`xclip`), or both (default). Copies over 10 MB are refused; export with `e`/`E` |
 | `DB_UPDATE_CHECK=0` | do not check GitHub for a new release at startup |
 | `GITHUB_TOKEN` | sent with `db update` and the startup check to GitHub API requests (higher rate limit) |
 | `XDG_STATE_HOME` | where history, session, parameter values, undo log and the last update check live (default `~/.local/state/db/`) |

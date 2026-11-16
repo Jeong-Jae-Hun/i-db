@@ -94,6 +94,7 @@ type sortDir int
 // Follow·Filter 는 F·R, +·- 요청이다(v5.go). Decrypt 는 D 다. 통합이 Decrypted() 를 보고 SetDecrypted·ClearDecrypted 를 부른다.
 //
 // PickEnum·EditLong 은 enum 고르기 목록·전체 화면 편집기를 열어 달라는 요청이다(v7.go). 통합은 고른 값·편집한 값을 SetCell 로 넘긴다.
+// CopyMenu 는 Ctrl+K 로 복사 고르기 창을 청한 것이다(R71). 통합이 CopyChoices 로 창을 열고 CopyWith 로 만든다.
 type Action struct {
 	Status   string
 	Copy     *string
@@ -106,6 +107,7 @@ type Action struct {
 	Decrypt  bool
 	PickEnum *PickEnum
 	EditLong *EditLong
+	CopyMenu bool
 }
 
 // Export 는 내보내기 요청이다. 파일 이름·저장 위치는 통합이 정한다.
@@ -511,6 +513,9 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 		case "C":
 			m.follow()
 			a = m.inList(m.selRect())
+		case "ctrl+k":
+			m.follow()
+			a.CopyMenu = true
 		}
 
 	default:
@@ -708,6 +713,10 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 			a.Compare = true
 		case "C":
 			a = m.inList(0, len(m.view)-1, m.col, m.col)
+		case "ctrl+k":
+			if hasRow {
+				a.CopyMenu = true
+			}
 		case "D":
 			a.Decrypt = true
 		case "F", "R":
@@ -789,7 +798,7 @@ func (m Model) selRect() (r0, r1, c0, c1 int) {
 }
 
 // HandleMouse 는 grid 영역 기준 좌표의 마우스 입력을 처리한다.
-// 클릭은 칸 선택, 휠은 행 스크롤, shift+휠·가로 휠은 열 스크롤이다.
+// 클릭(왼쪽·오른쪽)은 칸 선택, 휠은 행 스크롤, shift+휠·가로 휠은 열 스크롤이다.
 func (m *Model) HandleMouse(msg tea.MouseMsg) {
 	e := tea.MouseEvent(msg)
 	if m.res == nil || e.Action != tea.MouseActionPress {
@@ -844,7 +853,8 @@ func (m *Model) HandleMouse(msg tea.MouseMsg) {
 		body := max(1, l.body)
 		m.rowTop = max(0, min(m.rowTop+delta*wheelRows, len(m.view)-body))
 		m.row = min(max(m.row, m.rowTop), m.rowTop+body-1)
-	case e.Button == tea.MouseButtonLeft && table:
+	case (e.Button == tea.MouseButtonLeft || e.Button == tea.MouseButtonRight) && table:
+		// 오른쪽 클릭도 칸을 고른다. 통합이 그 칸에서 복사 고르기 창을 연다(R71.3)
 		headTop := b2i(l.caption)
 		bodyTop := headTop + l.headLines
 		if e.Y < headTop || e.Y >= bodyTop+l.body {
