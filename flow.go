@@ -138,10 +138,11 @@ func resolveFlow(ctx context.Context, clients *db.Clients, sources *sourcePool, 
 // flowBox 는 그림의 상자 하나이자 `db flows` 의 한 줄이다. sub 는 구독 줄 자리(-1 이면 아웃박스·SNS·아웃박스 종류)다.
 // conn·path 는 Enter 로 열 상세다(아웃박스·종류는 path 가 비고 conn 이 PostgreSQL 접속이다).
 // 종류 줄은 pad 만큼 이름 뒤를 띄워 수치 열을 맞추고, idle 은 설정에만 있고 행이 없는 종류다(흐리게, 자리가 있을 때만).
+// nullType 은 종류 열이 NULL 인 줄이다(이름은 `(NULL)`, 상세는 is null).
 type flowBox struct {
 	stage, name, metrics string
 	short                string // 그림에 보일 짧은 수치. 비면 metrics 다
-	warn, idle           bool
+	warn, idle, nullType bool
 	err, note            string
 	sub, pad             int
 	conn, path           string
@@ -223,18 +224,21 @@ func flowBoxes(f flows.Flow, s flowSnap, done bool) []flowBox {
 	// 종류 줄(R69.6)은 설정의 종류 ∪ 테이블에 있는 종류다. 한도 소진 많은 순 → 대기 많은 순 → 이름 순이고 행 없는 설정 종류는 맨 뒤다
 	o, types := f.Outbox, slices.Clone(s.outbox.Types)
 	for _, k := range slices.Sorted(maps.Keys(o.Types)) {
-		if !slices.ContainsFunc(types, func(t flows.TypeStat) bool { return t.Name == k }) {
+		if !slices.ContainsFunc(types, func(t flows.TypeStat) bool { return !t.Null && t.Name == k }) {
 			types = append(types, flows.TypeStat{Name: k, Retrying: min(s.outbox.Retry, 0), Exhausted: min(s.outbox.Exhausted, 0)})
 		}
 	}
 	slices.SortFunc(types, func(a, b flows.TypeStat) int {
-		return cmp.Or(cmp.Compare(min(b.Rows, 1), min(a.Rows, 1)), cmp.Compare(b.Exhausted, a.Exhausted), cmp.Compare(b.Waiting, a.Waiting), strings.Compare(a.Name, b.Name))
+		return cmp.Or(cmp.Compare(min(b.Rows, 1), min(a.Rows, 1)), cmp.Compare(b.Exhausted, a.Exhausted), cmp.Compare(b.Waiting, a.Waiting), strings.Compare(a.Label(), b.Label()))
 	})
 	for _, t := range types {
 		m, warn := t.Metrics()
-		consumer := cmp.Or(o.Types[t.Name].Consumer, "?")
-		out = append(out, flowBox{stage: stageType, name: t.Name, metrics: m + " · → " + consumer, short: m + "  → " + consumer, warn: warn, idle: t.Rows == 0,
-			sub: -1, conn: o.Conn})
+		consumer := "?"
+		if !t.Null {
+			consumer = cmp.Or(o.Types[t.Name].Consumer, consumer)
+		}
+		out = append(out, flowBox{stage: stageType, name: t.Label(), metrics: m + " · → " + consumer, short: m + "  → " + consumer, warn: warn, idle: t.Rows == 0,
+			nullType: t.Null, sub: -1, conn: o.Conn})
 	}
 	return alignTypes(out)
 }
@@ -311,13 +315,29 @@ func boxLabel(b flowBox) string {
 }
 
 // flowLayout 은 상자를 왼쪽 → 오른쪽으로 잇고, 가장 긴 줄이 w 를 넘으면 위 → 아래로 쌓는다.
-// 아웃박스 종류 줄은 어느 쪽이든 아래에 붙고, 길어도 가로·세로 고르기에는 넣지 않는다(잘려 보인다).
+// 아웃박스 종류 줄(R69.6)은 어느 쪽이든 아래에 붙고, 길어도 가로·세로 고르기에는 넣지 않는다(잘려 보인다):
+//
+//	├─ CREATE_PAYOUT  대기 3 · 재시도 1 · 한도 소진 2  → consume-outbox-create-payout
+//	└─ CLIP                대기 0 · 재시도 0 · 한도 소진 0  → consume-outbox-clip
 func flowLayout(boxes []flowBox, w int) []flowLine {
 	lines := flowWide(boxes)
 	if maxWidth(lines) > w {
 		lines = flowTall(boxes)
 	}
-	return append(lines, typeLines(boxes)...)
+	var at []int
+	for i, b := range boxes {
+		if b.stage == stageType {
+			at = append(at, i)
+		}
+	}
+	for k, i := range at {
+		branch := "  ├─ "
+		if k == len(at)-1 {
+			branch = "  └─ "
+		}
+		lines = append(lines, flowLine{{branch, -1}, seg(boxes, i)})
+	}
+	return lines
 }
 
 func maxWidth(ls []flowLine) int {
@@ -347,28 +367,6 @@ func subGroups(boxes []flowBox) (head []int, subs [][]int) {
 }
 
 func seg(boxes []flowBox, i int) flowSeg { return flowSeg{boxLabel(boxes[i]), i} }
-
-// typeLines 는 그림 아래에 붙는 아웃박스 종류 줄이다(R69.6):
-//
-//	├─ CREATE_PAYOUT  대기 3 · 재시도 1 · 한도 소진 2  → consume-outbox-create-payout
-//	└─ CLIP                대기 0 · 재시도 0 · 한도 소진 0  → consume-outbox-clip
-func typeLines(boxes []flowBox) []flowLine {
-	var at []int
-	for i, b := range boxes {
-		if b.stage == stageType {
-			at = append(at, i)
-		}
-	}
-	out := make([]flowLine, len(at))
-	for k, i := range at {
-		branch := "  ├─ "
-		if k == len(at)-1 {
-			branch = "  └─ "
-		}
-		out[k] = flowLine{{branch, -1}, seg(boxes, i)}
-	}
-	return out
-}
 
 // flowWide 는 가로 그림이다:
 //
@@ -675,7 +673,7 @@ func (m *model) openFlowBox(f flows.Flow, b flowBox) tea.Cmd {
 	if outbox {
 		sql, clients := flows.CountSQL(*f.Outbox), m.clients
 		if b.stage == stageType {
-			sql = flows.RetrySQL(*f.Outbox, b.name)
+			sql = flows.RetrySQL(*f.Outbox, flows.TypeStat{Name: b.name, Null: b.nullType})
 		}
 		p.sql = sql
 		p.exec = func(ctx context.Context) (*db.Result, error) {

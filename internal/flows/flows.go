@@ -27,6 +27,10 @@ const (
 	DefaultLimit = 5
 	// RetryRows 는 종류 상세(재시도 중·한도 소진 행)의 최대 행 수다.
 	RetryRows = 50
+	// MaxTypes 는 종류별 줄을 받는 최대 수다. 합은 서버의 합계 행으로 내므로 넘어도 정확하고, 줄만 잘린다.
+	MaxTypes = 1000
+	// truncatedNote 는 종류가 MaxTypes 를 넘었을 때 아웃박스 수치 뒤에 붙인다.
+	truncatedNote = "종류 1,000개만"
 )
 
 // Flow 는 흐름 하나다. Outbox·Topic 가운데 하나는 있어야 하고, AWS 는 Topic 이 있을 때만 쓴다.
@@ -127,14 +131,7 @@ func validate(f Flow, conns []db.Conn) error {
 	if len(strings.Split(o.Table, ".")) > 2 || strings.HasPrefix(o.Table, ".") || strings.HasSuffix(o.Table, ".") {
 		return fmt.Errorf("outbox.table must be table or schema.table: %q", o.Table)
 	}
-	if err := checkLimits(*o); err != nil {
-		return err
-	}
-	return checkWhere(o.Where)
-}
-
-// checkLimits 는 한도가 1 이상이고 종류 이름이 비지 않았는지, 한도·종류 설정에 retry 열이 있는지다.
-func checkLimits(o Outbox) error {
+	// 한도는 1 이상, 종류 이름은 비지 않아야 하고, 한도·종류 설정은 retry 열이 있어야 뜻이 있다
 	switch {
 	case o.Retry == "" && o.Limit != nil:
 		return errors.New("outbox.limit requires outbox.retry")
@@ -151,7 +148,7 @@ func checkLimits(o Outbox) error {
 			return fmt.Errorf("outbox.types.%s.limit must be >= 1", k)
 		}
 	}
-	return nil
+	return checkWhere(o.Where)
 }
 
 // checkConn 은 name 이 kind 접속인지다. 없는 이름과 다른 종류를 가른다.
@@ -226,10 +223,11 @@ func limitExpr(o Outbox) string {
 	return "case " + typeText(o) + b.String() + " else " + def + " end"
 }
 
-// CountSQL 은 종류별 수를 한 문장으로 묻는다(type·rows·waiting·retrying·exhausted·stale·oldest_due).
+// CountSQL 은 종류별 수와 합계를 한 문장으로 묻는다(type·rows·waiting·retrying·exhausted·stale·oldest_due·type_null·total).
+// `grouping sets ((type), ())` 의 합계 행(total = 1)이 맨 앞이라 종류가 결과 행 상한을 넘어도 합은 정확하다.
+// type_null(텍스트 t·f)은 NULL 종류와 글자 'NULL' 종류를 가른다(결과 칸은 둘 다 NULL 로 보인다).
 // retry 가 있으면 대기는 retry < 한도, 재시도는 0 < retry < 한도, 한도 소진은 retry >= 한도, 오래됨은 due 가 지났고 retry < 한도다
 // (한도 소진 행은 다시 집어 가지 않으니 늦은 게 아니라 버려진 것이다). retry 가 없으면 대기는 모든 행, 재시도·한도 소진은 null 이다.
-// 행 수 제한을 두지 않는 까닭은 합을 이 결과로 내기 때문이다. 종류는 수십 개라 결과 행 상한(db.MaxRows)에 닿지 않는다.
 func CountSQL(o Outbox) string {
 	waiting, retrying, exhausted, stale, oldest := "count(*)", "null::bigint", "null::bigint", "null::bigint", "null::timestamptz"
 	live := ""
@@ -250,14 +248,18 @@ func CountSQL(o Outbox) string {
 		}
 		stale = "count(*) filter (where " + cond + ")"
 	}
-	return fmt.Sprintf("select %s as type, count(*) as rows, %s as waiting, %s as retrying, %s as exhausted, %s as stale, %s as oldest_due from %s%s group by 1 order by 5 desc nulls last, 3 desc, 1",
-		typeText(o), waiting, retrying, exhausted, stale, oldest, quoteTable(o.Table), filter(o))
+	typ := typeText(o)
+	return fmt.Sprintf("select %s as type, count(*) as rows, %s as waiting, %s as retrying, %s as exhausted, %s as stale, %s as oldest_due, %s is null as type_null, grouping(%s) as total from %s%s group by grouping sets ((%s), ()) order by 9 desc, 5 desc nulls last, 3 desc, 1",
+		typ, waiting, retrying, exhausted, stale, oldest, typ, typ, quoteTable(o.Table), filter(o), typ)
 }
 
 // RetrySQL 은 종류 하나의 재시도 중·한도 소진 행(retry > 0) 최근 RetryRows 개다. 열은 테이블 그대로다.
-// retry 가 없으면 그 종류의 행을 due 순으로 보인다.
-func RetrySQL(o Outbox, typ string) string {
-	conds := []string{typeText(o) + " = " + db.QuoteLiteral(typ)}
+// retry 가 없으면 그 종류의 행을 due 순으로 보인다. NULL 종류는 `is null` 로 묻는다.
+func RetrySQL(o Outbox, t TypeStat) string {
+	conds := []string{typeText(o) + " = " + db.QuoteLiteral(t.Name)}
+	if t.Null {
+		conds[0] = typeText(o) + " is null"
+	}
 	var order []string
 	if o.Retry != "" {
 		conds = append(conds, retryExpr(o)+" > 0")
@@ -273,31 +275,43 @@ func RetrySQL(o Outbox, typ string) string {
 	return q + " limit " + strconv.Itoa(RetryRows)
 }
 
-// TypeStat 은 종류 하나의 수다. Retrying·Exhausted·Stale 이 -1 이면 그 열을 주지 않았다.
+// TypeStat 은 종류 하나의 수다. Retrying·Exhausted·Stale 이 -1 이면 그 열을 주지 않았다. Null 은 종류 열이 NULL 인 행이다.
 type TypeStat struct {
 	Name                                      string
+	Null                                      bool
 	Rows, Waiting, Retrying, Exhausted, Stale int64
 	OldestDue                                 string
 }
 
-// Stat 은 아웃박스 수다(종류별 합). Retry·Exhausted·Stale 이 -1 이면 그 열을 주지 않았다.
+// Label 은 보일 종류 이름이다. NULL 종류는 `(NULL)` 이다.
+func (t TypeStat) Label() string {
+	if t.Null {
+		return "(NULL)"
+	}
+	return t.Name
+}
+
+// Stat 은 아웃박스 수다(서버 합계). Retry·Exhausted·Stale 이 -1 이면 그 열을 주지 않았다.
+// Truncated 는 종류가 MaxTypes 를 넘어 Types 가 잘렸다는 뜻이다(합은 그대로 정확하다).
 type Stat struct {
 	Pending, Retry, Stale, Exhausted int64
 	Types                            []TypeStat
+	Truncated                        bool
 }
 
-// Count 는 CountSQL 을 READ ONLY 로 돌려 종류별 수와 그 합을 낸다. 제한 시간은 호출부 ctx 가 건다.
+// Count 는 CountSQL 을 READ ONLY 로 돌려 합계와 종류별 수(MaxTypes 개까지)를 낸다. 제한 시간은 호출부 ctx 가 건다.
 func Count(ctx context.Context, pg *db.PGConn, o Outbox) (Stat, error) {
-	res, err := pg.RunReadOnly(ctx, CountSQL(o))
+	// 합계 행 하나를 더 받는다
+	res, err := pg.RunReadOnlyRows(ctx, CountSQL(o), MaxTypes+1)
 	if err != nil {
 		return Stat{}, err
 	}
-	s := Stat{Retry: -1, Stale: -1, Exhausted: -1}
-	for _, row := range res.Rows {
-		if len(row) != 7 {
-			return Stat{}, errors.New("unexpected outbox count result")
-		}
-		t := TypeStat{Name: row[0], OldestDue: row[6]}
+	if len(res.Rows) == 0 || len(res.Rows[0]) != 9 || res.Rows[0][8] != "1" {
+		return Stat{}, errors.New("unexpected outbox count result")
+	}
+	var s Stat
+	for k, row := range res.Rows {
+		t := TypeStat{Name: row[0], Null: row[7] == "t", OldestDue: row[6]}
 		for i, dst := range []*int64{&t.Rows, &t.Waiting, &t.Retrying, &t.Exhausted, &t.Stale} {
 			v := row[i+1]
 			if v == "" || v == "NULL" {
@@ -308,26 +322,13 @@ func Count(ctx context.Context, pg *db.PGConn, o Outbox) (Stat, error) {
 				return Stat{}, fmt.Errorf("outbox count: %w", err)
 			}
 		}
-		s.Pending += t.Waiting
-		for _, p := range []struct {
-			sum *int64
-			v   int64
-		}{{&s.Retry, t.Retrying}, {&s.Exhausted, t.Exhausted}, {&s.Stale, t.Stale}} {
-			if p.v >= 0 {
-				*p.sum = max(0, *p.sum) + p.v
-			}
+		if k == 0 {
+			s.Pending, s.Retry, s.Exhausted, s.Stale = t.Waiting, t.Retrying, t.Exhausted, t.Stale
+			continue
 		}
 		s.Types = append(s.Types, t)
 	}
-	// 행이 없으면 열이 있어도 수는 0 이다
-	if len(res.Rows) == 0 {
-		if o.Retry != "" {
-			s.Retry, s.Exhausted = 0, 0
-		}
-		if o.Due != "" {
-			s.Stale = 0
-		}
-	}
+	s.Truncated = res.Truncated
 	return s, nil
 }
 
@@ -342,6 +343,9 @@ func (s Stat) Metrics() (string, bool) {
 	}
 	if s.Stale >= 0 {
 		parts = append(parts, "오래됨 "+strconv.FormatInt(s.Stale, 10))
+	}
+	if s.Truncated {
+		parts = append(parts, truncatedNote)
 	}
 	return strings.Join(parts, " · "), s.Retry > 0 || s.Stale > 0 || s.Exhausted > 0
 }

@@ -633,7 +633,7 @@ func TestFlow_종류_줄을_고르고_Enter_는_그_종류의_재시도_행을_R
 			sql = r.sql
 		}
 	}
-	if sql != flows.RetrySQL(o, "EARN") {
+	if sql != flows.RetrySQL(o, flows.TypeStat{Name: "EARN"}) {
 		t.Fatalf("종류 상세 질의: %q", sql)
 	}
 }
@@ -686,5 +686,48 @@ func TestRunPanel_흐름_패널은_행이_있는_종류만_10개까지_보인다
 	}
 	if h := panelHeight(boardPanel{View: "flow", flow: f}, r); h != 13 {
 		t.Fatalf("패널 높이: %d", h)
+	}
+}
+
+func TestFlow_NULL_종류는_괄호_NULL_로_보이고_Enter_는_IS_NULL_로_묻는다(t *testing.T) {
+	st := flows.Stat{Pending: 3, Retry: 2, Stale: -1, Exhausted: 0, Types: []flows.TypeStat{
+		{Name: "NULL", Null: true, Rows: 2, Waiting: 2, Retrying: 1},
+		{Name: "NULL", Rows: 1, Waiting: 1, Retrying: 1},
+	}}
+	fakeFlow(t, st, nil, nil)
+	m := flowModel(t)
+	writeFlowsFile(t, m.proj.Dir, `[{"name":"ob","outbox":{"conn":"shop-stg","table":"t","type":"event_type","retry":"retry_count","types":{"NULL":{"consumer":"consume-null"}}}}]`)
+	feedFlow(m, m.openFlows(nil))
+	v := ansi.Strip(m.View())
+	// 설정의 "NULL" 소비자는 글자 'NULL' 종류에만 붙는다
+	if !strings.Contains(v, "├─ (NULL)  대기 2 · 재시도 1 · 한도 소진 0  → ?") || !strings.Contains(v, "└─ NULL    대기 1 · 재시도 1 · 한도 소진 0  → consume-null") {
+		t.Fatalf("NULL 종류 줄:\n%s", v)
+	}
+	flowTab := m.cur()
+	m.Update(key("right"))
+	_, cmd := m.Update(key("enter"))
+	var sql string
+	for _, msg := range collect(cmd) {
+		if r, ok := msg.(resultMsg); ok {
+			sql = r.sql
+		}
+	}
+	if want := flows.RetrySQL(*flowTab.flow.list[0].Outbox, flows.TypeStat{Null: true}); sql != want || !strings.Contains(sql, `"event_type"::text is null`) {
+		t.Fatalf("NULL 종류 상세: %q", sql)
+	}
+}
+
+func TestFlowCLI_종류가_잘리면_아웃박스_수치에_알린다(t *testing.T) {
+	fakeFlow(t, flows.Stat{Pending: 5000, Retry: 0, Stale: -1, Exhausted: 0, Truncated: true, Types: []flows.TypeStat{{Name: "A", Rows: 1, Waiting: 1}}}, nil, nil)
+	dir := flowCLIProject(t)
+	writeFlowsFile(t, dir, `[{"name":"ob","outbox":{"conn":"app-stg","table":"t_outbox","type":"event_type","retry":"retry_count"}}]`)
+	code, out, errw := runCLITest(t, "", "flows", "-p", dir, "--format", "json")
+	if code != exitOK {
+		t.Fatalf("%d %q", code, errw)
+	}
+	var rows []flowRow
+	must(t, json.Unmarshal([]byte(out), &rows))
+	if len(rows) != 2 || rows[0].Metrics != "대기 5000 · 재시도 0 · 한도 소진 0 · 종류 1,000개만" {
+		t.Fatalf("잘림: %s", out)
 	}
 }

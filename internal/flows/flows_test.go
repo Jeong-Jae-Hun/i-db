@@ -151,17 +151,18 @@ func TestCountSQL_종류별로_묶고_식별자를_감싸고_where_를_AND_괄�
 	want := `select "event_type"::text as type, count(*) as rows, count(*) filter (where ` + live + `) as waiting, ` +
 		`count(*) filter (where ` + r + ` > 0 and ` + live + `) as retrying, count(*) filter (where ` + r + ` >= 5) as exhausted, ` +
 		`count(*) filter (where "check_needed_at" < now() - interval '5 minutes' and ` + live + `) as stale, ` +
-		`min("check_needed_at") filter (where ` + live + `) as oldest_due from "public"."t""x" where (` +
-		"\nevent_type like 'DATA_%' -- 주석\n) group by 1 order by 5 desc nulls last, 3 desc, 1"
+		`min("check_needed_at") filter (where ` + live + `) as oldest_due` +
+		`, "event_type"::text is null as type_null, grouping("event_type"::text) as total from "public"."t""x" where (` +
+		"\nevent_type like 'DATA_%' -- 주석\n)" + ` group by grouping sets (("event_type"::text), ()) order by 9 desc, 5 desc nulls last, 3 desc, 1`
 	if got := CountSQL(o); got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 	// retry·due 가 없으면 대기는 모든 행이고 나머지는 null 이며 where 도 없다
-	min := `select "x"::text as type, count(*) as rows, count(*) as waiting, null::bigint as retrying, null::bigint as exhausted, null::bigint as stale, null::timestamptz as oldest_due from "t_outbox" group by 1 order by 5 desc nulls last, 3 desc, 1`
+	min := `select "x"::text as type, count(*) as rows, count(*) as waiting, null::bigint as retrying, null::bigint as exhausted, null::bigint as stale, null::timestamptz as oldest_due, "x"::text is null as type_null, grouping("x"::text) as total from "t_outbox" group by grouping sets (("x"::text), ()) order by 9 desc, 5 desc nulls last, 3 desc, 1`
 	if got := CountSQL(Outbox{Table: "t_outbox", Type: "x"}); got != min {
 		t.Fatalf("최소: %s", got)
 	}
-	if !db.IsReadOnlySQL(CountSQL(o)) || !db.IsReadOnlySQL(RetrySQL(o, "A")) {
+	if !db.IsReadOnlySQL(CountSQL(o)) || !db.IsReadOnlySQL(RetrySQL(o, TypeStat{Name: "A"})) {
 		t.Fatal("읽기 문장이어야 한다")
 	}
 }
@@ -187,11 +188,15 @@ func TestRetrySQL_종류_하나의_재시도_행을_where_와_AND_로_묻는다(
 	o := Outbox{Table: "public.t_outbox", Type: "event_type", Retry: "retry_count", Due: "check_needed_at", Where: "x = 1"}
 	want := `select * from "public"."t_outbox" where "event_type"::text = 'O''B' and coalesce("retry_count", 0) > 0 and (` +
 		"\nx = 1\n)" + ` order by coalesce("retry_count", 0) desc, "check_needed_at" limit 50`
-	if got := RetrySQL(o, "O'B"); got != want {
+	if got := RetrySQL(o, TypeStat{Name: "O'B"}); got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}
-	if got := RetrySQL(Outbox{Table: "t", Type: "x"}, "A"); got != `select * from "t" where "x"::text = 'A' limit 50` {
+	if got := RetrySQL(Outbox{Table: "t", Type: "x"}, TypeStat{Name: "A"}); got != `select * from "t" where "x"::text = 'A' limit 50` {
 		t.Fatalf("최소: %s", got)
+	}
+	// NULL 종류는 글자 'NULL' 과 섞이지 않게 is null 로 묻는다
+	if got := RetrySQL(Outbox{Table: "t", Type: "x"}, TypeStat{Name: "NULL", Null: true}); got != `select * from "t" where "x"::text is null limit 50` {
+		t.Fatalf("NULL 종류: %s", got)
 	}
 }
 
@@ -280,7 +285,7 @@ func TestIntegration_아웃박스_수와_종류별_표를_READ_ONLY_로_읽는�
 		t.Fatalf("열 없는 수: %+v %v", s, err)
 	}
 	res, err := pg.RunReadOnly(ctx, CountSQL(o))
-	if err != nil || strings.Join(res.Cols, ",") != "type,rows,waiting,retrying,exhausted,stale,oldest_due" {
+	if err != nil || strings.Join(res.Cols, ",") != "type,rows,waiting,retrying,exhausted,stale,oldest_due,type_null,total" {
 		t.Fatalf("열: %+v %v", res, err)
 	}
 	// where 로 쓰기를 숨겨도 READ ONLY 가 막는다
@@ -339,7 +344,7 @@ func TestIntegration_종류별_한도로_세고_한도_소진은_오래됨이_�
 		t.Fatalf("합: %+v", s)
 	}
 	// 종류 상세는 재시도 중·한도 소진 행만 retry 큰 순이다
-	res, err := pg.RunReadOnly(ctx, RetrySQL(o, "EARN"))
+	res, err := pg.RunReadOnly(ctx, RetrySQL(o, TypeStat{Name: "EARN"}))
 	if err != nil || len(res.Rows) != 2 || res.Rows[0][2] != "20" || res.Rows[1][2] != "7" {
 		t.Fatalf("종류 상세: %+v %v", res, err)
 	}
@@ -348,5 +353,75 @@ func TestIntegration_종류별_한도로_세고_한도_소진은_오래됨이_�
 	empty.Where = "false"
 	if s, err := Count(ctx, pg, empty); err != nil || s.Pending != 0 || s.Retry != 0 || s.Exhausted != 0 || s.Stale != 0 || len(s.Types) != 0 {
 		t.Fatalf("빈 표: %+v %v", s, err)
+	}
+}
+
+func TestIntegration_종류가_상한을_넘어도_합은_서버에서_정확히_세고_잘림을_알린다(t *testing.T) {
+	pg, ctx := testPG(t)
+	for _, sql := range []string{
+		`drop schema if exists flows_it3 cascade`,
+		`create schema flows_it3`,
+		`create table flows_it3.t_outbox (event_type text, retry_count int)`,
+		// 종류 1,200개(행마다 retry 0), 그 가운데 T0007 만 한도 소진 행 하나를 더 든다
+		`insert into flows_it3.t_outbox select 'T' || lpad(g::text, 4, '0'), 0 from generate_series(1, 1200) g`,
+		`insert into flows_it3.t_outbox values ('T0007', 9)`,
+	} {
+		if _, err := pg.Run(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _, _ = pg.Run(context.Background(), `drop schema if exists flows_it3 cascade`) })
+	s, err := Count(ctx, pg, Outbox{Table: "flows_it3.t_outbox", Type: "event_type", Retry: "retry_count"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Pending != 1200 || s.Exhausted != 1 || s.Retry != 0 {
+		t.Fatalf("합: %+v", Stat{Pending: s.Pending, Retry: s.Retry, Exhausted: s.Exhausted, Stale: s.Stale})
+	}
+	if !s.Truncated || len(s.Types) != MaxTypes || s.Types[0].Name != "T0007" {
+		t.Fatalf("잘림: truncated=%v 종류 %d 첫째 %+v", s.Truncated, len(s.Types), s.Types[0])
+	}
+	if m, _ := s.Metrics(); !strings.HasSuffix(m, " · 종류 1,000개만") {
+		t.Fatalf("잘림 표시: %q", m)
+	}
+}
+
+func TestIntegration_NULL_종류와_글자_NULL_종류를_가르고_상세는_IS_NULL_로_묻는다(t *testing.T) {
+	pg, ctx := testPG(t)
+	for _, sql := range []string{
+		`drop schema if exists flows_it4 cascade`,
+		`create schema flows_it4`,
+		`create table flows_it4.t_outbox (id int, event_type text, retry_count int)`,
+		`insert into flows_it4.t_outbox values (1, null, 3), (2, null, 0), (3, 'NULL', 4)`,
+	} {
+		if _, err := pg.Run(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _, _ = pg.Run(context.Background(), `drop schema if exists flows_it4 cascade`) })
+	o := Outbox{Table: "flows_it4.t_outbox", Type: "event_type", Retry: "retry_count"}
+	s, err := Count(ctx, pg, o)
+	if err != nil || len(s.Types) != 2 {
+		t.Fatalf("종류: %+v %v", s.Types, err)
+	}
+	var null, text TypeStat
+	for _, ts := range s.Types {
+		if ts.Null {
+			null = ts
+		} else {
+			text = ts
+		}
+	}
+	if !null.Null || null.Rows != 2 || text.Name != "NULL" || text.Rows != 1 || null.Label() != "(NULL)" || text.Label() != "NULL" {
+		t.Fatalf("NULL 가르기: null=%+v text=%+v", null, text)
+	}
+	for _, c := range []struct {
+		ts TypeStat
+		id string
+	}{{null, "1"}, {text, "3"}} {
+		res, err := pg.RunReadOnly(ctx, RetrySQL(o, c.ts))
+		if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != c.id {
+			t.Fatalf("%+v 상세: %+v %v", c.ts, res, err)
+		}
 	}
 }
