@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/clipboard"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 )
 
@@ -91,10 +92,26 @@ func (m Model) CopyWith(c CopyChoice) Action {
 	case TargetColumn:
 		r0, r1, c0, c1 = 0, len(m.view)-1, m.col, m.col
 	}
+	// 다 만든 뒤 clipboard.Write 가 거절하면 그 사이 화면이 멈추고 큰 버퍼를 잡는다. 칸 길이로 먼저 어림해 만들기 전에 멈춘다
+	size := 0
+	for vi := r0; vi <= r1 && size <= clipboard.MaxBytes; vi++ {
+		row := m.shown(m.view[vi])
+		for col := c0; col <= c1; col++ {
+			size += len(cellOf(row, col)) + 1
+		}
+	}
+	if size > clipboard.MaxBytes {
+		return Action{Status: clipboard.TooBigError{Bytes: size}.Status()}
+	}
 	var text string
 	switch c.Format {
 	case FormatIN:
-		return m.inList(r0, r1, c0, c1)
+		// 상태는 C 의 글(잘림 안내 포함)을 메뉴 꼴 뒤에 붙인다
+		a := m.inList(r0, r1, c0, c1)
+		if a.Copy != nil {
+			a.Status = fmt.Sprintf("복사함 (1줄) · %s · %s", c, a.Status)
+		}
+		return a
 	case FormatInsert:
 		// i 와 같은 db.InsertSQL 이다. 행 전체를 넣으므로 선택의 열 범위는 보지 않는다
 		var rows []int
@@ -125,7 +142,23 @@ func (m Model) CopyWith(c CopyChoice) Action {
 		case FormatJSON:
 			text = ToJSON(sub, kinds)
 		case FormatMarkdown:
-			text = toMarkdown(sub, kinds)
+			// GitHub 꼴 표다. 숫자 열은 오른쪽 정렬이다
+			var b strings.Builder
+			b.Grow(resultBytes(sub) * 2)
+			mdRow(&b, sub.Cols)
+			b.WriteByte('|')
+			for _, k := range kinds {
+				if k == kindNumber {
+					b.WriteString(" ---: |")
+				} else {
+					b.WriteString(" --- |")
+				}
+			}
+			b.WriteByte('\n')
+			for _, cells := range sub.Rows {
+				mdRow(&b, cells)
+			}
+			text = b.String()
 		default:
 			lines := make([]string, 0, len(sub.Rows)+1)
 			lines = append(lines, RowTSV(sub.Cols))
@@ -137,26 +170,6 @@ func (m Model) CopyWith(c CopyChoice) Action {
 	}
 	lines := strings.Count(strings.TrimSuffix(text, "\n"), "\n") + 1
 	return Action{Copy: &text, Status: fmt.Sprintf("복사함 (%d줄) · %s", lines, c)}
-}
-
-// toMarkdown 은 GitHub 꼴 Markdown 표다. 숫자 열은 오른쪽 정렬이다.
-func toMarkdown(r *db.Result, kinds []kind) string {
-	var b strings.Builder
-	b.Grow(resultBytes(r) * 2)
-	mdRow(&b, r.Cols)
-	b.WriteByte('|')
-	for i := range r.Cols {
-		if kinds[i] == kindNumber {
-			b.WriteString(" ---: |")
-		} else {
-			b.WriteString(" --- |")
-		}
-	}
-	b.WriteByte('\n')
-	for _, cells := range r.Rows {
-		mdRow(&b, cells)
-	}
-	return b.String()
 }
 
 func mdRow(b *strings.Builder, cells []string) {

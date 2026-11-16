@@ -116,7 +116,7 @@ func TestCopyMenu_IN_목록은_C와_같다(t *testing.T) {
 	m := newGrid(peopleResult(), [2]int{80, 10})
 	_, c := press(m, "C")
 	a := m.CopyWith(CopyChoice{TargetColumn, FormatIN})
-	if copied(t, a) != *c.Copy || copied(t, a) != "(1, 2, 3)" || a.Status != c.Status {
+	if copied(t, a) != *c.Copy || copied(t, a) != "(1, 2, 3)" || a.Status != "복사함 (1줄) · 현재 열 · IN 목록 · "+c.Status {
 		t.Fatalf("IN: %q %q / C: %q %q", *a.Copy, a.Status, *c.Copy, c.Status)
 	}
 }
@@ -153,5 +153,21 @@ func TestCopyMenu_오른쪽_클릭은_그_칸으로_옮기고_본문_칸인지_�
 	m.HandleMouse(tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonRight, Action: tea.MouseActionPress})
 	if m.row != 3 || m.col != target.col {
 		t.Fatalf("오른쪽 클릭: row=%d col=%d", m.row, m.col)
+	}
+}
+
+func TestCopyMenu_10MiB_를_넘을_결과는_만들기_전에_멈춘다(t *testing.T) {
+	big := strings.Repeat("x", 1<<20)
+	r := &db.Result{Cols: []string{"v"}}
+	for range 11 {
+		r.Rows = append(r.Rows, []string{big})
+	}
+	m := newGrid(r, [2]int{80, 10})
+	a := m.CopyWith(CopyChoice{TargetVisible, FormatJSON})
+	if a.Copy != nil || !strings.HasPrefix(a.Status, "너무 커서 복사하지 않음") {
+		t.Fatalf("큰 결과: copy=%v %q", a.Copy != nil, a.Status)
+	}
+	if a := m.CopyWith(CopyChoice{TargetRow, FormatTSV}); a.Copy == nil {
+		t.Fatal("한 행은 그대로 복사한다")
 	}
 }

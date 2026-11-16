@@ -385,12 +385,16 @@ func TestBoard_패널_시각은_머신_시각대와_상관없이_KST_다(t *test
 		return panelResult{res: &db.Result{Cols: []string{"v"}, Rows: [][]string{{"7"}}}, at: time.Date(2026, 11, 16, 3, 4, 5, 0, time.UTC)}
 	}
 	old := time.Local
-	time.Local = time.UTC
 	t.Cleanup(func() { time.Local = old })
-	m := boardModel(t, 220)
-	feedBoard(m, m.openBoard("ops"))
-	if v := ansi.Strip(m.View()); !strings.Contains(v, "12:04:05 · 0ms") {
-		t.Fatalf("KST 12:04:05 가 없다:\n%s", v)
+	seoul, err := time.LoadLocation("Asia/Seoul")
+	must(t, err)
+	for _, loc := range []*time.Location{time.UTC, seoul} {
+		time.Local = loc
+		m := boardModel(t, 220)
+		feedBoard(m, m.openBoard("ops"))
+		if v := ansi.Strip(m.View()); !strings.Contains(v, "12:04:05 · 0ms") {
+			t.Fatalf("%s 에서 KST 12:04:05 가 없다:\n%s", loc, v)
+		}
 	}
 }
 

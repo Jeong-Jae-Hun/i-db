@@ -139,5 +139,7 @@ func UTF16LE(s string) []byte {
 func runCommand(ctx context.Context, name string, args []string, in []byte) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = bytes.NewReader(in)
+	// 자식이 stdin 을 물려받아 쥐고 있으면 ctx 가 끝나도 입력 복사가 Wait 를 붙잡는다. 같은 2초 안에 놓게 한다
+	cmd.WaitDelay = runTimeout
 	return cmd.Run()
 }
