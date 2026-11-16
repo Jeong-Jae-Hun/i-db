@@ -1,0 +1,22 @@
+# db-rs 가 Go 판과 같은 출력을 내야 하는 골든 케이스(testdata/golden/cases.json 의 name). 옮길 때마다 늘린다.
+help
+help-query
+help-conns
+help-redis
+help-describe
+help-explain
+help-linked
+help-schema-diff
+help-user360
+help-flows
+help-board
+help-status
+help-conn
+help-history
+help-update
+help-unknown
+conns-json
+conns-tsv
+conns-table
+conns-csv
+query-bad-format

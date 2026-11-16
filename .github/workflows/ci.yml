@@ -41,3 +41,33 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test -race -count=1 ./...
+
+  # Rust 판(db-rs). 골든 비교가 Go 판이 만든 testdata/golden/out 과 출력을 바이트로 맞춘다
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: itpass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DBTUI_TEST_PG_URL: postgres://postgres:itpass@127.0.0.1:5432/postgres
+      DBTUI_TEST_REDIS_ADDR: 127.0.0.1:6379
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # 러너에 있는 rustup 으로 rust-toolchain.toml 의 판을 받는다(서드파티 액션 없이)
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo build --locked
+      - run: cargo test --locked
