@@ -276,15 +276,15 @@ func TestRunPanel_비싼_질의는_Force_로_보내지_않고_까닭을_보인�
 }
 
 func TestRunPanel_흐름_패널도_15초_제한_안에서_푼다(t *testing.T) {
-	fakeFlow(t, flows.Stat{}, sampleTopic(), nil)
+	fakeFlow(t, flows.Stat{}, sampleQueues(), nil)
 	var left time.Duration
-	flowTopic = func(ctx context.Context, _ *sourcePool, _ db.Conn, _ string) (*awsres.Topic, error) {
+	flowQueues = func(ctx context.Context, _ *sourcePool, _ db.Conn, _ []awsres.QueueRef) ([]awsres.Queue, error) {
 		if d, ok := ctx.Deadline(); ok {
 			left = time.Until(d)
 		}
-		return sampleTopic(), nil
+		return sampleQueues(), nil
 	}
-	runPanel(context.Background(), nil, nil, boardProject(t), boardPanel{View: "flow", flow: flows.Flow{Name: "x", AWS: "aws-stg", Topic: "t"}}, true)
+	runPanel(context.Background(), nil, nil, boardProject(t), boardPanel{View: "flow", flow: flows.Flow{Name: "x", AWS: "aws-stg", Topic: "t", Queues: []flows.Queue{{Name: "q1"}}}}, true)
 	if left <= 0 || left > boardTimeout {
 		t.Fatalf("흐름 풀이에 패널 제한이 걸린다: %v", left)
 	}
@@ -466,7 +466,7 @@ func TestBoard_방향키로_패널을_고르고_Enter_는_질의를_새_쿼리_�
 	}
 
 	// 흐름 패널 Enter 는 흐름 탭에서 그 흐름을 고르고, 설정 오류 패널은 안내만 한다
-	fakeFlow(t, flows.Stat{}, sampleTopic(), nil)
+	fakeFlow(t, flows.Stat{}, sampleQueues(), nil)
 	m.switchTab(len(m.tabs) - 2)
 	m.setFocus(fResult)
 	m.cur().board.cursor = 2

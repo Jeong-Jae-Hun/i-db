@@ -1,5 +1,6 @@
 // Package awsres 는 AWS 메시징·인프라를 트리로 보는 읽기 전용 저장소다(명세 R67). 편집기 질의 언어는 없고
 // 트리 펼치기(Children)와 Enter(Open)만 있다. 부르는 API 는 List*·Get*·Describe*·Head* 뿐이다(readonly_test 가 지킨다).
+// SNS·SQS·S3 는 요청마다 요금이 붙어 source.Billed 를 지나야 부른다(R72). 대시보드·흐름은 늘 요금 없는 API 만 쓴다.
 package awsres
 
 import (
@@ -38,7 +39,7 @@ type Backend struct {
 	sfn       sfnAPI
 	s3        s3API
 	regions   sync.Map // S3 버킷 이름 → 리전
-	region    string   // 접속 리전. 다른 리전 ARN(흐름의 DLQ)을 가른다
+	region    string   // 접속 리전. 다른 리전 큐 ARN 을 가르고, 흐름 큐 이름을 ARN 으로 만든다
 }
 
 type stsAPI interface {
@@ -96,6 +97,10 @@ var folders = []struct{ key, name string }{
 	{"s3", "S3"},
 }
 
+// billedServices 는 요청마다 요금이 붙는 폴더다(R72). SNS 토픽 주인 작업·SQS 모든 작업·S3 LIST/GET/HEAD 가 그렇다.
+// 막혀 있으면 맨 위에 보이지 않고, 경로로 와도(MCP aws_tree·aws_open, 흐름 상자 Enter) 보내기 전에 ErrBilled 다.
+var billedServices = map[string]bool{"sns": true, "sqs": true, "s3": true}
+
 // Children 은 "" 이면 폴더, 그 밖은 서비스별 목록이다. 맨 위는 GetCallerIdentity 로 자격 증명부터 확인한다:
 // 그러지 않으면 접속 시험(testConn)이 자격 증명 없이도 폴더 수만 보고 성공한다.
 // 권한이 없는 목록은 오류 대신 `권한 없음: <작업>` 한 줄이라 다른 폴더는 그대로 쓴다.
@@ -104,13 +109,21 @@ func (b *Backend) Children(ctx context.Context, path string) ([]source.Node, err
 		if _, err := b.sts.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
 			return nil, wrap("sts:GetCallerIdentity", err)
 		}
-		out := make([]source.Node, len(folders))
-		for i, f := range folders {
-			out[i] = source.Node{Name: f.name, Path: f.key, HasChildren: true}
+		allow := source.Billed() == nil
+		var out []source.Node
+		for _, f := range folders {
+			if allow || !billedServices[f.key] {
+				out = append(out, source.Node{Name: f.name, Path: f.key, HasChildren: true})
+			}
 		}
 		return out, nil
 	}
 	svc, rest, _ := strings.Cut(path, "/")
+	if billedServices[svc] {
+		if err := source.Billed(); err != nil {
+			return nil, err
+		}
+	}
 	var (
 		out []source.Node
 		err error
@@ -146,6 +159,11 @@ func (b *Backend) Children(ctx context.Context, path string) ([]source.Node, err
 // Open 은 노드 Enter 의 표다. 경로 첫 마디로 서비스를 고른다. `권한 없음`·`… 앞 N개만` 줄(#로 시작)은 열 것이 없다.
 func (b *Backend) Open(ctx context.Context, path string, _ int) (*db.Result, error) {
 	svc, rest, _ := strings.Cut(path, "/")
+	if billedServices[svc] {
+		if err := source.Billed(); err != nil {
+			return nil, err
+		}
+	}
 	switch {
 	case rest == "":
 	case svc == "sns":

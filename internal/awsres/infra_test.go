@@ -294,6 +294,7 @@ func s3Fixture() *fakeS3 {
 }
 
 func TestS3_버킷_접두_객체를_한_단계씩_보이고_버킷_리전으로_묻는다(t *testing.T) {
+	allowBilled(t)
 	b, _, _, _ := newBackend()
 	f := s3Fixture()
 	b.s3 = f
@@ -324,6 +325,7 @@ func TestS3_버킷_접두_객체를_한_단계씩_보이고_버킷_리전으로_
 }
 
 func TestS3_객체_Enter_는_메타데이터이고_64KiB_이하_텍스트만_Range_로_본문을_붙인다(t *testing.T) {
+	allowBilled(t)
 	b, _, _, _ := newBackend()
 	f := s3Fixture()
 	b.s3 = f

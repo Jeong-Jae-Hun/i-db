@@ -11,7 +11,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Jeong-Jae-Hun/i-db/internal/awsres"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/flows"
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
@@ -288,8 +287,7 @@ type dashSummary struct {
 	ok, fail                 int
 	pgActive, redisClients   int
 	openTx, unlocked         int
-	// aws 는 aws 접속 수, dlq 는 그 접속들의 `DLQ 쌓임` 합이다. outboxes 는 한도 소진을 세는 흐름 아웃박스 수, exhausted 는 그 합이다(R69)
-	aws, dlq            int
+	// outboxes 는 한도 소진을 세는 흐름 아웃박스 수, exhausted 는 그 합이다(R69)
 	outboxes, exhausted int
 }
 
@@ -305,9 +303,6 @@ func (m *model) dashSum(d *dashState) dashSummary {
 			s.redis++
 		default:
 			s.source++
-		}
-		if c.Kind == db.KindAWS {
-			s.aws++
 		}
 		switch c.Env() {
 		case "prod":
@@ -337,8 +332,6 @@ func (m *model) dashSum(d *dashState) dashSummary {
 			s.pgActive += metricInt(h, db.MetricPGActive)
 		case db.KindRedis:
 			s.redisClients += metricInt(h, db.MetricRedisClients)
-		case db.KindAWS:
-			s.dlq += metricInt(h, awsres.MetricDLQ)
 		}
 	}
 	for _, n := range d.outbox {
@@ -381,9 +374,6 @@ func (m *model) dashView(t *queryTab, w, h int) string {
 		dashCard("열린 트랜잭션", strconv.Itoa(s.openTx)),
 		dashCard("prod 잠금 해제", strconv.Itoa(s.unlocked)),
 	}
-	if s.aws > 0 {
-		cards = append(cards, dashCard("DLQ 쌓인 큐", warnIf(s.dlq)))
-	}
 	if s.outboxes > 0 {
 		cards = append(cards, dashCard("아웃박스 한도 소진", warnIf(s.exhausted)))
 	}
@@ -403,16 +393,12 @@ func (m *model) dashView(t *queryTab, w, h int) string {
 	return strings.Join(append(lines, table...), "\n")
 }
 
-// dashFlowSummary 는 접은 한 줄 요약에 붙일 DLQ·아웃박스 한도 소진이다. 카드가 없으면 빈 글이다.
+// dashFlowSummary 는 접은 한 줄 요약에 붙일 아웃박스 한도 소진이다. 카드가 없으면 빈 글이다.
 func dashFlowSummary(s dashSummary) string {
-	var out string
-	if s.aws > 0 {
-		out += fmt.Sprintf(" · DLQ 쌓인 큐 %d", s.dlq)
+	if s.outboxes == 0 {
+		return ""
 	}
-	if s.outboxes > 0 {
-		out += fmt.Sprintf(" · 아웃박스 한도 소진 %d", s.exhausted)
-	}
-	return out
+	return fmt.Sprintf(" · 아웃박스 한도 소진 %d", s.exhausted)
 }
 
 // warnIf 는 0보다 크면 경고 색인 수다.

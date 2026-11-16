@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -55,7 +56,22 @@ var (
 	// ErrNeedsConfirm 은 전체 스캔·큰 범위처럼 비싼 질의다. 통합이 확인받은 뒤 Query.Force 로 다시 보낸다.
 	// 까닭은 NeedsConfirm 으로 감싸 싣고 ConfirmReason 으로 꺼낸다(확인 창·CLI 거절 글, R60.2)
 	ErrNeedsConfirm = errors.New("expensive query needs confirmation")
+	// ErrBilled 는 요청·스캔마다 요금이 붙는 AWS 조회를 허용 없이 부르려 할 때다(R72). 보내기 전에 돌려준다.
+	// 화면 상태 줄·CLI·MCP 오류에 그대로 보이도록 글이 곧 안내다.
+	ErrBilled = errors.New("요금이 붙는 조회라 막음 (" + AllowBilledEnv + "=1 로 허용)")
 )
+
+// AllowBilledEnv 는 요금이 붙는 조회를 여는 환경 변수다. 기본은 막음이다(R72).
+const AllowBilledEnv = "DB_ALLOW_BILLED"
+
+// Billed 는 요금이 붙는 조회(SQS·SNS·S3·Athena·DynamoDB 데이터 읽기)를 보내기 전에 부른다. DB_ALLOW_BILLED=1 이면 nil,
+// 아니면 ErrBilled 다. 호출마다 환경을 읽어 시험이 t.Setenv 로 바꿀 수 있다.
+func Billed() error {
+	if os.Getenv(AllowBilledEnv) == "1" {
+		return nil
+	}
+	return ErrBilled
+}
 
 // ─── 종류 공통 값 (R60~R63) ───
 

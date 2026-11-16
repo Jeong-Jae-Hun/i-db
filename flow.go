@@ -30,17 +30,19 @@ import (
 var (
 	// flowOutbox 는 아웃박스 수를 읽는다. 화면·대시보드·`db flows` 가 같이 쓰고 테스트가 바꿔 끼운다
 	flowOutbox = outboxCount
-	// flowTopic 은 aws 접속으로 토픽을 풀어 낸다. 테스트가 바꿔 끼운다
-	flowTopic = topicFlow
+	// flowQueues 는 aws 접속으로 큐마다 Lambda 매핑을 찾는다. 테스트가 바꿔 끼운다
+	flowQueues = queueFlows
 	// 흐름 탭이 활성인 동안 다시 푸는 간격. 테스트가 줄인다
 	flowEvery = 30 * time.Second
 )
 
 const (
-	// flowAWSTimeout 은 토픽 하나를 푸는 시간이다. 구독·큐·DLQ·매핑을 차례로 물어 질의 한 번(ProbeTimeout)보다 길게 준다
+	// flowAWSTimeout 은 흐름 하나의 큐를 푸는 시간이다. 계정·큐마다 매핑을 물어 질의 한 번(ProbeTimeout)보다 길게 준다
 	flowAWSTimeout = 15 * time.Second
-	flowHint       = "r 새로고침 · ↑↓ 흐름 · ←→ 상자 · Enter 상세 · Ctrl+W 닫기 · F1 도움말"
-	flowNoFile     = "흐름 없음 · .dbtui/flows.json 을 쓰거나 aws 트리의 SNS 토픽에서 F"
+	// flowNoMetrics 는 토픽·큐가 있는 흐름 이름 옆 흐린 안내다. 큐·DLQ 수는 SQS 요청마다 요금이 붙어 묻지 않는다(R72)
+	flowNoMetrics = "수치는 요금이 붙어 보지 않음"
+	flowHint      = "r 새로고침 · ↑↓ 흐름 · ←→ 상자 · Enter 상세 · Ctrl+W 닫기 · F1 도움말"
+	flowNoFile    = "흐름 없음 · .dbtui/flows.json 을 쓰세요 (DB_ALLOW_BILLED=1 이면 aws 트리 SNS 토픽에서 F)"
 	// stageType 은 아웃박스 종류 한 줄(R69.6)이다. 그림에서는 아웃박스 아래 줄로, `db flows` 에서는 한 줄로 보인다
 	stageType = "outbox-type"
 )
@@ -60,36 +62,38 @@ func outboxCount(ctx context.Context, clients *db.Clients, c db.Conn, o flows.Ou
 	return flows.Count(ctx, pg, o)
 }
 
-// topicResolver 는 흐름을 풀 수 있는 Backend(awsres.Backend)다.
-type topicResolver interface {
-	TopicFlow(ctx context.Context, topic string) (*awsres.Topic, error)
+// queueResolver 는 흐름의 큐를 풀 수 있는 Backend(awsres.Backend)다.
+type queueResolver interface {
+	QueueFlows(ctx context.Context, refs []awsres.QueueRef) ([]awsres.Queue, error)
 }
 
-func topicFlow(ctx context.Context, sources *sourcePool, c db.Conn, topic string) (*awsres.Topic, error) {
+func queueFlows(ctx context.Context, sources *sourcePool, c db.Conn, refs []awsres.QueueRef) ([]awsres.Queue, error) {
 	octx, cancel := context.WithTimeout(ctx, db.ProbeOpenTimeout)
 	b, err := sources.get(octx, c)
 	cancel()
 	if err != nil {
 		return nil, err
 	}
-	r, ok := b.(topicResolver)
+	r, ok := b.(queueResolver)
 	if !ok {
 		return nil, fmt.Errorf("%s is not an aws connection", c.Name)
 	}
 	ctx, cancel = context.WithTimeout(ctx, flowAWSTimeout)
 	defer cancel()
-	return r.TopicFlow(ctx, topic)
+	return r.QueueFlows(ctx, refs)
 }
 
 // flowSnap 은 흐름 하나를 한 번 푼 결과다. note 는 확인하지 않은 prod(`--prod 로 확인`, CLI)다.
+// queues 는 설정의 큐와 같은 순서이고, awsErr·awsNote 는 큐 전체(계정을 못 읽음·prod 미확인)에 붙는다.
 type flowSnap struct {
 	outbox                *flows.Stat
 	outboxErr, outboxNote string
-	topic                 *awsres.Topic
-	topicErr, topicNote   string
+	queues                []awsres.Queue
+	awsErr, awsNote       string
 }
 
-// resolveFlow 는 아웃박스 수와 토픽을 동시에 푼다. prod 가 거짓이면 prod 접속은 묻지 않는다(R58.2). 오류는 비밀번호를 지운 한 줄이다.
+// resolveFlow 는 아웃박스 수와 큐의 Lambda 매핑을 동시에 푼다. 토픽은 이름만 보여 묻지 않는다.
+// prod 가 거짓이면 prod 접속은 묻지 않는다(R58.2). 오류는 비밀번호를 지운 한 줄이다.
 func resolveFlow(ctx context.Context, clients *db.Clients, sources *sourcePool, proj *db.Project, f flows.Flow, prod bool) flowSnap {
 	var s flowSnap
 	if f.Err != "" {
@@ -117,17 +121,21 @@ func resolveFlow(ctx context.Context, clients *db.Clients, sources *sourcePool, 
 		}
 	}
 	switch i := connByName(proj, f.AWS); {
-	case f.Topic == "":
+	case len(f.Queues) == 0:
 	case i < 0:
-		s.topicErr = "no such connection: " + f.AWS
+		s.awsErr = "no such connection: " + f.AWS
 	case proj.Conns[i].Env() == "prod" && !prod:
-		s.topicNote = dashProdHint
+		s.awsNote = dashProdHint
 	default:
-		tp, err := flowTopic(ctx, sources, proj.Conns[i], f.Topic)
-		if err != nil {
-			s.topicErr = oneLine(err.Error())
+		refs := make([]awsres.QueueRef, len(f.Queues))
+		for k, q := range f.Queues {
+			refs[k] = awsres.QueueRef{Name: q.Name, DLQ: q.DLQ}
 		}
-		s.topic = tp
+		qs, err := flowQueues(ctx, sources, proj.Conns[i], refs)
+		if err != nil {
+			s.awsErr = oneLine(err.Error())
+		}
+		s.queues = qs
 	}
 	wg.Wait()
 	return s
@@ -135,7 +143,7 @@ func resolveFlow(ctx context.Context, clients *db.Clients, sources *sourcePool, 
 
 // ─── 상자 ───
 
-// flowBox 는 그림의 상자 하나이자 `db flows` 의 한 줄이다. sub 는 구독 줄 자리(-1 이면 아웃박스·SNS·아웃박스 종류)다.
+// flowBox 는 그림의 상자 하나이자 `db flows` 의 한 줄이다. sub 는 큐 줄 자리(-1 이면 아웃박스·SNS·아웃박스 종류)다.
 // conn·path 는 Enter 로 열 상세다(아웃박스·종류는 path 가 비고 conn 이 PostgreSQL 접속이다).
 // 종류 줄은 pad 만큼 이름 뒤를 띄워 수치 열을 맞추고, idle 은 설정에만 있고 행이 없는 종류다(흐리게, 자리가 있을 때만).
 // nullType 은 종류 열이 NULL 인 줄이다(이름은 `(NULL)`, 상세는 is null).
@@ -150,15 +158,8 @@ type flowBox struct {
 
 func (b flowBox) failed() bool { return b.err != "" }
 
-// lambdaOK 는 매핑의 마지막 처리 결과가 문제 없음인지다. `No records processed` 는 메시지가 없던 매핑의 보통 값이라 경고하지 않는다.
-func lambdaOK(r string) bool { return r == "OK" || r == "" || r == "No records processed" }
-
-func atoiOr0(s string) int {
-	n, _ := strconv.Atoi(s)
-	return n
-}
-
-// flowBoxes 는 흐름을 아웃박스 → SNS → 구독(큐 → DLQ·Lambda) 순서의 상자로 편다. 아직 결과가 없으면 수치는 `…` 다.
+// flowBoxes 는 흐름을 아웃박스 → SNS → 큐(→ DLQ·Lambda) 순서의 상자로 편다. 아직 결과가 없으면 수치는 `…` 다.
+// SNS·큐·DLQ 는 설정의 이름만이고 수치가 없다(R72). 큐 상자는 결과가 오기 전에도 설정 순서대로 그린다.
 func flowBoxes(f flows.Flow, s flowSnap, done bool) []flowBox {
 	if f.Err != "" {
 		return []flowBox{{stage: "config", name: f.Name, err: "설정 오류: " + f.Err, sub: -1}}
@@ -175,43 +176,32 @@ func flowBoxes(f flows.Flow, s flowSnap, done bool) []flowBox {
 		}
 		out = append(out, b)
 	}
-	topic := f.Topic
-	if i := strings.LastIndex(topic, ":"); strings.HasPrefix(topic, "arn:") && i >= 0 {
-		topic = topic[i+1:]
-	}
 	if f.Topic != "" {
-		sns := flowBox{stage: "sns", name: topic, metrics: pending, err: s.topicErr, note: s.topicNote, sub: -1, conn: f.AWS}
-		if s.topic != nil {
-			sns.name, sns.metrics, sns.path = s.topic.Name, fmt.Sprintf("구독 %d", len(s.topic.Subs)), "sns/"+s.topic.Arn
+		sns := flowBox{stage: "sns", name: f.Topic, sub: -1, conn: f.AWS}
+		// ARN 이면 요금 허용(R72) 뒤 구독 표를 열 수 있다. 이름만으로는 ARN 을 찾으려 ListTopics 를 불러야 해 상세가 없다
+		if strings.HasPrefix(f.Topic, "arn:") {
+			sns.name, sns.path = f.Topic[strings.LastIndex(f.Topic, ":")+1:], "sns/"+f.Topic
 		}
 		out = append(out, sns)
 	}
-	var subs []awsres.Sub
-	if s.topic != nil {
-		subs = s.topic.Subs
-	}
-	for i, sub := range subs {
-		q := sub.Queue
-		if q == nil {
-			out = append(out, flowBox{stage: "sub", name: sub.Endpoint, metrics: sub.Protocol, sub: i})
-			continue
+	for i, cq := range f.Queues {
+		q := awsres.Queue{Name: cq.Name[strings.LastIndex(cq.Name, ":")+1:], DLQ: cq.DLQ[strings.LastIndex(cq.DLQ, ":")+1:]}
+		if i < len(s.queues) {
+			q = s.queues[i]
 		}
-		qb := flowBox{stage: "sqs", name: q.Name, err: q.Err, sub: i, conn: f.AWS, path: "sqs/" + q.Name}
-		if q.Visible != "" {
-			qb.metrics = fmt.Sprintf("대기 %s · 처리 중 %s · 지연 %s", q.Visible, q.InFlight, q.Delayed)
-			qb.short = fmt.Sprintf("대기 %s · 처리 중 %s", q.Visible, q.InFlight)
-			if q.Delayed != "0" {
-				qb.short = qb.metrics
-			}
-		}
+		qb := flowBox{stage: "sqs", name: q.Name, metrics: pending, err: cmp.Or(s.awsErr, q.Err), note: s.awsNote, sub: i, conn: f.AWS, path: "sqs/" + cmp.Or(q.Arn, cq.Name)}
 		out = append(out, qb)
 		if q.DLQ != "" {
-			// DLQ 는 다른 계정일 수 있어 이름이 아닌 ARN 으로 연다
-			out = append(out, flowBox{stage: "dlq", name: q.DLQ, metrics: q.DLQCount, warn: atoiOr0(q.DLQCount) > 0, sub: i, conn: f.AWS, path: "sqs/" + q.DLQArn})
+			// DLQ 는 다른 계정일 수 있어 ARN 으로만 연다. 풀이 전이라 ARN 을 모르면 이름으로 열지 않는다(같은 이름의 다른 큐를 열 수 있다)
+			dlq := flowBox{stage: "dlq", name: q.DLQ, sub: i, conn: f.AWS}
+			if arn := cmp.Or(q.DLQArn, cq.DLQ); strings.HasPrefix(arn, "arn:") {
+				dlq.path = "sqs/" + arn
+			}
+			out = append(out, dlq)
 		}
 		for _, mp := range q.Lambdas {
 			b := flowBox{stage: "lambda", name: mp.Function, metrics: mp.State + " · " + mp.LastResult, short: mp.LastResult, sub: i, conn: f.AWS, path: "lambda/" + mp.Function,
-				warn: mp.State != "Enabled" || !lambdaOK(mp.LastResult)}
+				warn: mp.State != "Enabled" || !awsres.MappingOK(mp.LastResult)}
 			if mp.State != "Enabled" || mp.LastResult == "" {
 				b.short = strings.TrimSuffix(b.metrics, " · ")
 			}
@@ -283,7 +273,7 @@ func (l flowLine) width() int {
 
 var flowStageNames = map[string]string{"outbox": "아웃박스", "sns": "SNS", "sqs": "SQS", "lambda": "λ"}
 
-// boxLabel 은 `[SQS q1 | 대기 0 · 처리 중 2]` 같은 상자 글이다. DLQ 는 상자 없이 `DLQ q1-dlq 4` 다.
+// boxLabel 은 `[아웃박스 … | 대기 120 · …]`·`[SQS q1]` 같은 상자 글이다. DLQ 는 상자 없이 `DLQ q1-dlq` 다.
 func boxLabel(b flowBox) string {
 	m := b.metrics
 	if b.short != "" {
@@ -304,13 +294,6 @@ func boxLabel(b flowBox) string {
 		return strings.TrimSpace("DLQ " + name + " " + m)
 	case "lambda":
 		return "[λ " + strings.TrimSpace(name+" "+m) + "]"
-	case "sub":
-		return "[" + m + " " + name + "]"
-	case "sns":
-		if b.err != "" || b.note != "" {
-			return "[SNS " + name + " | " + m + "]"
-		}
-		return "[SNS " + name + "]"
 	}
 	if m == "" {
 		return "[" + flowStageNames[b.stage] + " " + name + "]"
@@ -374,9 +357,9 @@ func seg(boxes []flowBox, i int) flowSeg { return flowSeg{boxLabel(boxes[i]), i}
 
 // flowWide 는 가로 그림이다:
 //
-//	[아웃박스 …] ──▶ [SNS t] ─┬─▶ [SQS q1 | …] ──▶ [λ worker OK]
-//	                          │     └─ DLQ q1-dlq 4
-//	                          └─▶ [SQS q2 | …]
+//	[아웃박스 …] ──▶ [SNS t] ─┬─▶ [SQS q1] ──▶ [λ worker OK]
+//	                          │   └─ DLQ q1-dlq
+//	                          └─▶ [SQS q2]
 func flowWide(boxes []flowBox) []flowLine {
 	head, subs := subGroups(boxes)
 	var first flowLine
@@ -404,6 +387,9 @@ func flowWide(boxes []flowBox) []flowLine {
 			conn = " ─┬─▶ "
 		case last:
 			conn, under = "  └─▶ ", "      "
+		}
+		if len(head) == 0 { // 아웃박스·토픽 없이 큐만 있는 흐름은 큐가 줄 맨 앞이다
+			conn, under = "", "  "
 		}
 		var line flowLine
 		if r == 0 {
@@ -439,10 +425,10 @@ func flowWide(boxes []flowBox) []flowLine {
 //	[아웃박스 …]
 //	  ▼
 //	[SNS t]
-//	  ├─▶ [SQS q1 | …]
-//	  │     ├─ DLQ q1-dlq 4
+//	  ├─▶ [SQS q1]
+//	  │     ├─ DLQ q1-dlq
 //	  │     └─▶ [λ worker OK]
-//	  └─▶ [SQS q2 | …]
+//	  └─▶ [SQS q2]
 func flowTall(boxes []flowBox) []flowLine {
 	head, subs := subGroups(boxes)
 	var out []flowLine
@@ -726,7 +712,11 @@ func (m *model) flowView(t *queryTab, w, h int) string {
 	s.viewH, s.diagW = h, diagW
 	var right []string
 	if f, boxes, ok := s.curBoxes(); ok {
-		right = append(right, lipgloss.NewStyle().Bold(true).Render(truncate(textutil.Printable(f.Name, false), diagW)), "")
+		title := lipgloss.NewStyle().Bold(true).Render(textutil.Printable(f.Name, false))
+		if f.Err == "" && (f.Topic != "" || len(f.Queues) > 0) {
+			title += dimStyle.Render("  " + flowNoMetrics)
+		}
+		right = append(right, truncate(title, diagW), "")
 		sel, lines := clamp(s.box, len(boxes)), flowLayout(boxes, diagW)
 		at := slices.IndexFunc(lines, func(l flowLine) bool {
 			return slices.ContainsFunc(l, func(sg flowSeg) bool { return sg.box == sel })
@@ -770,7 +760,8 @@ func (m *model) flowIcon(s *flowState, f flows.Flow) (string, lipgloss.Style) {
 
 // ─── 트리 F ───
 
-// treeFlow 는 aws 트리의 SNS 토픽 줄에서 그 토픽만의 흐름을 연다. 트리에서 연 흐름은 아웃박스가 없다.
+// treeFlow 는 aws 트리의 SNS 토픽 줄에서 그 토픽만의 흐름을 연다. 트리에서 연 흐름은 아웃박스·큐가 없고 토픽 이름만이라
+// 아무것도 묻지 않는다(R72). SNS 폴더는 요금 허용 때만 보여 이 줄도 그때만 있다. 접속은 SNS 상자 Enter(구독 표)에 쓴다.
 func (m *model) treeFlow(n *node) (tea.Cmd, bool) {
 	if n == nil || n.kind != nSource || m.conn(n.conn).Kind != db.KindAWS {
 		return nil, false

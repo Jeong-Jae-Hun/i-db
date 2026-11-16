@@ -306,7 +306,7 @@ func boardRedisBounded(args []string) bool {
 	return boardRedisCmds[cmd]
 }
 
-// panelConns 는 패널이 묻는 접속 이름이다(흐름은 아웃박스·aws 접속).
+// panelConns 는 패널이 묻는 접속 이름이다(흐름은 아웃박스와, 큐가 있으면 aws 접속).
 func panelConns(p boardPanel) []string {
 	if p.View != "flow" {
 		return []string{p.Conn}
@@ -315,7 +315,7 @@ func panelConns(p boardPanel) []string {
 	if p.flow.Outbox != nil {
 		out = append(out, p.flow.Outbox.Conn)
 	}
-	if p.flow.Topic != "" {
+	if len(p.flow.Queues) > 0 {
 		out = append(out, p.flow.AWS)
 	}
 	return out

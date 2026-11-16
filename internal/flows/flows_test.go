@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,17 +44,17 @@ func TestLoad_파일이_없으면_빈_목록이고_깨진_JSON_은_오류다(t *
 
 func TestLoad_틀린_항목만_까닭을_적고_나머지는_그대로_쓴다(t *testing.T) {
 	dir := writeFlows(t, `[
-		{"name":"ok","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at","where":"event_type like 'DATA_%'"},"aws":"aws-stg","topic":"stg-hub"},
-		{"name":"topic-only","aws":"aws-stg","topic":"arn:aws:sns:ap-northeast-2:1:t"},
-		{"name":"redis","outbox":{"conn":"cache","table":"t","type":"x"},"aws":"aws-stg","topic":"t"},
-		{"name":"pg-as-aws","aws":"shop-stg","topic":"t"},
-		{"name":"no-conn","aws":"nope","topic":"t"},
+		{"name":"ok","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at","where":"event_type like 'DATA_%'"},"aws":"aws-stg","topic":"stg-hub","queues":[{"name":"q1","dlq":"q1-dlq"},{"name":"arn:aws:sqs:ap-northeast-2:1:q2"}]},
+		{"name":"topic-only","topic":"arn:aws:sns:ap-northeast-2:1:t"},
+		{"name":"redis","outbox":{"conn":"cache","table":"t","type":"x"},"topic":"t"},
+		{"name":"pg-as-aws","aws":"shop-stg","queues":[{"name":"q"}]},
+		{"name":"no-conn","aws":"nope","queues":[{"name":"q"}]},
 		{"name":"no-topic","aws":"aws-stg"},
-		{"name":"two-stmt","outbox":{"conn":"shop-stg","table":"t","type":"x","where":"1=1; delete from t"},"aws":"aws-stg","topic":"t"},
-		{"name":"no-type","outbox":{"conn":"shop-stg","table":"t"},"aws":"aws-stg","topic":"t"},
-		{"name":"deep","outbox":{"conn":"shop-stg","table":"a.b.c","type":"x"},"aws":"aws-stg","topic":"t"},
-		{"name":"ok","aws":"aws-stg","topic":"t"},
-		{"aws":"aws-stg","topic":"t"}
+		{"name":"two-stmt","outbox":{"conn":"shop-stg","table":"t","type":"x","where":"1=1; delete from t"},"topic":"t"},
+		{"name":"no-type","outbox":{"conn":"shop-stg","table":"t"},"topic":"t"},
+		{"name":"deep","outbox":{"conn":"shop-stg","table":"a.b.c","type":"x"},"topic":"t"},
+		{"name":"ok","topic":"t"},
+		{"topic":"t"}
 	]`)
 	fs, err := Load(dir, conns)
 	if err != nil {
@@ -64,7 +65,7 @@ func TestLoad_틀린_항목만_까닭을_적고_나머지는_그대로_쓴다(t 
 		"outbox.conn cache: want kind postgresql, got redis",
 		"aws shop-stg: want kind aws, got postgresql",
 		"aws nope: no such connection",
-		"outbox or topic is required",
+		"outbox, topic or queues is required",
 		"outbox.where must be a single condition without ';'",
 		"outbox.type is empty",
 		`outbox.table must be table or schema.table: "a.b.c"`,
@@ -81,6 +82,9 @@ func TestLoad_틀린_항목만_까닭을_적고_나머지는_그대로_쓴다(t 
 	}
 	if fs[0].Outbox == nil || fs[0].Outbox.Due != "check_needed_at" || fs[1].Outbox != nil {
 		t.Fatalf("값: %+v %+v", fs[0].Outbox, fs[1])
+	}
+	if want := []Queue{{Name: "q1", DLQ: "q1-dlq"}, {Name: "arn:aws:sqs:ap-northeast-2:1:q2"}}; !slices.Equal(fs[0].Queues, want) {
+		t.Fatalf("큐: %+v", fs[0].Queues)
 	}
 	if fs[10].Name != "#11" {
 		t.Fatalf("이름 없는 항목은 자리로 부른다: %q", fs[10].Name)
@@ -105,12 +109,15 @@ func TestCheckWhere_문자열_주석_안의_세미콜론은_받는다(t *testing
 
 func intp(n int) *int { return &n }
 
-func TestLoad_토픽_없는_아웃박스_흐름과_한도_설정을_검사한다(t *testing.T) {
+func TestLoad_토픽_큐_없는_아웃박스_흐름과_aws_큐_한도_설정을_검사한다(t *testing.T) {
 	dir := writeFlows(t, `[
 		{"name":"outbox-only","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at","limit":5,
 			"types":{"CREATE_PAYOUT":{"limit":20,"consumer":"consume-outbox-create-payout"},"CLIP":{"consumer":"consume-outbox-clip"}}}},
-		{"name":"aws-no-topic","outbox":{"conn":"shop-stg","table":"t","type":"x"},"aws":"aws-stg"},
-		{"name":"topic-no-aws","topic":"t"},
+		{"name":"aws-no-queues","outbox":{"conn":"shop-stg","table":"t","type":"x"},"aws":"aws-stg","topic":"t"},
+		{"name":"queues-no-aws","topic":"t","queues":[{"name":"q"}]},
+		{"name":"queue-no-name","aws":"aws-stg","queues":[{"name":"q"},{"dlq":"d"}]},
+		{"name":"nothing"},
+		{"name":"queues-only","aws":"aws-stg","queues":[{"name":"q"}]},
 		{"name":"zero-limit","outbox":{"conn":"shop-stg","table":"t","type":"x","retry":"r","limit":0}},
 		{"name":"type-zero","outbox":{"conn":"shop-stg","table":"t","type":"x","retry":"r","types":{"A":{"limit":0}}}},
 		{"name":"empty-type","outbox":{"conn":"shop-stg","table":"t","type":"x","retry":"r","types":{" ":{"consumer":"c"}}}},
@@ -123,8 +130,11 @@ func TestLoad_토픽_없는_아웃박스_흐름과_한도_설정을_검사한다
 	}
 	want := []string{
 		"",
-		"aws requires topic",
+		"aws requires queues",
 		"aws is empty",
+		"queues[1].name is empty",
+		"outbox, topic or queues is required",
+		"",
 		"outbox.limit must be >= 1",
 		"outbox.types.A.limit must be >= 1",
 		"outbox.types has an empty type",

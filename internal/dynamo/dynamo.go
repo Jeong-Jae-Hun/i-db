@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +32,8 @@ import (
 // `SELECT * FROM "테이블"` 을 Force 로 Run 한다.
 type Backend struct {
 	cl api
+	// local 은 url 이 이 머신(DynamoDB Local)이라 요금이 붙지 않는 접속이다. 데이터 읽기 막기(R72)를 건너뛴다
+	local bool
 
 	// tables 는 Run 이 읽은 DescribeTable 이다. 결과 정렬을 서버로 다시 읽을지(SortKey) 화면이 네트워크 없이 고른다
 	mu     sync.Mutex
@@ -72,7 +75,20 @@ func New(ctx context.Context, c db.Conn) (source.Backend, error) {
 		}
 		o.HTTPClient = source.HTTPClient() // 리다이렉트를 따라가지 않는다(3xx 는 SDK 가 오류로 낸다)
 	})
-	return &Backend{cl: cl}, nil
+	u, _ := url.Parse(c.URL)
+	host := ""
+	if u != nil {
+		host = u.Hostname()
+	}
+	return &Backend{cl: cl, local: host == "localhost" || host == "127.0.0.1" || host == "::1"}, nil
+}
+
+// billed 는 데이터 읽기(Scan·ExecuteStatement, 읽기 요청 단위로 요금) 전에 부른다(R72). 목록·DescribeTable 은 요금이 없어 묻지 않는다.
+func (b *Backend) billed() error {
+	if b.local {
+		return nil
+	}
+	return source.Billed()
 }
 
 func (b *Backend) Close() error { return nil }
@@ -141,8 +157,11 @@ func indexNode(table, kind, name string, ks []types.KeySchemaElement) source.Nod
 
 // ─── 실행 ───
 
-// Open 은 테이블 미리 보기다. 스캔이라 확인 없이는 보내지 않는다(R63.1).
+// Open 은 테이블 미리 보기다. 스캔이라 확인 없이는 보내지 않는다(R63.1). 요금 막음(R72)이 확인보다 먼저다.
 func (b *Backend) Open(context.Context, string, int) (*db.Result, error) {
+	if err := b.billed(); err != nil {
+		return nil, err
+	}
 	return nil, source.NeedsConfirm(fullScan)
 }
 
@@ -151,6 +170,9 @@ const fullScan = "전체 스캔"
 // Run 은 PartiQL SELECT 만 보낸다. 다른 문장은 ErrWrite, 파티션 키 조건이 없으면 전체 스캔이라
 // Force 없이는 ErrNeedsConfirm 이다(R63.2). NextToken 을 이어 q.Limit(0 이면 1,000)행까지 받는다.
 func (b *Backend) Run(ctx context.Context, q source.Query) (*db.Result, error) {
+	if err := b.billed(); err != nil {
+		return nil, err
+	}
 	toks := tokenize(q.Text)
 	if !isSelect(toks) {
 		return nil, source.ErrWrite

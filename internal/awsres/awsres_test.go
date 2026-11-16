@@ -30,6 +30,7 @@ func names(ns []source.Node) []string {
 // ─── 공통 ───
 
 func TestChildren_맨_위는_자격_증명을_확인한_뒤_폴더를_정한_순서로_보인다(t *testing.T) {
+	allowBilled(t)
 	b, _, _, _ := newBackend()
 	ns, err := b.Children(ctx, "")
 	if err != nil {
@@ -48,6 +49,7 @@ func TestChildren_맨_위는_자격_증명을_확인한_뒤_폴더를_정한_순
 }
 
 func TestChildren_권한_없는_폴더는_한_줄로_보이고_다른_폴더는_그대로다(t *testing.T) {
+	allowBilled(t)
 	b, sn, sq, _ := newBackend()
 	sn.topicErr = denied("AuthorizationError")
 	sq.urls = []string{"https://sqs.ap-northeast-2.amazonaws.com/111122223333/a"}
@@ -111,6 +113,7 @@ func snsFixture(sn *fakeSNS) {
 }
 
 func TestSNS_토픽은_페이지를_잇고_구독은_같은_계정_SQS_만_큐_이름으로_줄인다(t *testing.T) {
+	allowBilled(t)
 	b, sn, _, _ := newBackend()
 	snsFixture(sn)
 	ns, err := b.Children(ctx, "sns")
@@ -131,6 +134,7 @@ func TestSNS_토픽은_페이지를_잇고_구독은_같은_계정_SQS_만_큐_�
 }
 
 func TestSNS_토픽_Enter_는_구독_표이고_확인_전_구독은_속성을_묻지_않는다(t *testing.T) {
+	allowBilled(t)
 	b, sn, _, _ := newBackend()
 	snsFixture(sn)
 	res, err := b.Open(ctx, "sns/"+topicArn, 50)
@@ -167,6 +171,7 @@ func qattrs(arnName, visible, inflight, delayed, dlq string) map[string]string {
 }
 
 func TestSQS_큐_Info_는_대기_처리_중_지연이고_DLQ_에_쌓이면_경고다(t *testing.T) {
+	allowBilled(t)
 	b, _, sq, _ := newBackend()
 	sq.urls = []string{qbase + "orders", qbase + "orders-dlq", qbase + "calm", qbase + "x-acct", qbase + "broken"}
 	sq.attrs[qbase+"orders"] = qattrs("orders", "12", "3", "0", "arn:aws:sqs:ap-northeast-2:111122223333:orders-dlq")
@@ -209,6 +214,7 @@ func TestSQS_큐_Info_는_대기_처리_중_지연이고_DLQ_에_쌓이면_경�
 }
 
 func TestSQS_큐_Enter_는_QueueUrl_먼저_속성_이름순이고_JSON_은_원문이다(t *testing.T) {
+	allowBilled(t)
 	b, _, sq, _ := newBackend()
 	u := qbase + "orders"
 	sq.byName["orders"] = u
@@ -225,6 +231,7 @@ func TestSQS_큐_Enter_는_QueueUrl_먼저_속성_이름순이고_JSON_은_원�
 }
 
 func TestSQS_ARN_으로_열면_그_계정의_큐를_열고_다른_리전은_안내만_둔다(t *testing.T) {
+	allowBilled(t)
 	b, _, sq, _ := newBackend()
 	b.region = "ap-northeast-2"
 	u := "https://sqs.ap-northeast-2.amazonaws.com/999988887777/shared-dlq"
@@ -280,44 +287,71 @@ func TestLambda_함수_Info_는_런타임과_KST_수정_시각이고_Enter_는_�
 
 // ─── 대시보드 ───
 
-func TestProbe_큐_수와_DLQ_에_쌓인_큐_수를_세고_쌓이면_경고다(t *testing.T) {
-	b, _, sq, _ := newBackend()
-	sq.urls = []string{qbase + "a", qbase + "a-dlq", qbase + "b", qbase + "b-dlq"}
-	sq.attrs[qbase+"a"] = qattrs("a", "0", "0", "0", "arn:aws:sqs:ap-northeast-2:111122223333:a-dlq")
-	sq.attrs[qbase+"a-dlq"] = qattrs("a-dlq", "4", "0", "0", "")
-	sq.attrs[qbase+"b"] = qattrs("b", "9", "0", "0", "arn:aws:sqs:ap-northeast-2:111122223333:b-dlq")
-	sq.attrs[qbase+"b-dlq"] = qattrs("b-dlq", "0", "0", "0", "")
+func TestProbe_Lambda_수와_꺼진_매핑_실패한_매핑을_세고_요금_서비스는_부르지_않는다(t *testing.T) {
+	allowBilled(t) // 허용해도 대시보드는 요금 서비스를 부르지 않는다(R72)
+	b, la, trap := freeBackend()
+	la.fns = []lambdatypes.FunctionConfiguration{{FunctionName: aws.String("a")}, {FunctionName: aws.String("b")}, {FunctionName: aws.String("c")}}
+	la.mappings["a"] = []lambdatypes.EventSourceMappingConfiguration{
+		{State: aws.String("Enabled"), LastProcessingResult: aws.String("OK")},
+		{State: aws.String("Enabled"), LastProcessingResult: aws.String("No records processed")},
+		{State: aws.String("Disabled"), LastProcessingResult: aws.String("OK")},
+	}
+	la.mappings["b"] = []lambdatypes.EventSourceMappingConfiguration{{State: aws.String("Enabled"), LastProcessingResult: aws.String("PROBLEM: Function call failed")}}
 	h := b.Probe(ctx)
-	if !h.OK || h.Summary() != "큐 4 · DLQ 쌓임 1" || !h.Metrics[1].Warn || h.Metrics[0].Warn {
+	if !h.OK || h.Summary() != "Lambda 3 · 매핑 꺼짐 1 · 실패 1" || h.Metrics[0].Warn || !h.Metrics[1].Warn || !h.Metrics[2].Warn {
 		t.Fatalf("Probe = %+v", h)
 	}
-	if got := sq.attrNames[0]; slices.Contains(got, "All") || len(got) != 3 {
-		t.Fatalf("확인은 필요한 속성만 묻는다: %v", got)
+	if n := trap.calls.Load(); n != 0 {
+		t.Fatalf("요금 서비스 호출 %d번", n)
 	}
-	sq.attrs[qbase+"a-dlq"][attrVisible] = "0"
-	if h := b.Probe(ctx); h.Summary() != "큐 4 · DLQ 쌓임 0" || h.Metrics[1].Warn {
-		t.Fatalf("쌓인 것이 없으면 경고가 아니다: %+v", h)
+	la.mappings = map[string][]lambdatypes.EventSourceMappingConfiguration{"a": {{State: aws.String("Enabled"), LastProcessingResult: aws.String("OK")}}}
+	if h := b.Probe(ctx); h.Summary() != "Lambda 3 · 매핑 꺼짐 0 · 실패 0" || h.Metrics[1].Warn || h.Metrics[2].Warn {
+		t.Fatalf("문제가 없으면 경고가 아니다: %+v", h)
 	}
 }
 
-func TestProbe_큐가_많으면_앞쪽만_세고_알리며_ListQueues_실패는_실패다(t *testing.T) {
-	b, _, sq, _ := newBackend()
-	for i := range probeQueues + 5 {
-		u := fmt.Sprintf("%sq%03d", qbase, i)
-		sq.urls = append(sq.urls, u)
-		sq.attrs[u] = qattrs(fmt.Sprintf("q%03d", i), "0", "0", "0", "")
-	}
-	sq.attrErr[sq.urls[0]] = denied("AccessDenied")
-	h := b.Probe(ctx)
-	if want := fmt.Sprintf("큐 %d · DLQ 쌓임 0 (앞 %d개) · 읽기 실패 1", probeQueues+5, probeQueues); !h.OK || h.Summary() != want {
-		t.Fatalf("Probe = %q, want %q", h.Summary(), want)
-	}
-	if len(sq.attrNames) != probeQueues {
-		t.Fatalf("속성 요청 %d번", len(sq.attrNames))
-	}
-	sq.listErr = denied("AccessDenied")
-	if h := b.Probe(ctx); h.OK || h.Err != "aws sqs:ListQueues: AccessDenied: not authorized" {
+func TestProbe_목록_실패는_실패다(t *testing.T) {
+	b, la, _ := freeBackend()
+	la.fnErr = denied("AccessDeniedException")
+	if h := b.Probe(ctx); h.OK || h.Err != "aws lambda:ListFunctions: AccessDeniedException: not authorized" {
 		t.Fatalf("Probe = %+v", h)
+	}
+	la.fnErr, la.mapErr = nil, denied("AccessDeniedException")
+	if h := b.Probe(ctx); h.OK || !strings.Contains(h.Err, "lambda:ListEventSourceMappings") {
+		t.Fatalf("Probe = %+v", h)
+	}
+}
+
+// ─── 요금 막기 (R72) ───
+
+func TestBilled_막혀_있으면_SNS_SQS_S3_폴더가_없고_경로로_와도_보내지_않는다(t *testing.T) {
+	t.Setenv(source.AllowBilledEnv, "")
+	b, _, trap := freeBackend()
+	ns, err := b.Children(ctx, "")
+	if err != nil || !reflect.DeepEqual(names(ns), []string{"Lambda", "EventBridge", "Scheduler", "Step Functions"}) {
+		t.Fatalf("폴더: %v %v", names(ns), err)
+	}
+	for _, p := range []string{"sns", "sns/" + topicArn, "sqs", "s3", "s3/logs", "s3/logs/app/"} {
+		if _, err := b.Children(ctx, p); !errors.Is(err, source.ErrBilled) || err.Error() != "요금이 붙는 조회라 막음 (DB_ALLOW_BILLED=1 로 허용)" {
+			t.Errorf("Children %s: %v", p, err)
+		}
+	}
+	for _, p := range []string{"sns/" + topicArn, "sqs/orders", "sqs/arn:aws:sqs:ap-northeast-2:111122223333:orders-dlq", "s3/logs/a.txt"} {
+		if _, err := b.Open(ctx, p, 50); !errors.Is(err, source.ErrBilled) {
+			t.Errorf("Open %s: %v", p, err)
+		}
+	}
+	if n := trap.calls.Load(); n != 0 {
+		t.Fatalf("막혔는데 요금 서비스를 %d번 부름", n)
+	}
+	// 1 일 때만 연다
+	t.Setenv(source.AllowBilledEnv, "true")
+	if ns, _ := b.Children(ctx, ""); len(ns) != 4 {
+		t.Fatalf("1 이 아니면 막는다: %v", names(ns))
+	}
+	t.Setenv(source.AllowBilledEnv, "1")
+	if ns, _ := b.Children(ctx, ""); len(ns) != 7 {
+		t.Fatalf("허용하면 모든 폴더: %v", names(ns))
 	}
 }
 
