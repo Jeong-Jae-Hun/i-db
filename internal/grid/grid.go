@@ -95,6 +95,7 @@ type sortDir int
 //
 // PickEnum·EditLong 은 enum 고르기 목록·전체 화면 편집기를 열어 달라는 요청이다(v7.go). 통합은 고른 값·편집한 값을 SetCell 로 넘긴다.
 // CopyMenu 는 Ctrl+K 로 복사 고르기 창을 청한 것이다(R71). 통합이 CopyChoices 로 창을 열고 CopyWith 로 만든다.
+// Linked 는 Ctrl+B 로 커서 칸 값이 든 다른 테이블을 찾아 달라는 요청이다(R73, v5.go).
 type Action struct {
 	Status   string
 	Copy     *string
@@ -108,6 +109,7 @@ type Action struct {
 	PickEnum *PickEnum
 	EditLong *EditLong
 	CopyMenu bool
+	Linked   *Linked
 }
 
 // Export 는 내보내기 요청이다. 파일 이름·저장 위치는 통합이 정한다.
@@ -476,7 +478,7 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 			}
 		case "y":
 			a = copyAction(m.res.Text, "텍스트")
-		case "C", "F", "R", "D", "+", "-":
+		case "C", "F", "R", "D", "+", "-", "ctrl+b":
 			a.Status = "표 결과가 아님"
 		}
 
@@ -741,6 +743,25 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 					}
 				}
 				a.Follow = &Follow{Col: o.Cols[m.col], Row: row, Reverse: ks == "R"}
+			}
+		case "ctrl+b":
+			// F 처럼 보류 중인 바꿈 전, DB 에 있는 값을 넘긴다. 열 이름은 원본을 알면 별칭이 아닌 테이블 열 이름이다
+			switch {
+			case !hasRow:
+				a.Status = "찾을 행 없음"
+			case m.view[m.row] >= len(m.res.Rows):
+				a.Status = "추가한 행은 아직 DB 에 없음"
+			case cellOf(m.res.Rows[m.view[m.row]], m.col) == nullText:
+				a.Status = "값이 NULL"
+			case db.IsCappedCell(cellOf(m.res.Rows[m.view[m.row]], m.col)):
+				a.Status = "잘린 값이라 찾지 않음"
+			default:
+				l := Linked{Col: m.res.Cols[m.col], Value: cellOf(m.res.Rows[m.view[m.row]], m.col)}
+				if o := m.res.Origin; o != nil && len(o.Cols) == len(m.res.Cols) {
+					l.Table = o.Table.Table
+					l.Col = cmp.Or(o.Cols[m.col], l.Col)
+				}
+				a.Linked = &l
 			}
 		case "+", "-":
 			switch {

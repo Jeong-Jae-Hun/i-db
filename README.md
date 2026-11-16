@@ -11,6 +11,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Results grid: sort (`s` or header click), filter with `/` (`abc`, `!abc`, `col:abc`, `col=v`, `col>v`, `col=null`), re-read from the server when possible (PostgreSQL, OpenSearch `_search`, Loki `time`, DynamoDB sort key; otherwise the status line says why), `]` loads the next 1,000 rows of a truncated PostgreSQL result, copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)` (a `Ctrl+K` or right-click menu picks row / selection / visible rows / column × TSV or CSV with header, JSON, Markdown table, INSERT, `IN` list; copies go to OSC 52 and the system clipboard), charts, JSON tree, cell aggregates, result pinning and diff
 - In-place editing of single-table results (preview SQL before submit, undo of the last submit), paste from spreadsheets, CSV import
 - Server-side table view with a DataGrip-style WHERE / ORDER BY bar (column completion, `/` short filters), paging, exact count; follow foreign keys in both directions
+- Linked rows (`Ctrl+B` on a result cell, or right-click → `연결된 곳 찾기`) and `db linked`: find where a value such as `user_id = 1315` appears in other tables even without foreign keys, by column naming (`user_id`, `*_user_id`, `users.id`) across the same database and the other PostgreSQL connections of the same group and environment. Only columns that lead an index are counted (up to 100+ rows, 2 s per table, read-only); `Enter` opens the table view filtered to that value. The value is never put in tab titles, history or the session
 - Command palette (`Ctrl+P`) that runs any action or jumps to any table across connections, recently opened tables first
 - EXPLAIN / EXPLAIN ANALYZE as a plan tree, activity/locks/table sizes, cancel or terminate backends
 - Transactions in Auto or Manual mode, full-schema data search, schema diff between connections, run a statement on another connection and diff the results
@@ -181,6 +182,7 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `Ctrl+H` | history |
 | tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
 | result `Ctrl+K` (⌘K) · right-click | copy menu: target × format, remembers the last format |
+| result `Ctrl+B` (⌘B) | linked rows: other tables (and same-group, same-environment connections) holding the cell value; `Enter` opens one |
 | result `]` | load the next 1,000 rows of a truncated PostgreSQL result (up to 10,000) |
 | tree `N` / `E` | add / edit a connection (see Connections) |
 
@@ -295,6 +297,7 @@ db query -c app-stg -f queries/app/report.sql --param id=7
 db explain -c app-stg "select * from orders where id = 1"
 db redis -c app-stg-redis GET some:key
 db schema-diff -c app-stg --to app-prod --prod -s public
+db linked -c app-stg --column user_id --value 1315 --format json
 db status --format json
 db flows --format json
 db board shop-ops --format json

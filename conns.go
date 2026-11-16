@@ -783,6 +783,10 @@ func (m *model) reloadConns() tea.Cmd {
 			if t.viewConn == i {
 				t.viewDB = staleViewDB
 			}
+			// 연결된 곳 표(R73)가 가리키는 접속을 고치거나 지웠으면 Enter 로 찾은 값을 보내지 않는다
+			if t.linked != nil && slices.Contains(t.linked.conns, i) {
+				t.linked.stale = true
+			}
 			if t.conn != i {
 				continue
 			}

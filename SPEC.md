@@ -270,7 +270,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R26 정의로 이동
 
-- R26.1 편집기에서 `Ctrl+B` 또는 `F12`는 커서 아래 이름(`schema.name`, `"따옴표 이름"` 포함)을 활성 PostgreSQL 접속의 목록에서 찾는다. 테이블·뷰면 트리에서 그 노드를 고르고 구조(R14의 `d`와 같은 결과)를 연다. 함수면 `pg_get_functiondef` 결과를 텍스트로 연다. 맥에서는 ⌘B가 같은 동작이다(R23.2).
+- R26.1 편집기에서 `Ctrl+B` 또는 `F12`는 커서 아래 이름(`schema.name`, `"따옴표 이름"` 포함)을 활성 PostgreSQL 접속의 목록에서 찾는다. 테이블·뷰면 트리에서 그 노드를 고르고 구조(R14의 `d`와 같은 결과)를 연다. 함수면 `pg_get_functiondef` 결과를 텍스트로 연다. 맥에서는 ⌘B가 같은 동작이다(R23.2). 결과 영역의 `Ctrl+B`는 연결된 곳 찾기(R73)다.
   - 예: `select * from orders o` 에서 `orders` 위 → 트리에서 `public.orders` 선택, 구조 결과.
   - 예: 못 찾으면 상태 줄에 `정의를 찾지 못함: <이름>`. 같은 이름이 여러 스키마에 있으면 `search_path` 순서(R27.2)의 첫 스키마.
 
@@ -528,7 +528,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R58 CLI 하위 명령
 
-- R58.1 `db <명령>`은 화면 없이 실행하고 결과를 찍은 뒤 끝난다. 명령은 `conns`·`schemas`·`tables`·`describe`·`ddl`·`query`·`explain`·`redis`·`user360`·`search`·`schema-diff`이고 `-c <접속 이름>`으로 접속을 고른다. 출력은 `--format table|tsv|csv|json`(기본 table, 터미널이 아니면 tsv), `--max-rows`(기본 200, 상한 10,000), `--timeout`(기본 30s)이다. 종료 코드는 0 성공·1 실행 오류·2 사용법·3 안전장치 거절이다.
+- R58.1 `db <명령>`은 화면 없이 실행하고 결과를 찍은 뒤 끝난다. 명령은 `conns`·`schemas`·`tables`·`describe`·`ddl`·`query`·`explain`·`redis`·`user360`·`search`·`linked`(R73.6)·`schema-diff`이고 `-c <접속 이름>`으로 접속을 고른다. 출력은 `--format table|tsv|csv|json`(기본 table, 터미널이 아니면 tsv), `--max-rows`(기본 200, 상한 10,000), `--timeout`(기본 30s)이다. 종료 코드는 0 성공·1 실행 오류·2 사용법·3 안전장치 거절이다.
   - 예: `db query -c app-stg "select id from orders limit 3" --format json` → `{"conn":"app-stg","cols":["id"],"types":["int8"],"rows":[["1"],["2"],["3"]],"truncated":false,"elapsed_ms":9}`.
   - 예: SQL은 인자, `-f 파일`, 표준 입력 순으로 받는다. `--param 이름=값`은 `:이름`에 바인딩한다. `enc('…')`는 R52처럼 확장한다.
   - 예: 표준 입력은 인자와 `-f`가 없고 터미널이 아닐 때만 읽는다. `--timeout` 안에 닫히지 않으면 `시간 초과`로 1, 16MiB를 넘으면 1이다.
@@ -742,7 +742,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: `SQL INSERT`는 원본 테이블을 아는 결과(Origin)에서 열 대상이 아닐 때만 있고 `i`와 같은 `InsertSQL`로 고른 행 전체를 한 문으로 만든다(선택도 열 범위는 보지 않는다). `IN 목록`은 `현재 열`에만 있고 `C`와 같다(R35).
   - 단, TSV·CSV·JSON·Markdown 은 `y`·`Y`처럼 화면 값(보류 중인 바꿈·복호화 보기 반영)이고 INSERT·IN 은 `i`·`C`처럼 DB 값이다. 추가 행은 INSERT·IN 에서 빠진다.
 - R71.2 `y`·`Y`·`V` 뒤 `y`·`C`·`i`·`U`·값 보기 `y`·`Y`의 출력은 바꾸지 않는다. 헤더 붙은 꼴은 R71.1 창에서만 고른다. `Ctrl+K`는 결과 표에 쓰던 동작이 없어(편집기 복사만 있었다) 새 키를 늘리지 않고 ⌘K(복사) 짝을 그대로 쓴다.
-- R71.3 결과 칸을 마우스 오른쪽으로 누르면 커서를 그 칸으로 옮기고 결과 포커스로 바꾼 뒤 대상 `현재 행`으로 R71.1 창을 연다. 머리 줄·빈 자리·Redis 값 편집기·실행 계획 화면에서는 열지 않는다.
+- R71.3 결과 칸을 마우스 오른쪽으로 누르면 커서를 그 칸으로 옮기고 결과 포커스로 바꾼 뒤 대상 `현재 행`으로 R71.1 창을 연다. 창 맨 끝에는 복사 항목에 더해 `연결된 곳 찾기`(R73, `Ctrl+B`와 같음)가 붙는다. `Ctrl+K` 창에는 붙지 않는다. 머리 줄·빈 자리·Redis 값 편집기·실행 계획 화면에서는 열지 않는다.
 - R71.4 모든 복사(결과 표·값 보기·편집기 `Ctrl+X`·`Ctrl+K`)는 같은 함수로 OSC 52 와 시스템 클립보드에 쓴다. 시스템 명령은 맥 `pbcopy`, WSL(`WSL_DISTRO_NAME` 또는 `/proc/sys/fs/binfmt_misc/WSLInterop`)·Windows `cmd.exe /c "chcp 65001 >nul && clip"`(UTF-8 입력. WSL 이 Windows PATH 를 잇지 않으면 `/mnt/c/Windows/System32/cmd.exe`), 리눅스는 `WAYLAND_DISPLAY`가 있으면 `wl-copy` 먼저, 아니면 `xclip -selection clipboard` 먼저 PATH 에 있는 것이다. 명령은 2초 제한으로 명령 고루틴에서 돌려 화면을 막지 않는다. `DB_CLIPBOARD=osc52`는 OSC 52 만, `system`은 시스템 명령만, 기본 `both`는 둘 다다.
   - 예: `both`에서 시스템 명령이 없거나 실패해도 OSC 52 를 썼으면 조용히 넘긴다. 둘 다 실패하면 `클립보드 복사 실패: …`다.
 - R71.5 10 MB(10 MiB)를 넘는 글은 어디에도 쓰지 않고 `너무 커서 복사하지 않음 (12.3 MB) — e/E 로 내보내기`를 보인다.
@@ -758,6 +758,30 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R72.3 요금이 없는 것(늘 보냄): `sts:GetCallerIdentity`, Lambda `ListFunctions`·`ListEventSourceMappings`, EventBridge `ListEventBuses`·`ListRules`·`ListTargetsByRule`, EventBridge Scheduler `List*`·`GetSchedule`, Step Functions `ListStateMachines`·`ListExecutions`, DynamoDB `ListTables`·`DescribeTable`, Athena `GetWorkGroup`.
 - R72.4 자리마다 막을 때의 모습: aws 트리 맨 위에 `SNS 토픽`·`SQS 큐`·`S3`가 없다(R67.1). DynamoDB 는 트리·대시보드만 되고 `Enter`·편집기·정렬 다시 읽기·MCP·보드가 막힌다(R63.1). Athena 는 대시보드 `GetWorkGroup`만 되고 트리·미리 보기·편집기·MCP·보드가 막힌다(R68.1). 대시보드 aws 수치(R67.1)와 흐름 풀이(R69.3)는 허용해도 요금 API 를 부르지 않는다.
   - 단, 데이터 전송(egress) 요금은 응답을 받는 한 피할 수 없어 이 규칙 밖이다.
+
+### R73 연결된 곳 찾기
+
+들일 시간: 하루. 함정: 이름 규칙으로 고른 열이라 FK 가 없는 곳까지 잡지만 우연히 이름만 같은 열도 섞인다. 서버를 지키려고 인덱스 첫 열만 세므로 인덱스 없는 열은 목록에만 있고 0인지 모른다.
+
+- R73.1 결과 영역에서 `Ctrl+B`(맥 ⌘B, 팔레트 `연결된 곳 찾기`, 오른쪽 클릭 창의 `연결된 곳 찾기`)를 누르면 db는 커서 칸 값이 든 다른 테이블을 FK 와 상관없이 이름 규칙으로 찾아 새 탭 `연결된 곳: <열>`에 보여야 한다. 값은 보류 중인 바꿈·복호화 보기 전의 DB 값이고, 열 이름은 결과의 원본(Origin)을 알면 별칭이 아닌 테이블 열 이름이다. `Ctrl+B`는 편집기에서만 정의로 이동(R26)이고 결과 표에는 쓰던 동작이 없었다.
+  - 예: `orders` 테이블 보기의 `user_id = 1315` 칸 → `user_id`·`sender_user_id`·`target_user_id` 열과 `users.id`(주인 테이블)를 센다.
+  - 예: 칸이 NULL 이면 `값이 NULL`, 64KiB 에서 잘린 칸이면 `잘린 값이라 찾지 않음`, 추가한 행이면 `추가한 행은 아직 DB 에 없음`. Redis·저장소 결과는 `PostgreSQL 결과에서만`.
+- R73.2 후보 열은 이름 뿌리(base)로 고른다. 열이 `_id`로 끝나면 그 앞(`user_id` → `user`), 열이 `id`이고 원본 테이블을 알면 테이블 이름에서 `t_`·`tb_`를 떼고 복수형을 푼 것(`t_users` → `user`, `categories` → `category`, `addresses` → `address`)이다. 그 밖은 base 가 없다. 같은 데이터베이스의 시스템 스키마가 아닌 모든 스키마에서 일반·파티션 테이블(뷰·파티션 자식 제외)의 열 가운데 (a) 칸 열과 이름이 같거나, (b) `<base>_id`이거나 `_<base>_id`로 끝나거나, (c) 주인 테이블(`<base>`·`<base>s`·`<base>es`·`t_<base>s`·`tb_<base>` 등, `y` → `ies` 포함)의 `id`인 열을 대소문자 무시로 고른다.
+  - 예: 열이 `id`면 (a)를 쓰지 않는다(모든 테이블의 `id`가 걸린다). 원본을 모르는 결과의 `id`는 `원본 테이블을 모르는 결과의 id 는 찾지 않음`.
+  - 예: 값 타입이 맞는 열만 남긴다. 십진 정수(`-?(0|[1-9][0-9]*)`)는 `int8`과 범위 안의 `int4`·`int2`, uuid 꼴은 `uuid`, 모든 값은 `text`·`varchar`다. `007`은 정수로 보지 않는다. 열을 형 변환하면 인덱스를 못 쓰므로 그 밖의 타입은 뺀다.
+  - 단, 접속 하나에서 후보는 200열까지다(주인 테이블 먼저, 스키마·테이블·열 이름순). 넘으면 요약에 `후보 200열에서 끊음: <접속>`.
+- R73.3 db는 쓸 수 있는 인덱스(`indisvalid`·`indisready`·`indislive`, 부분 인덱스 아님)의 첫 열(`pg_index.indkey[0]`)인 후보만 세고, 나머지는 묻지 않고 `인덱스 없음 · 안 셈`으로 보여야 한다. 세기는 테이블마다 풀 연결의 READ ONLY 트랜잭션에서 `SET LOCAL statement_timeout = '2s'` 뒤 `SELECT count(*) FROM (SELECT 1 FROM <테이블> WHERE <열> = <리터럴> LIMIT 101) s`이고, 101 은 `100+`로 보인다. 식별자는 `QuoteIdent`, 값은 `QuoteLiteral`로 감싼다.
+  - 예: 부분 인덱스(`… WHERE user_id > 0`), 만드는 중이거나 깨진 인덱스, 식 인덱스(`(user_id + 0)`), 둘째 열 이하인 인덱스만 있는 열은 `인덱스 없음 · 안 셈`이다.
+  - 예: 접속은 2곳씩, 접속마다 3개씩 동시에 센다(접속 풀 4 연결 중 하나는 목록 읽기·테이블 보기에 남긴다). 같은 그룹 접속이 많아도 동시 쿼리는 6개를 넘지 않는다. 전체는 20초 안에 끝나고 `Ctrl+C`·`esc`·탭 닫기로 멈춘다.
+  - 예: 2초를 넘은 테이블은 `2초 넘어 멈춤`, 그 밖의 실패는 `오류: …`이고 나머지는 그대로 센다.
+- R73.4 같은 그룹이고 환경(R6.2)이 같은 다른 PostgreSQL 접속도 같은 규칙으로 찾는다. 그룹이 없는 접속은 자기만 본다. 닿지 않는 접속은 `접속 실패: …` 한 줄이고 나머지는 이어서 센다.
+  - 예: `app-stg`(그룹 `app`)에서 찾으면 `app2-stg`는 들고 `app-prod`·Redis 는 들지 않는다. prod 접속은 지금 접속이 prod 일 때만 닿는다.
+- R73.5 결과 표의 열은 `connection`·`table`(`스키마.테이블`)·`column`·`rows`·`note`다. 줄은 접속 실패, 주인 테이블, 센 행 수 큰 순, 세지 않은 열(인덱스 없음·실패), 0행 순이고 같으면 접속·테이블·열 이름순이다. 0행 줄이 50개를 넘으면 표에서 빼고 요약에 `0행 N개 뺌`만 둔다. 상태 줄 요약은 `연결된 곳 N · 접속 N곳 · 0행 N · 인덱스 없어 안 셈 N · 실패 N`이다.
+  - 예: 표에서 `Enter`는 그 줄의 접속에서 그 테이블을 테이블 보기(R16)로 새 탭에 열고 WHERE 를 `"<열>" = <값>`으로 채운다. 접속 실패 줄은 `열 테이블이 없는 줄`. 찾는 사이 그 접속의 데이터베이스를 바꿨으면(R27.1) `찾는 사이 데이터베이스를 바꿔 열지 않음`. 찾은 뒤 그 접속을 고치거나 지웠거나(R59.3) 호스트·포트·사용자·환경이 찾을 때와 다르면 `찾은 뒤 접속을 고치거나 지워 열지 않음 (다시 찾으세요)`이다. 찾은 값을 다른 서버(prod 일 수도 있다)로 보내지 않기 위해서다.
+  - 단, 찾는 값은 탭 제목·실행 기록·세션에 남기지 않는다(R51 과 같다). 찾기를 시작할 때 상태 줄에 `연결된 곳 찾는 중: <열> = <값>`으로 한 번 보인다. 값은 SQL 리터럴로 보내므로 서버 로그에는 보일 수 있다. Enter 로 연 테이블 보기의 WHERE 칸에는 값이 보이지만, 그 보기의 페이지·정렬·WHERE 다시 읽기는 실행 기록에 남기지 않는다.
+- R73.6 CLI `db linked -c <접속> --column <열> --value <값> [--table 스키마.테이블]`은 같은 규칙으로 찾아 R73.5 표를 찍는다(`--format table|tsv|csv|json`). 요약은 table 은 표 아래, tsv·csv 는 stderr, json 은 `text`다. 같은 그룹·환경 접속도 찾고, prod 접속은 `--prod`가 필요하다(R58.2). `--column`·`--value`가 없거나, 열이 `id`인데 `--table`이 없으면 2다. 접속·테이블 하나라도 실패하면 결과를 찍고 1이다. 인덱스 없어 세지 않은 열은 실패가 아니다.
+  - 예: `db linked -c app-stg --column user_id --value 1315 --format json` → `{"conn":"app-stg","cols":["connection","table","column","rows","note"],…,"text":"연결된 곳 3 · 접속 2곳 · …"}`.
+  - 단, MCP 도구는 없다. PostgreSQL 만 부르므로 요금 붙는 조회(R72)와 상관없다.
 
 ## 4. 화면과 키
 
@@ -777,7 +801,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Ctrl+E` / `Alt+E` (⌘E / ⌥⌘E) | 실행 계획 나무 / ANALYZE, BUFFERS |
 | `F8` / `F9` / `F10` / `F11` (⌥⌘L / ⌘⇧M / ⌘⇧↩ / ⌘⇧⌫) | SQL 정렬 / Auto·Manual / COMMIT / ROLLBACK |
 | `Ctrl+N` (⌘N) | 객체 찾기: 테이블·뷰·열·함수·Redis 키(R56, 자동완성 창이 열려 있으면 아래로 이동) |
-| `Ctrl+B` 또는 `F12` (⌘B) | 편집기 커서 아래 이름의 정의로 이동 |
+| `Ctrl+B` 또는 `F12` (⌘B) | 편집기 커서 아래 이름의 정의로 이동(결과 영역 `Ctrl+B`는 R73) |
 | `F3` / `F4` (⌘⇧O / ⌘⇧S) | 즐겨찾기 열기(목록 `d`·`Ctrl+D` 지우기) / 저장 |
 | `F6` / `F7` (⌘⇧D / ⌘⇧E) | 스키마 고르기 / 마지막 표 결과 전체 내보내기(`esc` 취소) |
 | `Ctrl+H` (⌘H) | 실행 기록 |
@@ -806,8 +830,9 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | 칸 고치는 중 `space` · `now`·`today` · `Ctrl+O` | bool 순환 · 지금 시각 · 전체 화면 편집기(`Ctrl+S` 저장, `F8` JSON 정렬, `esc` 버림, R49) |
 | 결과 `w` `[` `]` `#` · `p` `P` `{` `}` · `K` `X` · `t` | 테이블 보기 WHERE·페이지·개수(일반 결과 `]`는 다음 1,000행 더 읽기, R14.7) · 결과 고정·풀기·이동 · 백엔드 취소·종료 · 계획 나무↔JSON |
 | 결과 `c` · `V` · `=` | 차트(R28) · 사각형 선택 합계(R31.1) · 고정 결과와 비교(R31.2) |
-| 결과 `Ctrl+K` (⌘K) · 오른쪽 클릭 | 복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN(R71) |
+| 결과 `Ctrl+K` (⌘K) · 오른쪽 클릭 | 복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN(R71). 오른쪽 클릭 창 끝에는 `연결된 곳 찾기`(R73) |
 | 결과 `C` · `F` `R` · `D` · `+` `-` | IN 목록 복사(R35) · 외래 키 따라가기·참조하는 테이블(R36) · 복호화 보기(R37) · 칸 값으로 WHERE 거르기(R38) |
+| 결과 `Ctrl+B` (⌘B) | 연결된 곳 찾기: 칸 값이 든 다른 테이블·같은 그룹·환경 접속을 이름 규칙으로 세고 `Enter`로 테이블 보기(R73) |
 | `Ctrl+P` (⌘P) | 명령 팔레트(R40, 자동완성 창이 열려 있으면 위로 이동) |
 | 값 보기 `t` `Enter` `y` `Y` | JSON 나무↔원문 / 접기·펴기 / 값·경로 복사(R32) |
 | `q` | 트리·결과에서 종료(실행 중이면 취소 후) |
