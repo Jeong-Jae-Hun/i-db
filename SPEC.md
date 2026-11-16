@@ -720,7 +720,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R71 복사 꼴 고르기
 
-들일 시간: 하루. 함정: OSC 52 를 막은 터미널(설정에 따라 iTerm2·tmux·Windows Terminal 일부)에서는 복사가 조용히 사라진다. 그래서 시스템 클립보드 명령에도 같이 쓴다. `clip.exe`는 BOM 없는 입력을 콘솔 코드 페이지로 읽어 한글이 깨진다.
+들일 시간: 하루. 함정: OSC 52 를 막은 터미널(설정에 따라 iTerm2·tmux·Windows Terminal 일부)에서는 복사가 조용히 사라진다. 그래서 시스템 클립보드 명령에도 같이 쓴다. `clip.exe`는 입력을 콘솔 코드 페이지로 읽는다. BOM 붙은 UTF-16LE 는 BOM 이 U+FEFF 로 남고, BOM 없는 UTF-16LE 는 한 글자를 글자로 알아보지 못한다.
 
 - R71.1 결과 영역에서 `Ctrl+K`(맥 ⌘K, 팔레트 `복사 꼴 고르기`)는 복사 고르기 창을 연다. 항목은 `대상 · 꼴`이고 다른 고르기 창처럼 글자로 거른다. 대상은 `현재 행`·`선택`(`V` 중에만)·`보이는 행 전체`(거른 행, 보이는 순서)·`현재 열`(보이는 행의 커서 열 값, 줄마다 하나)이다. 꼴은 `TSV (헤더)`·`CSV (헤더)`·`JSON`·`Markdown 표`·`SQL INSERT`·`IN 목록`이다. 고르면 복사하고 상태 줄에 `복사함 (N줄) · <항목>`을 보인다(IN 목록은 뒤에 `C`의 상태 글을 붙인다). 칸 길이 합이 10MiB를 넘을 대상은 글을 만들기 전에 `너무 커서 복사하지 않음`으로 멈춘다. 행이 없거나 표 화면이 아니면 열지 않는다.
   - 예: 커서는 기본 대상(선택 중이면 `선택`, 아니면 `현재 행`)에서 이 세션에 마지막으로 고른 꼴에 둔다(처음은 TSV). 그 대상에 없는 꼴이면 그 꼴이 있는 첫 대상이다. 기억은 끄면 사라진다.
@@ -729,7 +729,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 단, TSV·CSV·JSON·Markdown 은 `y`·`Y`처럼 화면 값(보류 중인 바꿈·복호화 보기 반영)이고 INSERT·IN 은 `i`·`C`처럼 DB 값이다. 추가 행은 INSERT·IN 에서 빠진다.
 - R71.2 `y`·`Y`·`V` 뒤 `y`·`C`·`i`·`U`·값 보기 `y`·`Y`의 출력은 바꾸지 않는다. 헤더 붙은 꼴은 R71.1 창에서만 고른다. `Ctrl+K`는 결과 표에 쓰던 동작이 없어(편집기 복사만 있었다) 새 키를 늘리지 않고 ⌘K(복사) 짝을 그대로 쓴다.
 - R71.3 결과 칸을 마우스 오른쪽으로 누르면 커서를 그 칸으로 옮기고 결과 포커스로 바꾼 뒤 대상 `현재 행`으로 R71.1 창을 연다. 머리 줄·빈 자리·Redis 값 편집기·실행 계획 화면에서는 열지 않는다.
-- R71.4 모든 복사(결과 표·값 보기·편집기 `Ctrl+X`·`Ctrl+K`)는 같은 함수로 OSC 52 와 시스템 클립보드에 쓴다. 시스템 명령은 맥 `pbcopy`, WSL(`WSL_DISTRO_NAME` 또는 `/proc/sys/fs/binfmt_misc/WSLInterop`)·Windows `clip.exe`(BOM 붙은 UTF-16LE), 리눅스는 `WAYLAND_DISPLAY`가 있으면 `wl-copy` 먼저, 아니면 `xclip -selection clipboard` 먼저 PATH 에 있는 것이다. 명령은 2초 제한으로 명령 고루틴에서 돌려 화면을 막지 않는다. `DB_CLIPBOARD=osc52`는 OSC 52 만, `system`은 시스템 명령만, 기본 `both`는 둘 다다.
+- R71.4 모든 복사(결과 표·값 보기·편집기 `Ctrl+X`·`Ctrl+K`)는 같은 함수로 OSC 52 와 시스템 클립보드에 쓴다. 시스템 명령은 맥 `pbcopy`, WSL(`WSL_DISTRO_NAME` 또는 `/proc/sys/fs/binfmt_misc/WSLInterop`)·Windows `cmd.exe /c "chcp 65001 >nul && clip"`(UTF-8 입력. WSL 이 Windows PATH 를 잇지 않으면 `/mnt/c/Windows/System32/cmd.exe`), 리눅스는 `WAYLAND_DISPLAY`가 있으면 `wl-copy` 먼저, 아니면 `xclip -selection clipboard` 먼저 PATH 에 있는 것이다. 명령은 2초 제한으로 명령 고루틴에서 돌려 화면을 막지 않는다. `DB_CLIPBOARD=osc52`는 OSC 52 만, `system`은 시스템 명령만, 기본 `both`는 둘 다다.
   - 예: `both`에서 시스템 명령이 없거나 실패해도 OSC 52 를 썼으면 조용히 넘긴다. 둘 다 실패하면 `클립보드 복사 실패: …`다.
 - R71.5 10 MB(10 MiB)를 넘는 글은 어디에도 쓰지 않고 `너무 커서 복사하지 않음 (12.3 MB) — e/E 로 내보내기`를 보인다.
 
