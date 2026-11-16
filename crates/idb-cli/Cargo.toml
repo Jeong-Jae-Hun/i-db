@@ -11,8 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 idb-core.workspace = true
+idb-sources.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
+tempfile.workspace = true

@@ -2,24 +2,30 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use idb_core::project::{self, Conn, Project, SOURCE_DB, folder_of, go_quote};
+use idb_core::project::{self, Conn, Kind, Project, SOURCE_DB, folder_of, go_quote};
 use idb_core::result::QueryResult;
 
+use crate::command::{self, Env};
 use crate::goflag::{FlagDef, FlagSet, FlagType, ParseError, Parsed};
 use crate::output::{self, CliResult};
 use crate::usage_text::{CONN_USAGE, HISTORY_USAGE, UPDATE_USAGE};
 use idb_core::gostrconv::{duration_string, parse_duration};
+use idb_sources::Clients;
+use tokio::time::Instant;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERR: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
-#[allow(dead_code)] // 안전장치 거절은 query·redis 를 옮기는 다음 PR 에서 쓴다
 pub const EXIT_REFUSED: i32 = 3;
 
 const CLI_DEFAULT_ROWS: i64 = 200;
 const CLI_MAX_ROWS: i64 = 10000;
 const MAX_FLAG_DAYS: i64 = 3650;
+/// 저장소 질의의 기본 한도다(R62.2). --max-rows 를 주면 그 값이다
+const SOURCE_DEFAULT_ROWS: i64 = 1000;
 const PROJECT_USAGE: &str = "DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더";
 
 const FORMATS: [&str; 4] = ["table", "tsv", "csv", "json"];
@@ -166,8 +172,9 @@ fn default_project_dir() -> String {
         .unwrap_or_else(|| ".".into())
 }
 
-// 칸 대부분은 query·redis·저장소 명령을 옮기는 다음 PR 에서 읽는다
+// since·until·conns 는 저장소·status·flows 명령을 옮기는 다음 PR 에서 읽는다
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct Opts {
     pub cmd: String,
     pub dir: String,
@@ -420,7 +427,7 @@ fn cli_help(args: &[String], stdout: &mut String, stderr: &mut String) -> i32 {
 
 /// `db <명령> …` 을 실행하고 종료 코드를 돌려준다. stdin 이 None 이면(터미널) 표준 입력에서 SQL 을 읽지 않는다.
 /// tty 는 표준 출력이 터미널인지다(기본 출력 형식).
-pub fn run_cli(args: &[String], _stdin: Option<&mut dyn Read>, stdout: &mut String, stderr: &mut String, tty: bool) -> i32 {
+pub fn run_cli(args: &[String], stdin: Option<Box<dyn Read + Send>>, stdout: &mut String, stderr: &mut String, tty: bool) -> i32 {
     let cmd = args[0].as_str();
     match cmd {
         "help" => return cli_help(&args[1..], stdout, stderr),
@@ -430,7 +437,7 @@ pub fn run_cli(args: &[String], _stdin: Option<&mut dyn Read>, stdout: &mut Stri
         }
         _ => {}
     }
-    let o = match parse_cli(cmd, &args[1..], tty, stderr) {
+    let mut o = match parse_cli(cmd, &args[1..], tty, stderr) {
         Ok(o) => o,
         Err(code) => return code,
     };
@@ -441,13 +448,67 @@ pub fn run_cli(args: &[String], _stdin: Option<&mut dyn Read>, stdout: &mut Stri
             return EXIT_ERR;
         }
     };
-    let results = match o.cmd.as_str() {
-        "conns" => vec![conns_result(&proj, &o)],
-        _ => {
-            stderr.push_str(&format!("db {cmd}: not yet ported to db-rs\n"));
+    let source = proj.conn_by_name(&o.conn).is_some_and(|c| c.kind.is_some_and(Kind::is_source));
+    // 저장소 결과 한도는 따로 주지 않으면 1,000행이다(R62.2)
+    if source && !o.max_rows_set {
+        o.max_rows = SOURCE_DEFAULT_ROWS;
+    }
+    if o.cmd == "conns" {
+        return output::write_results(stdout, stderr, &o, vec![conns_result(&proj, &o)]);
+    }
+    if matches!(o.cmd.as_str(), "status" | "flows" | "board") || source && o.cmd != "user360" {
+        stderr.push_str(&format!("db {cmd}: not yet ported to db-rs\n"));
+        return EXIT_ERR;
+    }
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            stderr.push_str(&format!("{e}\n"));
             return EXIT_ERR;
         }
     };
+    let env = Env {
+        o: &o,
+        proj: &proj,
+        clients: Arc::new(Clients::new()),
+        deadline: Instant::now() + Duration::from_nanos(o.timeout_ns as u64),
+    };
+    let start = std::time::Instant::now();
+    let results = rt.block_on(command::run_command(&env, stdin, stderr));
+    let elapsed = start.elapsed();
+    rt.block_on(env.clients.close());
+    let mut results = match results {
+        Ok(r) => r,
+        Err(e) => {
+            stderr.push_str(&env.err_text(&e, &[&o.conn, &o.to]));
+            stderr.push('\n');
+            return e.code();
+        }
+    };
+    if o.decrypt
+        && let Err(e) = command::decrypt_results(&proj, &mut results, stderr)
+    {
+        stderr.push_str(&env.err_text(&command::CmdError::Run(idb_sources::Error::msg(e)), &[&o.conn, &o.to]));
+        stderr.push('\n');
+        return EXIT_ERR;
+    }
+    for r in &mut results {
+        if let Some(err) = &r.err {
+            let text = env.err_text(&command::CmdError::Run(idb_sources::Error::msg(err.clone())), &[&r.conn]);
+            stderr.push_str(&format!("{}: {text}\n", r.title));
+            r.err = Some(text);
+            continue;
+        }
+        let Some(res) = r.res.as_mut() else { continue };
+        if res.elapsed.is_zero() {
+            res.elapsed = elapsed;
+        }
+        let max = o.max_rows as usize;
+        if res.rows.len() > max {
+            res.rows.truncate(max);
+            res.truncated = true;
+        }
+    }
     output::write_results(stdout, stderr, &o, results)
 }
 
