@@ -1,0 +1,1 @@
+[{"title": "app users", "conn": "app-prod", "by": ["email", "id"], "sql": "select * from users where email = :email_enc or id = :id limit 50"}]

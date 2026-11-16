@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","app-stg","--write","drop table t"]
+exit: 3
+--- stdout
+--- stderr
+위험: DROP (--force)

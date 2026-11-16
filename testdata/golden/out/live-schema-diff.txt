@@ -1,0 +1,5 @@
+args: ["schema-diff","-p","{P}","-c","golden-local","--to","golden-local","-s","golden","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["구분","대상","왼쪽","오른쪽"],"types":["text","text","text","text"],"rows":[],"truncated":false,"elapsed_ms":0}
+--- stderr

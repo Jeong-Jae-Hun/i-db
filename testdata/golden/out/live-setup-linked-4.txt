@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","insert into golden.gparent values (1)","--write","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","text":"INSERT 0 1","elapsed_ms":0}
+--- stderr

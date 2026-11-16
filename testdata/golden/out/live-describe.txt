@@ -1,0 +1,5 @@
+args: ["describe","-p","{P}","-c","golden-local","golden.t","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["name","type","nullable","default","comment"],"types":[],"rows":[["id","integer","NO","",""],["name","text","NO","",""],["score","numeric(10,2)","YES","",""],["ok","boolean","YES","",""],["at","timestamp without time zone","YES","",""],["doc","jsonb","YES","",""],["tags","text[]","YES","",""],["raw","bytea","YES","",""],["uid","uuid","YES","",""],["note","text","YES","",""]],"text":"constraints:\n  t_pkey  PRIMARY KEY (id)\nindexes:\n  t_pkey  CREATE UNIQUE INDEX t_pkey ON golden.t USING btree (id)","truncated":false,"elapsed_ms":0}
+--- stderr

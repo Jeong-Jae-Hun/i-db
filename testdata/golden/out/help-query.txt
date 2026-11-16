@@ -1,0 +1,34 @@
+args: ["help","query"]
+exit: 0
+--- stdout
+사용법: db query -c 접속 [SQL | -f 파일 | < 표준입력] [--param 이름=값] [--write [--force]]
+  SQL 한 문장 실행(기본 READ ONLY). 저장소 접속은 그 질의(OpenSearch·LogQL·PromQL·PartiQL)를 보내고 비싼 질의는 --force
+
+플래그:
+  -c string
+    	접속 이름(db conns)
+  -decrypt
+    	staticEncrypt 칸을 접속 그룹 키로 풀어 찍기
+  -f string
+    	SQL·명령을 읽을 파일
+  -force
+    	--write 에서 위험 문장(R25)·숨은 쓰기 허용, 저장소는 비싼 질의 허용(R60.2)
+  -format string
+    	출력 형식 table|tsv|csv|json (기본: 터미널이면 table, 아니면 tsv)
+  -max-rows int
+    	최대 행 수(상한 10000) (default 200)
+  -p string
+    	DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더 (default "/golden/project")
+  -param value
+    	이름=값, SQL 의 :이름 에 바인딩(여러 번)
+  -prod
+    	prod 접속 허용(읽기만)
+  -since value
+    	Loki·Prometheus 범위 시작(지금부터 거슬러, 1h·15m·7d, 기본 1h)
+  -timeout duration
+    	전체 시간 제한 (default 30s)
+  -until value
+    	범위 끝(지금부터 거슬러, 기본 0)
+  -write
+    	쓰기 허용(prod 는 거절)
+--- stderr

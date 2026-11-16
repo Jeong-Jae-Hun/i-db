@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","app-stg-redis","SET","a","b"]
+exit: 3
+--- stdout
+--- stderr
+읽기 명령이 아님 (쓰기는 --write)

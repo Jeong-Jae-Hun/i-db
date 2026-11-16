@@ -1,0 +1,13 @@
+args: ["help","history"]
+exit: 0
+--- stdout
+사용법:
+  db history [--conn 접속] [--since 24h] [--limit 50] [--format table|tsv|json]
+  db history show <id> [--format table|tsv|json]
+
+  실행 기록(최근 것부터)을 찍는다. --since 는 지금부터 거슬러 볼 기간(1h·24h·7d)이다.
+  result 열의 ◆ 는 결과 사본이 있다는 뜻이고 show <id> 가 그 사본을 찍는다(첫 1,000행·1MiB).
+  비밀값이 든 문장은 기록 때 이미 가렸고 사본도 없다.
+
+종료 코드: 0 성공 · 1 실행 오류(사본 없음 포함) · 2 사용법
+--- stderr

@@ -1,0 +1,3 @@
+[
+  {"name": "hub-stg", "outbox": {"conn": "app-stg", "table": "public.t_outbox", "type": "event_type", "retry": "retry_count", "due": "check_needed_at"}, "aws": "aws-stg", "topic": "stg-hub", "queues": [{"name": "stg-hub-queue", "dlq": "stg-hub-dlq"}]}
+]

@@ -1,0 +1,15 @@
+args: ["describe","-p","{P}","-c","golden-local","golden.child","--format","table"]
+exit: 0
+--- stdout
+name  type     nullable  default  comment
+----  -------  --------  -------  -------
+id    integer  NO                 
+t_id  integer  YES                
+memo  text     YES                
+(3행)
+constraints:
+  child_pkey  PRIMARY KEY (id)
+  child_t_id_fkey  FOREIGN KEY (t_id) REFERENCES golden.t(id)
+indexes:
+  child_pkey  CREATE UNIQUE INDEX child_pkey ON golden.child USING btree (id)
+--- stderr

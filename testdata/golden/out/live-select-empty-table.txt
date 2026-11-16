@@ -1,0 +1,7 @@
+args: ["query","-p","{P}","-c","golden-local","select * from golden.t where false","--format","table"]
+exit: 0
+--- stdout
+id  name  score  ok  at  doc  tags  raw  uid  note
+--  ----  -----  --  --  ---  ----  ---  ---  ----
+(0행)
+--- stderr

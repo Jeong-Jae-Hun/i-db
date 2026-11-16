@@ -1,0 +1,5 @@
+args: ["explain","-p","{P}","-c","app-stg","explain analyze select 1"]
+exit: 3
+--- stdout
+--- stderr
+EXPLAIN ANALYZE·쓰기 문장 EXPLAIN 은 실행하지 않음: only read-only statements are allowed (select, with, values, table, show, explain without analyze)

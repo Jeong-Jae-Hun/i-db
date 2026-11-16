@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","golden-local-redis","HGETALL","golden:h","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local-redis","cols":["key","value"],"types":[],"rows":[["f1","v1"],["f2","v2"]],"truncated":false,"elapsed_ms":0}
+--- stderr

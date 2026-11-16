@@ -1,0 +1,26 @@
+args: ["help","redis"]
+exit: 0
+--- stdout
+사용법: db redis -c 접속 명령 [인자…] [--write [--force]]
+  Redis 명령 하나(기본 읽기 명령만). - 로 시작하는 인자는 -- 뒤에 쓴다
+
+플래그:
+  -c string
+    	접속 이름(db conns)
+  -f string
+    	SQL·명령을 읽을 파일
+  -force
+    	--write 에서 위험 문장(R25)·숨은 쓰기 허용, 저장소는 비싼 질의 허용(R60.2)
+  -format string
+    	출력 형식 table|tsv|csv|json (기본: 터미널이면 table, 아니면 tsv)
+  -max-rows int
+    	최대 행 수(상한 10000) (default 200)
+  -p string
+    	DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더 (default "/golden/project")
+  -prod
+    	prod 접속 허용(읽기만)
+  -timeout duration
+    	전체 시간 제한 (default 30s)
+  -write
+    	쓰기 허용(prod 는 거절)
+--- stderr

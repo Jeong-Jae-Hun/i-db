@@ -1,0 +1,1237 @@
+[
+ {
+  "name": "help",
+  "project": "offline",
+  "args": [
+   "help"
+  ]
+ },
+ {
+  "name": "help-query",
+  "project": "offline",
+  "args": [
+   "help",
+   "query"
+  ]
+ },
+ {
+  "name": "help-conns",
+  "project": "offline",
+  "args": [
+   "help",
+   "conns"
+  ]
+ },
+ {
+  "name": "help-redis",
+  "project": "offline",
+  "args": [
+   "help",
+   "redis"
+  ]
+ },
+ {
+  "name": "help-describe",
+  "project": "offline",
+  "args": [
+   "help",
+   "describe"
+  ]
+ },
+ {
+  "name": "help-explain",
+  "project": "offline",
+  "args": [
+   "help",
+   "explain"
+  ]
+ },
+ {
+  "name": "help-linked",
+  "project": "offline",
+  "args": [
+   "help",
+   "linked"
+  ]
+ },
+ {
+  "name": "help-schema-diff",
+  "project": "offline",
+  "args": [
+   "help",
+   "schema-diff"
+  ]
+ },
+ {
+  "name": "help-user360",
+  "project": "offline",
+  "args": [
+   "help",
+   "user360"
+  ]
+ },
+ {
+  "name": "help-flows",
+  "project": "offline",
+  "args": [
+   "help",
+   "flows"
+  ]
+ },
+ {
+  "name": "help-board",
+  "project": "offline",
+  "args": [
+   "help",
+   "board"
+  ]
+ },
+ {
+  "name": "help-status",
+  "project": "offline",
+  "args": [
+   "help",
+   "status"
+  ]
+ },
+ {
+  "name": "help-conn",
+  "project": "offline",
+  "args": [
+   "help",
+   "conn"
+  ]
+ },
+ {
+  "name": "help-history",
+  "project": "offline",
+  "args": [
+   "help",
+   "history"
+  ]
+ },
+ {
+  "name": "help-update",
+  "project": "offline",
+  "args": [
+   "help",
+   "update"
+  ]
+ },
+ {
+  "name": "help-unknown",
+  "project": "offline",
+  "args": [
+   "help",
+   "nope"
+  ]
+ },
+ {
+  "name": "conns-json",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "conns-tsv",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv"
+  ]
+ },
+ {
+  "name": "conns-table",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "conns-csv",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "csv"
+  ]
+ },
+ {
+  "name": "query-no-conn",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "select 1"
+  ]
+ },
+ {
+  "name": "query-unknown-conn",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "nope",
+   "select 1"
+  ]
+ },
+ {
+  "name": "query-redis-conn",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg-redis",
+   "select 1"
+  ]
+ },
+ {
+  "name": "query-prod-without-flag",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-prod",
+   "select 1"
+  ]
+ },
+ {
+  "name": "query-prod-write",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-prod",
+   "--prod",
+   "--write",
+   "delete from t where id = 1"
+  ]
+ },
+ {
+  "name": "query-write-not-readonly",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "delete from t where id = 1"
+  ]
+ },
+ {
+  "name": "query-write-danger",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "--write",
+   "delete from t"
+  ]
+ },
+ {
+  "name": "query-write-ddl",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "--write",
+   "drop table t"
+  ]
+ },
+ {
+  "name": "query-force-without-write",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "--force",
+   "select 1"
+  ]
+ },
+ {
+  "name": "query-bad-format",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "--format",
+   "xml",
+   "select 1"
+  ]
+ },
+ {
+  "name": "explain-analyze",
+  "project": "offline",
+  "args": [
+   "explain",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "explain analyze select 1"
+  ]
+ },
+ {
+  "name": "redis-keys",
+  "project": "offline",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg-redis",
+   "KEYS",
+   "*"
+  ]
+ },
+ {
+  "name": "redis-write-without-flag",
+  "project": "offline",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg-redis",
+   "SET",
+   "a",
+   "b"
+  ]
+ },
+ {
+  "name": "redis-prod-write",
+  "project": "offline",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "app-prod-redis",
+   "--prod",
+   "--write",
+   "SET",
+   "a",
+   "b"
+  ]
+ },
+ {
+  "name": "redis-flushall",
+  "project": "offline",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg-redis",
+   "--write",
+   "FLUSHALL"
+  ]
+ },
+ {
+  "name": "user360-without-prod",
+  "project": "offline",
+  "args": [
+   "user360",
+   "-p",
+   "{P}",
+   "a@example.com"
+  ]
+ },
+ {
+  "name": "logs-on-pg",
+  "project": "offline",
+  "args": [
+   "logs",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "{}"
+  ]
+ },
+ {
+  "name": "linked-missing-value",
+  "project": "offline",
+  "args": [
+   "linked",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg",
+   "--column",
+   "user_id"
+  ]
+ },
+ {
+  "name": "describe-no-table",
+  "project": "offline",
+  "args": [
+   "describe",
+   "-p",
+   "{P}",
+   "-c",
+   "app-stg"
+  ]
+ },
+ {
+  "name": "live-setup-drop",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "drop schema if exists golden cascade",
+   "--write",
+   "--force",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-schema",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "create schema golden",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-table",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "create table golden.t (id int primary key, name text not null, score numeric(10,2), ok boolean, at timestamp, doc jsonb, tags text[], raw bytea, uid uuid, note text)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-child",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "create table golden.child (id int primary key, t_id int references golden.t(id), memo text)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-insert",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "insert into golden.t values (1, '하나', 1.50, true, '2026-01-02 03:04:05', '{\"a\": 1, \"b\": [1, 2]}', '{x,y}', '\\x0102', '00000000-0000-0000-0000-00000000000a', null), (2, 'two\ttab', -3, false, null, null, '{}', null, null, 'line1\nline2'), (3, '넓은글자열맞춤', 1000000, null, '2026-12-31 23:59:59', '[]', null, '\\x', null, '')",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-child-insert",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "insert into golden.child values (10, 1, 'c1'), (11, 1, 'c2'), (12, 2, null)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-linked-1",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "create table golden.gparent (id int primary key)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-linked-2",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "create table golden.gchild (id int primary key, gparent_id int)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-linked-3",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "create index on golden.gchild (gparent_id)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-linked-4",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "insert into golden.gparent values (1)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-setup-linked-5",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "insert into golden.gchild values (1, 1), (2, 1)",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-json",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select * from golden.t order by id",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-tsv",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select * from golden.t order by id",
+   "--format",
+   "tsv"
+  ]
+ },
+ {
+  "name": "live-select-table",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select * from golden.t order by id",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "live-select-csv",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select * from golden.t order by id",
+   "--format",
+   "csv"
+  ]
+ },
+ {
+  "name": "live-select-max-rows",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select g from generate_series(1, 5) g",
+   "--max-rows",
+   "3",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-max-rows-table",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select g from generate_series(1, 5) g",
+   "--max-rows",
+   "3",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "live-select-max-rows-tsv",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select g from generate_series(1, 5) g",
+   "--max-rows",
+   "3",
+   "--format",
+   "tsv"
+  ]
+ },
+ {
+  "name": "live-select-param",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select id, name from golden.t where id = :id",
+   "--param",
+   "id=2",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-enc",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select enc('a@example.com') as e",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-decrypt",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select enc('a@example.com') as e",
+   "--decrypt",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-stdin",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "--format",
+   "tsv"
+  ],
+  "stdin": "select count(*) as n from golden.t;\n"
+ },
+ {
+  "name": "live-select-types",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select 1::int2 a, 2::int8 b, 1.5::float8 c, 'x'::varchar d, now()::date - now()::date e, interval '1 day 2 hours' f, '{\"k\":\"v\"}'::json g, array[1,2] h, null::text i",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-empty",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select * from golden.t where false",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-select-empty-table",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select * from golden.t where false",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "live-error-missing-table",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select * from golden.none",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-error-syntax",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "selec 1",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-readonly-cte-write",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "with x as (insert into golden.t (id, name) values (99, 'x') returning 1) select * from x",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-explain",
+  "project": "live",
+  "args": [
+   "explain",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "select 1",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-tables",
+  "project": "live",
+  "args": [
+   "tables",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "-s",
+   "golden",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-describe",
+  "project": "live",
+  "args": [
+   "describe",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "golden.t",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-describe-table",
+  "project": "live",
+  "args": [
+   "describe",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "golden.child",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "live-ddl",
+  "project": "live",
+  "args": [
+   "ddl",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "-s",
+   "golden",
+   "t",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-search",
+  "project": "live",
+  "args": [
+   "search",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "-s",
+   "golden",
+   "넓은",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-linked",
+  "project": "live",
+  "args": [
+   "linked",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "--table",
+   "golden.gparent",
+   "--column",
+   "id",
+   "--value",
+   "1",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-schema-diff",
+  "project": "live",
+  "args": [
+   "schema-diff",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "--to",
+   "golden-local",
+   "-s",
+   "golden",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-write-update",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "update golden.t set note = 'n' where id = 3",
+   "--write",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-write-update-table",
+  "project": "live",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local",
+   "update golden.t set note = 'm' where id = 3",
+   "--write",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "live-redis-del",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--write",
+   "--force",
+   "DEL",
+   "golden:s",
+   "golden:h",
+   "golden:l",
+   "golden:z",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-set",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--write",
+   "SET",
+   "golden:s",
+   "값 value",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-hset",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--write",
+   "HSET",
+   "golden:h",
+   "f1",
+   "v1",
+   "f2",
+   "v2",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-rpush",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--write",
+   "RPUSH",
+   "golden:l",
+   "a",
+   "b",
+   "c",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-zadd",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--write",
+   "ZADD",
+   "golden:z",
+   "1",
+   "one",
+   "2",
+   "two",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-get-json",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "GET",
+   "golden:s",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-get-tsv",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "GET",
+   "golden:s",
+   "--format",
+   "tsv"
+  ]
+ },
+ {
+  "name": "live-redis-get-table",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "GET",
+   "golden:s",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "live-redis-hgetall",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "HGETALL",
+   "golden:h",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-lrange",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--format",
+   "json",
+   "--",
+   "LRANGE",
+   "golden:l",
+   "0",
+   "-1"
+  ]
+ },
+ {
+  "name": "live-redis-zrange",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--format",
+   "json",
+   "--",
+   "ZRANGE",
+   "golden:z",
+   "0",
+   "-1",
+   "WITHSCORES"
+  ]
+ },
+ {
+  "name": "live-redis-type",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "TYPE",
+   "golden:h",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-missing",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "GET",
+   "golden:none",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "live-redis-stdin",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--format",
+   "json"
+  ],
+  "stdin": "GET golden:s\n"
+ },
+ {
+  "name": "live-redis-cleanup",
+  "project": "live",
+  "args": [
+   "redis",
+   "-p",
+   "{P}",
+   "-c",
+   "golden-local-redis",
+   "--write",
+   "--force",
+   "DEL",
+   "golden:s",
+   "golden:h",
+   "golden:l",
+   "golden:z",
+   "--format",
+   "json"
+  ]
+ }
+]

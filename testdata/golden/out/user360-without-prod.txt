@@ -1,0 +1,5 @@
+args: ["user360","-p","{P}","a@example.com"]
+exit: 3
+--- stdout
+--- stderr
+user360 은 prod 를 조회해 --prod 가 필요함

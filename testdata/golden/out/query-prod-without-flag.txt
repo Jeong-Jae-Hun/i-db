@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","app-prod","select 1"]
+exit: 3
+--- stdout
+--- stderr
+prod 접속은 --prod 가 필요함

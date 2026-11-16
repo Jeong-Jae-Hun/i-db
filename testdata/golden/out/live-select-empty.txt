@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","select * from golden.t where false","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["id","name","score","ok","at","doc","tags","raw","uid","note"],"types":["int4","text","numeric","bool","timestamp","jsonb","_text","bytea","uuid","text"],"rows":[],"truncated":false,"elapsed_ms":0}
+--- stderr

@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","golden-local-redis","GET","golden:s","--format","table"]
+exit: 0
+--- stdout
+값 value
+--- stderr

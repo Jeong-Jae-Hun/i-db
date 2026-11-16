@@ -1,0 +1,22 @@
+args: ["help","flows"]
+exit: 0
+--- stdout
+사용법: db flows [-f 흐름 …] [--format table|tsv|json] [--prod]
+  이벤트 흐름(.dbtui/flows.json: 아웃박스 → SNS → SQS → DLQ·Lambda)을 한 번 풀어 상자마다 한 줄을 찍음(R69). prod 는 --prod 일 때만, 설정 오류·실패가 있으면 1
+
+플래그:
+  -c string
+    	접속 이름(db conns)
+  -f value
+    	풀 흐름 이름(여러 번, 없으면 모두)
+  -format string
+    	출력 형식 table|tsv|csv|json (기본: 터미널이면 table, 아니면 tsv)
+  -max-rows int
+    	최대 행 수(상한 10000) (default 200)
+  -p string
+    	DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더 (default "/golden/project")
+  -prod
+    	prod 접속 허용(읽기만)
+  -timeout duration
+    	전체 시간 제한 (default 30s)
+--- stderr

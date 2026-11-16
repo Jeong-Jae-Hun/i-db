@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","selec 1","--format","json"]
+exit: 3
+--- stdout
+--- stderr
+읽기 문장이 아님 (쓰기는 --write): only read-only statements are allowed (select, with, values, table, show, explain without analyze)

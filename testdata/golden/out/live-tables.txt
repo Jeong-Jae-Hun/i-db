@@ -1,0 +1,5 @@
+args: ["tables","-p","{P}","-c","golden-local","-s","golden","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["table"],"types":[],"rows":[["child"],["gchild"],["gparent"],["t"]],"truncated":false,"elapsed_ms":0}
+--- stderr

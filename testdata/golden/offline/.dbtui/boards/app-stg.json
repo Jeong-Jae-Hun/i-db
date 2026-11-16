@@ -1,0 +1,1 @@
+{"title": "app stg", "refresh": "60s", "panels": [{"title": "users", "conn": "app-stg", "query": "select count(*) from users"}]}

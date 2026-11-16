@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","app-stg-redis","KEYS","*"]
+exit: 3
+--- stdout
+--- stderr
+KEYS 는 CLI 에서 하지 않음 (서버를 멈춤): SCAN 0 MATCH * COUNT 1000 을 쓰세요

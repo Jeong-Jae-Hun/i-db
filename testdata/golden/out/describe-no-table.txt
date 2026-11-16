@@ -1,0 +1,5 @@
+args: ["describe","-p","{P}","-c","app-stg"]
+exit: 2
+--- stdout
+--- stderr
+테이블 이름 하나가 필요함

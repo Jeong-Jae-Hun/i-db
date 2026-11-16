@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","update golden.t set note = 'm' where id = 3","--write","--format","table"]
+exit: 0
+--- stdout
+UPDATE 1
+--- stderr

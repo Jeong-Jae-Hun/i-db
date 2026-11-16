@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","with x as (insert into golden.t (id, name) values (99, 'x') returning 1) select * from x","--format","json"]
+exit: 1
+--- stdout
+--- stderr
+ERROR: DECLARE CURSOR must not contain data-modifying statements in WITH (SQLSTATE 0A000)

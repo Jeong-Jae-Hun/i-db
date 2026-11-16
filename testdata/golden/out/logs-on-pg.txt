@@ -1,0 +1,5 @@
+args: ["logs","-p","{P}","-c","app-stg","{}"]
+exit: 2
+--- stdout
+--- stderr
+logs 는 Loki·Grafana 접속에서만 됨 (db conns)

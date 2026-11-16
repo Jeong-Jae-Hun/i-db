@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","app-stg","--write","delete from t"]
+exit: 3
+--- stdout
+--- stderr
+위험: WHERE 없는 DELETE (--force)

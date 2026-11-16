@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="dataSourceStorageLocal">
+    <data-source name="golden-local" uuid="20000000-0000-0000-0000-000000000001"><user-name>${PG_USER}</user-name></data-source>
+  </component>
+</project>
