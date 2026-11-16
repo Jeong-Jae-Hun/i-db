@@ -1,11 +1,13 @@
 package recent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -172,5 +174,45 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSave_여러_프로세스가_동시에_써도_다른_프로젝트_항목을_잃지_않는다(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db", "recent.json")
+	const n = 8
+	stores := make([]*Store, n)
+	for i := range stores {
+		s, err := Load(path, filepath.Join(t.TempDir(), fmt.Sprintf("p%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores[i] = s
+	}
+	// 각 Store 는 따로 켠 db 처럼 다시 읽기·합치기·바꿔 끼우기를 되풀이한다
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i, s := range stores {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 20 {
+				s.TouchTable("c", "public", fmt.Sprintf("t%d", j), t0)
+				if err := s.Save(); err != nil {
+					errs[i] = err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		t.Fatal(err)
+	}
+	disk, err := readFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(disk.Projects) != n {
+		t.Fatalf("프로젝트 %d개가 다 남는다: %d", n, len(disk.Projects))
 	}
 }

@@ -107,7 +107,7 @@ func (m *model) noteAction(key string) {
 	m.saveRecent()
 }
 
-// recentConnLabels 는 팔레트에 넣을 최근 접속이다. 앞 paletteTopConns 개만 빈 팔레트에 보인다(pickerMatches 가 quiet 로 가린다).
+// recentConnLabels 는 팔레트에 넣을 최근 접속이다. 앞 paletteTopConns 개만 빈 팔레트에 보인다(pickerMatches 가 pickerQuiet 로 가린다).
 func (m *model) recentConnLabels() []recentConn {
 	if m.recent == nil {
 		return nil
@@ -326,8 +326,9 @@ func (m *model) gridTypingKey(t *queryTab, ks string) bool {
 
 // keepsFilter 는 이 탭의 거르기 글을 기록에 남길지다. 거르기 기록은 모든 프로젝트·접속이 같이 보는 목록이라
 // 값이 든 결과의 거르기는 남기지 않는다: prod 결과, 사용자 한눈에 보기·비교(R51·R53, viewConn -1), 연결된 곳(R73), 기록 사본(R11.4).
+// viewConn 은 마지막 실행의 접속이라 고정 결과·하위 결과(t.view >= 0)는 출처를 모른다. 그래서 탭의 지금 결과에서만 남긴다.
 func (m *model) keepsFilter(t *queryTab) bool {
-	return t.viewConn >= 0 && m.conn(t.viewConn).Env() != "prod" && t.linked == nil && t.snap == nil
+	return t.view < 0 && t.viewConn >= 0 && m.conn(t.viewConn).Env() != "prod" && t.linked == nil && t.snap == nil
 }
 
 // whereTypingKey 는 테이블 보기 WHERE 입력의 ↑↓ 를 기록 고르기로 쓴다(R75.5). 기록 자리를 옮겼을 때만 true 고,

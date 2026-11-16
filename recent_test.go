@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -128,6 +129,35 @@ func TestRecentPalette_최근_테이블_뒤에_최근_접속이_오고_고르면
 	}
 	if got := m.recent.TopConns(time.Now(), 1); !slices.Equal(got, []string{"s"}) {
 		t.Fatalf("고른 접속을 센다: %v", got)
+	}
+}
+
+// connLines 는 팔레트 줄 가운데 최근 접속 줄(`접속 <이름>`) 수다. `접속 …`으로 시작하는 동작은 세지 않는다.
+func connLines(m *model, list []string) int {
+	n := 0
+	for _, c := range m.proj.Conns {
+		if slices.Contains(list, "접속 "+c.Name) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestRecentPalette_최근_접속은_빈_팔레트에_5개만_보이고_나머지는_거를_때_나온다(t *testing.T) {
+	m := recentModel(t)
+	for i := range 4 {
+		m.proj.Conns = append(m.proj.Conns, db.Conn{Name: fmt.Sprintf("y-stg%d", i), UUID: fmt.Sprintf("y%d", i), Kind: db.KindPG, Host: "127.0.0.1", Port: 1})
+	}
+	for _, c := range m.proj.Conns {
+		m.recent.UseConn(c.UUID, time.Now())
+	}
+	if got := connLines(m, emptyPalette(m)); got != paletteTopConns {
+		t.Fatalf("빈 팔레트의 최근 접속: %d", got)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	typeText(m, "접속 ")
+	if got := connLines(m, m.pickerMatches()); got != len(m.proj.Conns) {
+		t.Fatalf("거르면 다 나온다: %d", got)
 	}
 }
 
@@ -375,6 +405,28 @@ func TestRecentRecall_prod_사용자_찾기_연결된_곳_기록_사본_결과�
 	filterOnce(m, "1315")
 	if got := m.recent.Filters(); !slices.Equal(got, []string{"1315"}) {
 		t.Fatalf("prod 가 아닌 보통 결과는 남긴다: %v", got)
+	}
+}
+
+func TestRecentRecall_고정한_prod_결과로_돌아가_거른_글은_남기지_않는다(t *testing.T) {
+	m := recentModel(t)
+	m.Update(resultMsg{tab: m.cur().id, seq: m.cur().seq, conn: 0, res: channels(), rev: m.cur().grid.Revision()})
+	m.setFocus(fResult)
+	m.Update(key("p"))
+	show(m, channels()) // 같은 탭에서 stg 실행
+	m.Update(key("}"))
+	if m.cur().view != 0 {
+		t.Fatalf("고정한 결과로 간다: view=%d", m.cur().view)
+	}
+	filterOnce(m, "pinned@x.com")
+	if got := m.recent.Filters(); len(got) != 0 {
+		t.Fatalf("고정 결과의 거르기는 남기지 않는다: %v", got)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(key("{"))
+	filterOnce(m, "1315")
+	if got := m.recent.Filters(); !slices.Equal(got, []string{"1315"}) {
+		t.Fatalf("지금 stg 결과는 남긴다: %v", got)
 	}
 }
 

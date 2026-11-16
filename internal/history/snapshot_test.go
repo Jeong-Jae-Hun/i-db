@@ -242,3 +242,26 @@ func TestOpenResults_이미_있는_넓은_폴더도_0700_으로_좁히고_ReadRe
 		t.Fatalf("폴더 권한: %v %v", info.Mode().Perm(), err)
 	}
 }
+
+func TestResults_큰_SQL_은_기록처럼_잘라_상한에_맞추고_머리만으로_넘으면_쓰지_않는다(t *testing.T) {
+	r := openResults(t)
+	id := NewID(time.Now())
+	if err := r.Write(Snapshot{ID: id, SQL: strings.Repeat("s", 2<<20), Rows: rowsOf(10, 10)}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := r.Read(id)
+	if err != nil || len(s.SQL) != maxSQLBytes || len(s.Rows) != 10 {
+		t.Fatalf("2MiB SQL 도 앞 64KiB 로 남기고 다시 읽는다: %d %d %v", len(s.SQL), len(s.Rows), err)
+	}
+
+	big := NewID(time.Now().Add(time.Second))
+	if err := r.Write(Snapshot{ID: big, Cols: []string{strings.Repeat("c", 2<<20)}}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("머리만으로 상한을 넘으면 ErrTooLarge: %v", err)
+	}
+	if r.Has(big) {
+		t.Fatal("쓰지 않은 사본은 없다")
+	}
+	if _, err := os.Stat(r.path(big)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("파일도 없다: %v", err)
+	}
+}

@@ -56,9 +56,11 @@ type Snapshot struct {
 	ResultTruncated bool          `json:"result_truncated,omitempty"`
 }
 
-// Cap 은 앞 SnapshotRows 행만 남기고, JSON 이 SnapshotBytes 를 넘지 않게 뒤 행과 글을 버린다. 버렸으면 Truncated 다.
-// 행마다 크기를 더해 가며 자르므로 큰 결과도 한 번만 직렬화한다.
+// Cap 은 SQL 을 기록 줄처럼 앞 64KiB 로 자르고, 앞 SnapshotRows 행만 남기고, JSON 이 SnapshotBytes 를 넘지 않게 뒤 행과 글을 버린다.
+// 행·글을 버렸으면 Truncated 다. 행마다 크기를 더해 가며 자르므로 큰 결과도 한 번만 직렬화한다.
+// 단, 열 이름 같은 머리만으로 상한을 넘으면 여기서는 줄이지 못하고 Write 가 ErrTooLarge 로 거절한다.
 func (s *Snapshot) Cap() {
+	s.SQL = capSQL(s.SQL)
 	if len(s.Rows) > SnapshotRows {
 		s.Rows, s.Truncated = s.Rows[:SnapshotRows], true
 	}
@@ -144,15 +146,26 @@ func (r *Results) Has(id string) bool {
 	return ok
 }
 
-// Write 는 Cap 을 거친 사본을 gzip JSON 으로 바꿔 끼워 쓴다(파일 0600).
+// ErrTooLarge 는 Cap 을 거쳐도 사본 JSON 이 SnapshotBytes 를 넘어 남기지 않았다는 뜻이다. 쓰기 실패가 아니라 사본을 끄지 않는다.
+var ErrTooLarge = errors.New("snapshot too large")
+
+// Write 는 Cap 을 거친 사본을 gzip JSON 으로 바꿔 끼워 쓴다(파일 0600). 그래도 상한을 넘으면 쓰지 않고 ErrTooLarge 다.
 func (r *Results) Write(s Snapshot) error {
 	if !idRe.MatchString(s.ID) {
 		return fmt.Errorf("bad snapshot id %q", s.ID)
 	}
 	s.Cap()
+	data, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	if len(data) > SnapshotBytes {
+		return ErrTooLarge
+	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	if err := errors.Join(json.NewEncoder(zw).Encode(s), zw.Close()); err != nil {
+	_, werr := zw.Write(data)
+	if err := errors.Join(werr, zw.Close()); err != nil {
 		return err
 	}
 	if err := atomicfile.Write(r.path(s.ID), ".snap-*", buf.Bytes(), 0o600); err != nil {

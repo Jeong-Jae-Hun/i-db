@@ -208,6 +208,21 @@ func TestSnapshot_쓰기에_실패하면_한_번만_알리고_사본을_끈다(t
 	}
 }
 
+func TestSnapshot_상한에_못_맞춘_사본은_빼고_사본을_끄지_않는다(t *testing.T) {
+	m, state := historyModel(t)
+	huge := &db.Result{Cols: []string{strings.Repeat("c", 2<<20)}, Rows: [][]string{{"1"}}}
+	if msg := finishRun(t, m, 1, "select 1", huge); msg != nil {
+		t.Fatalf("알림 없음: %v", msg)
+	}
+	if m.results.Off() || lastEntry(t, m).Result || len(snapFiles(t, state)) != 0 {
+		t.Fatalf("사본만 빠진다: off=%v", m.results.Off())
+	}
+	finishRun(t, m, 1, "select 2", table(1))
+	if !lastEntry(t, m).Result {
+		t.Fatal("다음 사본은 남긴다")
+	}
+}
+
 func TestSnapshot_큰_결과는_앞_1000행만_남기고_잘림을_표시한다(t *testing.T) {
 	m, _ := historyModel(t)
 	finishRun(t, m, 1, "select * from big", table(1500))

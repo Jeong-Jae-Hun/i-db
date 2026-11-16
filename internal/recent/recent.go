@@ -143,8 +143,17 @@ func readFile(path string) (file, error) {
 
 // Save 는 파일을 다시 읽어 이 프로젝트 항목을 지금 것으로 바꾸고 동작·거르기 기록은 지금 것으로 덮어 쓴다.
 // 다른 프로젝트 항목은 지킨다. 같은 폴더 임시 파일(0600)에 다 쓴 뒤 바꿔 끼운다. 폴더는 0700 으로 만든다.
+// 다시 읽기부터 바꿔 끼우기까지는 옆 .lock 파일의 flock 으로 프로세스끼리 줄 세워 다른 프로젝트 항목을 덮지 않는다.
 // 단, 동시에 켠 다른 db 가 그사이 남긴 동작·거르기 기록은 나중에 쓴 쪽이 이긴다.
-func (s *Store) Save() error {
+func (s *Store) Save() (err error) {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	lock, err := atomicfile.Lock(s.path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lock.Close()) }()
 	disk, err := readFile(s.path)
 	if err != nil {
 		disk = file{} // 깨진 파일은 새로 쓴다
@@ -156,9 +165,6 @@ func (s *Store) Save() error {
 	disk.Projects[s.key] = s.p
 	data, err := json.Marshal(disk)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
 	return atomicfile.Write(s.path, ".recent-*.json", data, 0o600)

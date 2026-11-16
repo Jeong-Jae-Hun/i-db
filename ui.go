@@ -547,11 +547,10 @@ type paletteAct struct {
 	k  tea.KeyMsg
 }
 
-// paletteTable 은 명령 팔레트의 테이블·뷰 항목이다(R40.2). quiet 면 거르기 글이 있을 때만 보인다.
+// paletteTable 은 명령 팔레트의 테이블·뷰 항목이다(R40.2).
 type paletteTable struct {
-	it    finder.Item
-	conn  int
-	quiet bool
+	it   finder.Item
+	conn int
 }
 
 // paletteRecent 는 빈 팔레트 맨 위에 보일 최근 테이블 수다(R40.2)
@@ -821,6 +820,7 @@ type model struct {
 	pickerLower  []string                // pickerItems 의 소문자 사본. 거를 때마다(키·그리기) 다시 만들지 않게 열 때 한 번 만든다
 	pickerConn   map[string]string       // 항목 → 접속 uuid. 고르기 창에 → 접속 이름으로 보인다
 	pickerTables map[string]paletteTable // 명령 팔레트의 테이블 항목(R40.2). 그릴 때 [환경] 에 색을 입힌다
+	pickerQuiet  map[string]bool         // 명령 팔레트에서 거르기 글이 있을 때만 보일 줄(앞 N개 밖의 테이블·최근 접속)
 	pickerCursor int
 	pickDo       func(string) tea.Cmd // nil 이면 queries 파일 열기(Ctrl+O)
 	pickDel      func(string) tea.Cmd // 즐겨찾기 고르기의 지우기(d)
@@ -1896,7 +1896,7 @@ func (m *model) openCopyMenu(t *queryTab, target grid.CopyTarget, linked bool) {
 // openPicker 는 고르기 창(파일·데이터베이스·스키마·즐겨찾기)을 연다. do 가 nil 이면 queries 파일 열기다.
 // conn 은 항목 옆에 보일 접속 uuid, del 은 즐겨찾기 지우기다.
 func (m *model) openPicker(prompt string, items []string, conn map[string]string, do, del func(string) tea.Cmd) {
-	m.pickerItems, m.pickerConn, m.pickDo, m.pickDel, m.pickerTables = items, conn, do, del, nil
+	m.pickerItems, m.pickerConn, m.pickDo, m.pickDel, m.pickerTables, m.pickerQuiet = items, conn, do, del, nil, nil
 	m.pickerLower = make([]string, len(items))
 	for i, it := range items {
 		m.pickerLower[i] = strings.ToLower(it)
@@ -3546,7 +3546,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		top := m.recentActions(actLabels, actKeys)
 		labels := slices.Clone(top)
 		actLabels = slices.DeleteFunc(actLabels, func(l string) bool { return slices.Contains(top, l) })
-		tables := map[string]paletteTable{}
+		tables, quiet := map[string]paletteTable{}, map[string]bool{}
 		// 같은 테이블은 접속 인덱스로 하나로 합친다. 이름이 같은 접속(DataGrip 은 막지 않는다)의 줄은 글이 겹치면 #자리를 붙여 가른다
 		type tableKey struct {
 			conn          int
@@ -3564,11 +3564,13 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				label += fmt.Sprintf(" #%d", ci+1)
 			}
 			it := finder.Item{Conn: m.conn(ci).Name, Kind: finder.KindTable, Schema: r.Schema, Name: r.Table}
-			tables[label] = paletteTable{it: it, conn: ci, quiet: len(tables) >= paletteRecent}
+			quiet[label] = len(tables) >= paletteRecent
+			tables[label] = paletteTable{it: it, conn: ci}
 			labels = append(labels, label)
 		}
 		conns := m.recentConnLabels()
-		for _, rc := range conns {
+		for i, rc := range conns {
+			quiet[rc.label] = i >= paletteTopConns
 			labels = append(labels, rc.label)
 		}
 		for _, env := range paletteEnvs {
@@ -3587,7 +3589,8 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if _, dup := tables[label]; dup {
 							label += fmt.Sprintf(" #%d", i+1)
 						}
-						tables[label] = paletteTable{it: finder.Item{Conn: c.Name, Kind: finder.KindTable, Schema: s.Name, Name: tb.Name}, conn: i, quiet: true}
+						tables[label] = paletteTable{it: finder.Item{Conn: c.Name, Kind: finder.KindTable, Schema: s.Name, Name: tb.Name}, conn: i}
+						quiet[label] = true
 						labels = append(labels, label)
 					}
 				}
@@ -3610,7 +3613,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, cmd := m.Update(a.k)
 			return cmd
 		}, nil)
-		m.pickerTables = tables
+		m.pickerTables, m.pickerQuiet = tables, quiet
 		return m, nil
 	case "ctrl+b", "f12":
 		// ─── 정의로 이동 (R26) ───
@@ -4383,7 +4386,7 @@ func (m *model) pickerMatches() []string {
 	f := strings.ToLower(m.input.Value())
 	var out []string
 	for i, p := range m.pickerItems {
-		if f == "" && m.pickerTables[p].quiet {
+		if f == "" && m.pickerQuiet[p] {
 			continue
 		}
 		if strings.Contains(m.pickerLower[i], f) {

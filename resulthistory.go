@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -55,11 +56,14 @@ func (m *model) saveHistory(e history.Entry, snap *history.Snapshot) tea.Cmd {
 	return func() tea.Msg {
 		warn := ""
 		if snap != nil {
-			if err := writeSnapshot(results, *snap); err != nil {
+			switch err := writeSnapshot(results, *snap); {
+			case errors.Is(err, history.ErrTooLarge):
+				// 상한에 못 맞춘 사본만 빼고 다음 사본은 계속 쓴다
+			case err != nil:
 				if results.Disable() {
 					warn = "결과 사본을 끔: " + err.Error()
 				}
-			} else {
+			default:
 				e.Result = true
 				_ = results.MaybePrune(time.Now()) // 줄이기 실패는 다음 줄이기에서 다시 한다
 			}
