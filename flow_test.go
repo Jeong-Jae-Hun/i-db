@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -229,6 +230,26 @@ func TestFlowLayout_좁으면_위에서_아래로_쌓는다(t *testing.T) {
 }
 
 // ─── 탭 ───
+
+func TestFlowView_낮으면_고른_흐름과_고른_상자가_보이게_내린다(t *testing.T) {
+	m := flowModel(t)
+	st := flows.Stat{Pending: 120, Retry: 3, Stale: 1}
+	s := &flowState{snaps: map[string]flowSnap{"hub": {outbox: &st, topic: sampleTopic()}}, cursor: 7, box: 6}
+	for i := range 7 {
+		s.list = append(s.list, flows.Flow{Name: fmt.Sprintf("f%d", i), Err: "x"})
+	}
+	s.list = append(s.list, hubFlow())
+	tab := &queryTab{flow: s}
+	for _, w := range []int{60, 400} { // 세로로 쌓는 그림·가로 그림
+		v := ansi.Strip(m.flowView(tab, w, 5))
+		if n := strings.Count(v, "\n") + 1; n != 5 || !strings.Contains(v, "▸ ● hub") && !strings.Contains(v, "▸ ! hub") {
+			t.Fatalf("w=%d 고른 흐름이 보인다 (%d줄):\n%s", w, n, v)
+		}
+		if !strings.Contains(v, "hook.example.com") {
+			t.Fatalf("w=%d 고른 상자(https 구독)가 보인다:\n%s", w, v)
+		}
+	}
+}
 
 func TestFlow_Alt_F_와_팔레트는_흐름_탭을_하나만_열고_설정_오류를_보인다(t *testing.T) {
 	no, nt := fakeFlow(t, flows.Stat{Pending: 120, Retry: 3, Stale: 1}, sampleTopic(), nil)

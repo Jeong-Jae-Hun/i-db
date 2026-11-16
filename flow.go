@@ -622,10 +622,12 @@ func (m *model) flowView(t *queryTab, w, h int) string {
 	if s.fileErr != "" {
 		left = append(left, errStyle.Render(truncate(textutil.Printable("설정 오류: "+s.fileErr, false), listW)))
 	}
+	// 목록·그림은 높이 h 에서 잘린다. 고른 흐름·상자가 보이게 그 줄이 맨 아래에 오도록 내린다(대시보드 표와 같은 방식)
 	cur := clamp(s.cursor, len(s.list))
-	for i, f := range s.list {
+	top := max(0, cur-max(1, h-len(left))+1)
+	for i, f := range s.list[top:] {
 		mark := "  "
-		if i == cur {
+		if top+i == cur {
 			mark = lipgloss.NewStyle().Foreground(colAccent).Bold(true).Render("▸ ")
 		}
 		icon, st := m.flowIcon(s, f)
@@ -635,7 +637,12 @@ func (m *model) flowView(t *queryTab, w, h int) string {
 	var right []string
 	if f, boxes, ok := s.curBoxes(); ok {
 		right = append(right, lipgloss.NewStyle().Bold(true).Render(truncate(textutil.Printable(f.Name, false), diagW)), "")
-		right = append(right, renderFlow(flowLayout(boxes, diagW), boxes, clamp(s.box, len(boxes)), diagW)...)
+		sel, lines := clamp(s.box, len(boxes)), flowLayout(boxes, diagW)
+		at := slices.IndexFunc(lines, func(l flowLine) bool {
+			return slices.ContainsFunc(l, func(sg flowSeg) bool { return sg.box == sel })
+		})
+		top := max(0, at-max(1, h-len(right))+1)
+		right = append(right, renderFlow(lines[top:], boxes, sel, diagW)...)
 	}
 	n := min(h, max(len(left), len(right)))
 	rows := make([]string, n)
