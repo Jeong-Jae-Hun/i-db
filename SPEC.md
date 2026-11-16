@@ -20,6 +20,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 저장소 비밀값 `OS_`·`LOKI_`·`PROM_<이름>_PASSWORD`·`GRAFANA_<이름>_TOKEN`(R60.1), 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
 | `.dbtui/user360.json` | 사용자 한눈에 보기 조회 목록(R51, 없으면 빈 목록) |
 | `.dbtui/flows.json` | 이벤트 흐름 목록(R69, 없으면 빈 목록). 접속 이름·테이블·열 이름만 든다 |
+| `.dbtui/boards/<이름>.json` | 쿼리 보드(R70, 없으면 보드 없음). 제목·새로고침 간격·패널(접속 이름·질의·흐름 이름·보기)만 든다 |
 | `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`athena`·`aws`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`·`workgroup`·`output`, R60.1·R67.1·R68) |
 
 `<이름>`은 접속 이름을 대문자로 바꾸고 영숫자 외 문자를 `_`로 바꾼 것이다.
@@ -696,6 +697,27 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R69.5 CLI `db flows [-f 흐름…] [--format table|tsv|json] [--prod]`는 흐름(`-f`·위치 인자로 고르고, 없으면 모두)을 동시에 한 번 풀어 상자마다 한 줄 `flow`·`stage`(`outbox`·`sns`·`sqs`·`dlq`·`lambda`·`sub`·`config`)·`name`·`metrics`·`warn`을 찍는다. prod 접속은 `--prod`가 없으면 묻지 않고 `--prod 로 확인`이다(R58.2·R64.3). 설정 오류나 실패한 상자가 하나라도 있으면 종료 코드 1, 없는 흐름 이름·`--format csv`는 2다.
   - 예: json 은 줄마다 `{"flow":"hub","stage":"dlq","name":"q1-dlq","metrics":"4","warn":true}`이고 실패는 `"error"`, 확인하지 않은 prod 는 `"note":"--prod 로 확인"`을 더한다. 표·tsv 의 `metrics` 칸은 오류·note 가 있으면 그것이다.
 
+### R70 쿼리 보드
+
+들일 시간: 하루. 함정: 같은 접속 패널을 동시에 보내면 Redis 는 편집기 세션 연결 하나를 같이 써 줄을 선다. 그래서 접속마다 차례로 돌린다. 저장소의 비싼 질의를 보드가 확인 없이 Force 로 보내면 30초마다 전체 스캔이 된다.
+
+- R70.1 `.dbtui/boards/<이름>.json`은 보드 하나다. 칸은 `title`(없으면 파일 이름), `refresh`(Go 기간 꼴, 기본 `60s`), `panels`이고 패널은 `title`, `view`(`number`·`table`·`chart`·`flow`), `conn`·`query`(질의 패널) 또는 `flow`(흐름 패널, R69 이름), 선택 `since`(Loki·Prometheus·Grafana, R62.2 `--since`와 같은 꼴), 선택 `warn`(`number`만)이다. 폴더가 없으면 보드가 없고 db 는 그대로 켜진다. JSON 이 깨졌으면 보드 맨 위·CLI stderr 에 `설정 오류: .dbtui/boards/<이름>.json: …`를, 패널 하나가 틀리면 그 패널만 `설정 오류: <까닭>`으로 보이고 돌리지 않는다.
+  - 예: `{"title":"shop 운영","refresh":"60s","panels":[{"title":"오늘 결제","conn":"shop-prod-read","query":"select count(*) from t_payments where created_at >= current_date","view":"number","warn":">0"},{"title":"에러 로그","conn":"loki-prod","query":"sum(count_over_time({app=\"shop-api\"} |= \"ERROR\" [5m]))","since":"6h","view":"chart"},{"title":"DLQ","flow":"shop-hub-stg","view":"flow"}]}`.
+  - 예: `"view":"pie"` → `view must be one of number|table|chart|flow: "pie"`. aws 접속(R67)에 질의 → `conn aws-stg: aws connections are not query panels (use view flow)`. 없는 흐름 → `flow nope: no such flow (.dbtui/flows.json)`, 설정 오류가 있는 흐름은 그 까닭을 붙인다.
+  - 예: `"refresh":"5s"` → `설정 오류: refresh must be at least 10s: 5s`이고 10초마다 돈다. 읽을 수 없는 `refresh`는 오류를 보이고 60초마다 돈다.
+- R70.2 질의 패널은 읽기만 보낸다. PostgreSQL 은 한 문장이고 R6.1 읽기 판정과 `CheckReadOnlySQL`(MCP·CLI 와 같은 함수 차단)을 지나야 하며 READ ONLY 트랜잭션(`RunReadOnlyRows`)으로 돈다. Redis 는 한 줄이고 R6.1 읽기 명령이어야 하며 `KEYS`는 CLI(R58.2)처럼 받지 않는다. 저장소(OpenSearch·Loki·Prometheus·Grafana·DynamoDB·Athena)는 `Backend.Run`이 쓰기를 거절하고(R60.2), 비싼 질의(`ErrNeedsConfirm`)는 Force 로 다시 보내지 않고 `비싼 질의라 보드에서 돌리지 않음: <까닭>`을 보인다. 패널 하나는 여는 시간을 포함해 15초 제한이다. 숫자·표 패널은 50행, 차트 패널은 1,000행까지 받는다.
+  - 예: `delete from t` → `설정 오류: query is not read-only: …`. `DEL a` → `redis command is not a read command`. `select 1; select 2` → `query must be a single statement`.
+  - 단, 판정이 놓치는 CTE 안 쓰기는 서버(커서·READ ONLY)가 거절해 그 패널이 오류로 보인다. Redis 패널은 편집기와 같은 세션 연결(R4)로 보내므로 그 접속 편집기에서 `SELECT`로 DB 를 바꾸면 패널도 그 DB 를 읽고, `MULTI`를 열어 두면 패널 명령이 그 안에 쌓인다.
+- R70.3 보기는 넷이다. `number`는 첫 행 첫 칸(행 없이 글이면 첫 줄)을 굵게 보이고 `warn`(`>`·`>=`·`<`·`<=`·`=`·`==`·`!=` 뒤 숫자) 조건에 맞으면 경고 색(`dashWarnStyle`)이다. `table`은 머리 줄과 패널에 들어가는 만큼의 행(열 폭 20칸까지), `chart`는 R28 차트(첫 열이 날짜·시간이면 선, 아니면 막대), `flow`는 R69 흐름의 상자를 한 줄에 하나(`[SQS q1 | 대기 0 · 처리 중 2]`, `DLQ q1-dlq 4`) 경고·오류 색으로 보인다.
+  - 예: `warn ">0"`에 `3` → 경고 색, `0`·숫자가 아닌 칸 → 보통. `1,234`는 쉼표를 떼고 읽는다.
+- R70.4 `Alt+B`(맥 ⌘⇧B, 팔레트 `보드`)는 `.dbtui/boards/`의 보드를 골라 보드 탭을 연다(보드마다 탭 하나, 이미 있으면 그 탭으로 옮겨 바로 다시 돈다). 보드가 없으면 `보드 없음 · .dbtui/boards/<이름>.json 을 쓰세요`다. 패널 격자는 보드 영역 폭이 80칸 아래면 1열, 140칸 아래면 2열, 그 위는 3열이고 패널 높이는 `number` 4줄, `table`·`chart` 10줄, `flow`는 상자 수 + 2줄이다(머리 두 줄 포함, 한 줄의 패널은 가장 높은 패널에 맞춘다). 패널 머리는 `제목 · 접속`(흐름은 `흐름 <이름>`)이고 prod 접속(R6.2, 흐름은 아웃박스·aws 접속 하나라도)이면 `prod` 표시를 붙인다. 둘째 줄은 마지막으로 돈 시각 `12:04:05`·걸린 시간 `120ms`이고 다시 도는 동안 `· 확인 중`을 붙인다. 실패하면 본문이 빨간 오류다.
+  - 대시보드(R64.2)처럼 탭이 활성인 동안 `refresh`마다, `r`은 바로 다시 돈다(`r`은 파일도 다시 읽는다). 다시 돌 때와 탭을 닫을 때 진행 중인 회차를 취소하고 그 사이 이전 결과를 그대로 보이며 머리에 `확인 중 N`을 센다. 세션 복원(R41)은 이 탭을 되살리지 않는다.
+  - 같은 접속 패널(흐름은 aws 접속)은 차례로, 다른 접속끼리는 동시에 최대 4개까지 돈다. 화면은 prod 패널도 돌린다(읽기 전용).
+  - 방향키·`h j k l`은 패널을 고르고(고른 패널은 테두리 강조), `Enter`는 질의 패널이면 새 쿼리 탭에 그 질의·접속(Loki·Prometheus·Grafana 는 `since` 범위도)을 채워 보통 실행(R6 확인 그대로)하고, 흐름 패널이면 흐름 탭(R69.4)에서 그 흐름을 고른다. 설정 오류 패널은 그 까닭만 상태 줄에 보인다.
+- R70.5 CLI `db board [이름] [--format table|tsv|json] [--prod]`는 보드의 패널을 R70.4 순서 규칙으로 한 번 돌려 패널마다 한 줄 `panel`·`conn`·`view`·`value`·`error`를 찍는다. 이름이 없으면 보드 목록(`name`·`title`·`panels`·`error`)이다. prod 패널은 `--prod`가 없으면 묻지 않고 `--prod 로 확인`이다(R58.2·R64.3, 흐름은 상자마다). 설정 오류나 실패한 패널(흐름은 실패한 상자)이 하나라도 있으면 종료 코드 1, 없는 보드·`--format csv`는 2다.
+  - 예: json 은 패널마다 `{"panel":"오늘 결제","conn":"shop-stg","view":"number","value":"3","warn":true}`, 표·차트는 `columns`·`rows`(50행까지, 넘으면 `"truncated":true`), 흐름은 `columns` `["stage","name","metrics","warn"]`·상자마다 `rows`다. prod 패널은 `"prod":true`, 건너뛰면 `"note":"--prod 로 확인"`, 실패는 `"error"`다.
+  - 예: 표·tsv 의 `value`는 숫자 패널 값(경고면 뒤에 ` !`), 표·차트는 `50행`(잘렸으면 `50행+`), 흐름은 상자를 ` · `로 이은 글, 건너뛴 prod 는 note 다.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |
@@ -726,6 +748,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Ctrl+L` (⌘L) | 활성 탭 prod 접속의 쓰기 잠금 열기·닫기(R54) |
 | `Ctrl+G` (⌘G) | 대시보드: 모든 접속의 상태·지연·버전·수치(`r` 다시 확인, `Enter` 트리에서 고르기, `/` 거르기, R64) |
 | `Alt+F` | 흐름: 아웃박스 → SNS → SQS → DLQ·Lambda 그림(`r` 다시 풀기, `↑↓` 흐름, `←→` 상자, `Enter` 상세, R69) |
+| `Alt+B` (⌘⇧B) | 보드: `.dbtui/boards/`의 쿼리 패널 격자(`r` 다시 돌리기, 방향키·`hjkl` 패널, `Enter` 쿼리 탭에서 실행·흐름 탭, R70). `Ctrl+B`는 정의로 이동이라 Alt 를 쓴다 |
 | `Ctrl+]` | Loki·Prometheus·Grafana 탭의 범위 `15m·1h·6h·24h·7d` 돌리기(탭마다, 편집기 위 줄에 `최근 1h`, R62.2) |
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |

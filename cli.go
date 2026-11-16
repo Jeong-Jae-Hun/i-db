@@ -63,6 +63,7 @@ var cliCommands = []cliCommand{
 	{"schema-diff", "db schema-diff -c 접속A --to 접속B [-s 스키마] [--to-schema 스키마2]", "두 스키마의 테이블·열·제약·인덱스 비교"},
 	{"status", "db status [-c 접속 …] [--format table|tsv|json] [--prod]", "모든 접속(또는 -c 로 고른 접속)을 동시에 확인해 상태·지연·버전·주요 수치를 찍음(R64.3). prod 는 --prod 일 때만, 하나라도 실패하면 1"},
 	{"flows", "db flows [-f 흐름 …] [--format table|tsv|json] [--prod]", "이벤트 흐름(.dbtui/flows.json: 아웃박스 → SNS → SQS → DLQ·Lambda)을 한 번 풀어 상자마다 한 줄을 찍음(R69). prod 는 --prod 일 때만, 설정 오류·실패가 있으면 1"},
+	{"board", "db board [이름] [--format table|tsv|json] [--prod]", "쿼리 보드(.dbtui/boards/<이름>.json)의 패널을 한 번 돌려 패널마다 한 줄을 찍음(R70). 이름이 없으면 보드 목록, prod 패널은 --prod 일 때만, 실패한 패널이 있으면 1"},
 	{"update", "db update [--check] [--version vX.Y.Z] [--force]", "GitHub 릴리스의 최신 판으로 db 를 바꿈(R65). --check 는 새 판이 있으면 10. db help update"},
 	{"conn", "db conn add|edit|rm|test …", "db 전용 접속 추가·고치기·지우기·시험(R59, .dbtui/connections.json). db help conn"},
 }
@@ -236,6 +237,8 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, 
 		return runStatus(ctx, o, proj, clients, stdout, stderr)
 	case "flows":
 		return runFlows(ctx, o, proj, clients, stdout, stderr)
+	case "board":
+		return runBoard(ctx, o, proj, clients, stdout, stderr)
 	}
 
 	start := time.Now()

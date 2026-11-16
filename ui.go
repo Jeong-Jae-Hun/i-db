@@ -210,6 +210,7 @@ var helpSections = []struct {
 		{"Ctrl+U", "사용자 한눈에 보기 (이메일·uid·id·닉네임으로 여러 DB 조회)", "ctrl+u"},
 		{"Ctrl+G", "대시보드 (모든 접속 상태·지연·버전·수치, 30초마다 다시 확인)", "ctrl+g"},
 		{"Alt+F", "흐름 (아웃박스 → SNS → SQS → DLQ·Lambda, .dbtui/flows.json, 30초마다 다시 확인)", "alt+f"},
+		{"Alt+B", "보드 (.dbtui/boards/ 의 쿼리 패널 묶음, refresh 마다 다시 돌림)", "alt+b"},
 		{"Alt+C", "같은 쿼리 다른 접속에서 비교 (기본 stg↔prod)", "alt+c"},
 		{"Ctrl+L", "prod 쓰기 잠금 열기·닫기 (탭 접속, DB_PROD_UNLOCK_MIN 분)", "ctrl+l"},
 		{"Ctrl+]", "Loki·Prometheus 범위 15m·1h·6h·24h·7d (탭마다)", "ctrl+]"},
@@ -233,7 +234,7 @@ var helpSections = []struct {
 		{"⌘T ⌘W ⌘1..9 ⌘N ⌘H ⌘?", "= Ctrl+T Ctrl+W Alt+1..9 Ctrl+N Ctrl+H F1", ""},
 		{"⌘⇧O ⌘⇧S ⌘⇧D ⌘⇧E", "= F3 F4 F6 F7", ""},
 		{"⌥⌘L ⌘⇧M ⌘⇧↩ ⌘⇧⌫", "= F8(⌘⇧F 도) F9 F10 F11", ""},
-		{"⌘U ⌘L ⌘G ⌘⇧C ⌘⇧R ⌘⇧P", "= Ctrl+U Ctrl+L Ctrl+G Alt+C Alt+R Alt+P", ""},
+		{"⌘U ⌘L ⌘G ⌘⇧C ⌘⇧R ⌘⇧P ⌘⇧B", "= Ctrl+U Ctrl+L Ctrl+G Alt+C Alt+R Alt+P Alt+B", ""},
 		{"⌘V", "결과 표에 시트 칸 붙여넣기", ""},
 		{"⌘←→ / ⌘↑↓", "줄 처음·끝 / 문서 처음·끝", ""},
 	}},
@@ -325,6 +326,11 @@ var helpSections = []struct {
 		{"Enter", "트리에서 그 접속 고르기", ""},
 		{"/ · esc", "그룹·이름·환경으로 거르기 · 해제", ""},
 		{"j k / ↑ ↓", "이동", ""},
+	}},
+	{"보드 (Alt+B)", fKeep, [][3]string{
+		{"r", "바로 다시 돌리기 (파일도 다시 읽음)", ""},
+		{"방향키 / h j k l", "패널 고르기", ""},
+		{"Enter", "패널 질의를 새 쿼리 탭에서 실행 · 흐름 패널은 흐름 탭", ""},
 	}},
 	{"JSON 값 보기 (o)", fResult, [][3]string{
 		{"t", "나무 ↔ 원문", "t"},
@@ -717,6 +723,7 @@ type queryTab struct {
 	since      time.Duration // Loki·Prometheus 범위(R62.2). 0 이면 1h
 	dash       *dashState    // 대시보드 탭이면 그 상태(R64). 편집기·결과 대신 대시보드를 그린다
 	flow       *flowState    // 흐름 탭이면 그 상태(R69). 대시보드처럼 편집기·결과 자리 전체에 그린다
+	board      *boardState   // 보드 탭이면 그 상태(R70). 대시보드처럼 편집기·결과 자리 전체에 그린다
 }
 
 // completer 는 편집기 자동완성 함수다. 탭의 접속이 바뀌어도 부를 때 다시 읽도록 탭을 가리킨다.
@@ -2636,6 +2643,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case flowTickMsg:
 		return m, m.flowTicked(msg)
+	case boardPanelMsg:
+		return m, m.boardDone(msg)
+	case boardTickMsg:
+		return m, m.boardTicked(msg)
 	case autoSaveMsg:
 		if t := m.findTab(msg.tab); t != nil && t.editRev == msg.rev {
 			m.autoSaveStatus(t)
@@ -3215,6 +3226,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.openDash()
 	case "alt+f":
 		return m, m.openFlows(nil)
+	case "alt+b":
+		return m, m.pickBoard()
 	case "ctrl+l":
 		return m, m.toggleLock()
 	case "alt+c":
@@ -3762,6 +3775,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if t.flow != nil && m.focus != fTree {
 		return m, m.flowKey(k)
+	}
+	if t.board != nil && m.focus != fTree {
+		return m, m.boardKey(k)
 	}
 	switch m.focus {
 	case fEditor:
@@ -4352,6 +4368,8 @@ func (m *model) View() string {
 		header += barStyle.Bold(true).Render("대시보드") + hintStyle.Render(fmt.Sprintf(" · 접속 %d", len(connOrder(m.proj.Conns))))
 	} else if t.flow != nil {
 		header += barStyle.Bold(true).Render("흐름") + hintStyle.Render(fmt.Sprintf(" · %d", len(t.flow.list)))
+	} else if t.board != nil {
+		header += barStyle.Bold(true).Render("보드") + hintStyle.Render(fmt.Sprintf(" · 패널 %d · %s마다", len(t.board.b.panels), t.board.b.every))
 	} else {
 		header += hintStyle.Render("접속 없음 · 트리에서 고르세요")
 	}
@@ -4517,6 +4535,15 @@ func (m *model) View() string {
 		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
 			pane(paneSpec{title: "흐름", info: info, body: m.flowView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
 	}
+	if t.board != nil {
+		h := l.edH + l.resH + 2
+		info := m.label("r 새로고침 · Enter 쿼리 탭")
+		if n := len(t.board.pending); n > 0 {
+			info = fmt.Sprintf("확인 중 %d · ", n) + info
+		}
+		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
+			pane(paneSpec{title: textutil.Printable(t.board.b.title, false), info: info, body: m.boardView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
+	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		pane(paneSpec{title: "Explorer", info: treeInfo, body: strings.TrimRight(tb.String(), "\n"), w: l.treeW, h: l.treeH, focused: m.focus == fTree,
 			hot: m.drag == bTree}),
@@ -4579,6 +4606,9 @@ func (m *model) View() string {
 	}
 	if t.flow != nil && m.focus != fTree {
 		hint = flowHint
+	}
+	if t.board != nil && m.focus != fTree {
+		hint = boardHint
 	}
 	return header + "\n" + body + "\n" + m.bar(status, hintStyle.Render(m.label(hint)+" "))
 }

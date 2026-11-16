@@ -20,6 +20,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources), DynamoDB and Athena in the same tree, editor and results grid, plus a tree-only `aws` view of SNS, SQS (with DLQ counts), Lambda, EventBridge, Scheduler, Step Functions and S3 (see Sources)
 - Dashboard (`Ctrl+G`) and `db status`: every connection's state, latency, version and key numbers at a glance (see Dashboard)
 - Event flows (`Alt+F`) and `db flows`: an outbox table → SNS topic → SQS queues → DLQ · Lambda diagram with live counts, configured in `.dbtui/flows.json` (see Flows)
+- Query boards (`Alt+B`) and `db board`: your own grid of read-only query panels (numbers, tables, charts, flows) across PostgreSQL, Redis and every source, configured in `.dbtui/boards/<name>.json` (see Boards)
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
 ## Install
@@ -74,6 +75,7 @@ It reads:
 | `.dbtui/connections.json` | optional extra connections added from `db` itself (see Connections) |
 | `.dbtui/folders.json` | optional tree folders you moved connections into (see Folders) |
 | `.dbtui/flows.json` | optional event flows for the flow tab and `db flows` (see Flows) |
+| `.dbtui/boards/<name>.json` | optional query boards for the board tab and `db board` (see Boards) |
 | `.dbtui/favorites.json`, `.dbtui/user360.json` | optional, meant to be committed with the project |
 
 Passwords come from `.env`, URL-encoded, keyed by the connection name upper-cased with non-alphanumerics turned into `_`:
@@ -172,6 +174,7 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `Ctrl+L` | unlock writes on a prod connection for a few minutes |
 | `Ctrl+G` | dashboard of all connections (see Dashboard) |
 | `Alt+F` · tree `F` on an SNS topic | event flows (see Flows) |
+| `Alt+B` (⌘⇧B) | query boards (see Boards) |
 | `Ctrl+]` | Loki/Prometheus range 15m · 1h · 6h · 24h · 7d (per tab) |
 | `Ctrl+H` | history |
 | tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
@@ -228,6 +231,35 @@ db flows --prod
 
 Prod connections are not contacted without `--prod` (`--prod 로 확인`). The exit code is 1 if any entry is broken or any check failed.
 
+### Boards
+
+A board is a grid of query panels you define in `.dbtui/boards/<name>.json` (one file per board, meant to be committed):
+
+```json
+{
+  "title": "shop 운영",
+  "refresh": "60s",
+  "panels": [
+    { "title": "오늘 결제", "conn": "shop-prod-read", "query": "select count(*) from t_payments where created_at >= current_date", "view": "number", "warn": ">0" },
+    { "title": "에러 로그", "conn": "loki-prod", "query": "sum(count_over_time({app=\"shop-api\"} |= \"ERROR\" [5m]))", "since": "6h", "view": "chart" },
+    { "title": "DLQ", "flow": "shop-hub-stg", "view": "flow" },
+    { "title": "최근 실패 아웃박스", "conn": "shop-stg", "query": "select id, event_type, last_fail_reason from t_outbox where retry_count > 0 order by id desc limit 20", "view": "table" }
+  ]
+}
+```
+
+`view` is `number` (first cell of the first row, highlighted when the optional `warn` rule such as `">0"` or `">=100"` matches), `table` (as many rows as fit), `chart` (the result chart) or `flow` (a flow from `.dbtui/flows.json`, one line per box). `refresh` defaults to `60s` and cannot go below `10s`; `since` sets the Loki / Prometheus / Grafana range like `--since`. Panels only read: PostgreSQL panels must be a single read-only statement and run in a READ ONLY transaction, Redis panels must be one read command (`KEYS` is refused), and sources go through the same read-only checks as the editor. Expensive source queries (full scans, ranges over 7 days) are never forced; the panel shows `비싼 질의라 보드에서 돌리지 않음: <reason>` instead. `aws` connections cannot be query panels, use a `flow` panel. Each panel has a 15 second limit. A broken file or panel shows `설정 오류: <reason>` in place and `db` keeps running.
+
+`Alt+B` (⌘⇧B, palette `보드`) picks a board and opens it in its own tab. Panels are laid out in 1 column below 80 columns of board width, 2 below 140 and 3 above. Each panel header shows its title, connection (with a red `prod` badge for prod connections), when it last ran and how long it took. Panels on the same connection run one after another and different connections run in parallel (4 at a time). The board refreshes every `refresh` while its tab is active; `r` re-reads the file and refreshes now, arrows or `hjkl` move between panels, and `Enter` opens the panel's query in a new query tab and runs it there (a flow panel opens the flow tab on that flow). `Ctrl+B` stays "go to definition", so boards use `Alt+B`.
+
+```sh
+db board                          # list boards
+db board shop-ops                 # run every panel once, prod panels skipped
+db board shop-ops --prod --format json
+```
+
+Each row is `panel`, `conn`, `view`, `value` and `error`. In JSON, number panels carry `value` (and `warn`), table / chart / flow panels carry `columns` and `rows` (capped at 50, with `truncated`). Prod panels are not run without `--prod` (`--prod 로 확인`). The exit code is 1 if any panel is broken or failed, 2 for an unknown board.
+
 ## CLI
 
 `db <command>` runs without the screen, prints the result and exits. `db help` lists commands, `db <command> -h` shows flags.
@@ -243,6 +275,7 @@ db redis -c app-stg-redis GET some:key
 db schema-diff -c app-stg --to app-prod --prod -s public
 db status --format json
 db flows --format json
+db board shop-ops --format json
 db conn add app-stg2 --url 'postgres://app_ro:pw@db.stg.example.internal:5432/app'
 ```
 
