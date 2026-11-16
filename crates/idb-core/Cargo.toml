@@ -12,3 +12,5 @@ unicode-width.workspace = true
 unicode-segmentation.workspace = true
 url.workspace = true
 percent-encoding.workspace = true
+aes.workspace = true
+cbc.workspace = true

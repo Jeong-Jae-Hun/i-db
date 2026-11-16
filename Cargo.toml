@@ -16,6 +16,8 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 url = "2"
 percent-encoding = "2"
+aes = "0.8"
+cbc = "0.1"
 
 [profile.release]
 strip = true
