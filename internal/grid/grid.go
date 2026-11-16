@@ -284,6 +284,56 @@ func (m Model) Viewing() bool {
 	return m.mode != modeTable || m.sel
 }
 
+// Screen 은 상태 줄 키 안내(R74)가 고를 지금 화면이다.
+type Screen int
+
+const (
+	ScreenTable     Screen = iota
+	ScreenNone             // 결과 없음
+	ScreenText             // 표가 아닌 결과
+	ScreenFilter           // 거르기 입력 중
+	ScreenEdit             // 칸 고치는 중
+	ScreenSelect           // 사각형 선택(V)
+	ScreenRecord           // 레코드 세로 보기(v)
+	ScreenValue            // 칸 값 보기(o)
+	ScreenValueJSON        // JSON 으로 읽히는 칸 값의 원문(t 로 나무)
+	ScreenValueTree        // JSON 나무
+	ScreenChart
+	ScreenDiff
+)
+
+// Screen 은 Update 가 키를 나누는 순서 그대로 지금 화면을 돌려준다.
+func (m Model) Screen() Screen {
+	switch {
+	case m.editing:
+		return ScreenEdit
+	case m.typing:
+		return ScreenFilter
+	case m.res == nil:
+		return ScreenNone
+	case m.mode == modeChart:
+		return ScreenChart
+	case m.mode == modeDiff:
+		return ScreenDiff
+	case m.mode == modeCell && m.cell.treeOn:
+		return ScreenValueTree
+	case m.mode == modeCell && m.cell.hasTree:
+		return ScreenValueJSON
+	case m.mode == modeCell:
+		return ScreenValue
+	case m.mode == modeDetail:
+		return ScreenRecord
+	case len(m.res.Cols) == 0:
+		return ScreenText
+	case m.sel:
+		return ScreenSelect
+	}
+	return ScreenTable
+}
+
+// Editable 은 결과를 고칠 수 있는지다(R15.1, 한 테이블에서 와 PK 열이 모두 있음).
+func (m Model) Editable() bool { return m.editBlock() == "" }
+
 // StopTyping 은 거르기 입력·칸 편집을 끝낸다. 이미 입력한 거르기 글과 편집한 값은 남긴다(Enter 와 같다).
 func (m *Model) StopTyping() {
 	m.typing = false

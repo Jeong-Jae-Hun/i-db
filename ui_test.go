@@ -511,7 +511,7 @@ func TestTabs_파일_열기는_빈_탭이면_그_탭에_아니면_새_탭에(t *
 	}
 }
 
-func TestHelp_F1_과_트리의_물음표로_열고_아무_키나_닫는다(t *testing.T) {
+func TestHelp_F1_은_도움말_트리의_물음표는_이_화면의_키다(t *testing.T) {
 	m := testModel(t)
 	m.Update(tea.KeyMsg{Type: tea.KeyF1})
 	if m.overlay != oHelp || !strings.Contains(m.View(), "Ctrl+O / Ctrl+S") {
@@ -522,8 +522,8 @@ func TestHelp_F1_과_트리의_물음표로_열고_아무_키나_닫는다(t *te
 		t.Fatal("아무 키나 닫는다")
 	}
 	m.Update(key("?"))
-	if m.overlay != oHelp {
-		t.Fatal("트리에서 ? 는 도움말")
+	if m.overlay != oKeys {
+		t.Fatal("트리에서 ? 는 이 화면의 키(R74.2)")
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m.setFocus(fEditor)
