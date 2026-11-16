@@ -3,6 +3,7 @@ package editor
 import (
 	"bytes"
 	"encoding/base64"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -13,6 +14,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// TestMain 은 복사 테스트가 실제 시스템 클립보드 명령(clip.exe 등)을 부르지 않게 OSC 52 만 쓰게 한다.
+func TestMain(m *testing.M) {
+	os.Setenv("DB_CLIPBOARD", "osc52")
+	os.Exit(m.Run())
+}
 
 var (
 	ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)

@@ -17,13 +17,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/clipboard"
 	"github.com/Jeong-Jae-Hun/i-db/internal/complete"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/editor"
@@ -221,13 +221,14 @@ var helpSections = []struct {
 		{"DB_RESTORE=0", "끝낼 때 탭 저장·다음에 되살리기 끄기 (창 크기는 남김)", ""},
 		{"DB_AUTO_SAVE·OPEN=0", "자동 저장 / 접속 고를 때 최근 파일 열기 끄기", ""},
 		{"DB_KEYS=cmd / ctrl", "키 안내를 ⌘ / Ctrl 로 (기본은 맥·kitty 키면 ⌘)", ""},
+		{"DB_CLIPBOARD=osc52 / system", "복사를 OSC 52 만 / 시스템 클립보드만 (기본은 둘 다)", ""},
 		{"enc('글')", "실행 전에 그룹 키·IV 로 staticEncrypt 암호문으로 바꿈", ""},
 	}},
 	{"맥 ⌘ (Ghostty·kitty·WezTerm·iTerm2)", fKeep, [][3]string{
 		{"⌘R / ⌘↩", "실행 (= Ctrl+R)", ""},
 		{"⌘E / ⌥⌘E", "EXPLAIN / EXPLAIN ANALYZE", ""},
 		{"⌘S / ⌘O", "저장·제출 / 열기", ""},
-		{"⌘/ · ⌘D · ⌘K · ⌘A", "주석 · 줄 복제 · 복사 · 전체 선택", ""},
+		{"⌘/ · ⌘D · ⌘K · ⌘A", "주석 · 줄 복제 · 복사 (결과는 복사 꼴 고르기) · 전체 선택", ""},
 		{"⌘Z / ⌘⇧Z", "되돌리기 / 다시 하기", ""},
 		{"⌘B", "정의로 이동 (= Ctrl+B)", ""},
 		{"⌘P", "명령 팔레트 (= Ctrl+P)", ""},
@@ -296,6 +297,7 @@ var helpSections = []struct {
 		{"Enter / v", "셀 전체 값 / 레코드 세로 보기", "enter"},
 		{"s · /", "정렬(오름→내림→없음) · 거르기 abc !abc col:abc col=v col>v col=null", "s"},
 		{"y / Y", "셀 / 행 복사", "y"},
+		{"Ctrl+K · 오른쪽 클릭", "복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN (마지막 꼴 기억)", "ctrl+k"},
 		{"e / E", "CSV / JSON 내보내기", "e"},
 		{"< / >", "열 폭", ">"},
 		{"w", "텍스트 줄바꿈 (테이블 보기는 WHERE, / 도 같음)", "w"},
@@ -795,6 +797,7 @@ type model struct {
 	pickDo       func(string) tea.Cmd // nil 이면 queries 파일 열기(Ctrl+O)
 	pickDel      func(string) tea.Cmd // 즐겨찾기 고르기의 지우기(d)
 	promptDo     func(string) tea.Cmd // oPrompt 의 Enter
+	copyFormat   grid.CopyFormat      // 복사 고르기 창에서 마지막으로 고른 꼴(R71.1). 세션 동안만 기억한다
 	yes          *yesNo
 	histCursor   int
 	pending      *pendingRun
@@ -1724,6 +1727,13 @@ func (m *model) gridKey(k tea.KeyMsg) tea.Cmd {
 	case a.EditLong != nil:
 		m.openLong(t, *a.EditLong)
 		return nil
+	case a.CopyMenu:
+		target := grid.TargetRow
+		if t.grid.Selecting() {
+			target = grid.TargetSelection
+		}
+		m.openCopyMenu(t, target)
+		return nil
 	case a.Copy != nil:
 		return copyCmd(*a.Copy)
 	case a.CopyAs != nil:
@@ -1780,14 +1790,49 @@ func (m *model) gridKey(k tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// copyCmd 는 글을 OSC 52 로 터미널 클립보드에 보낸다. 렌더러와 섞이지 않게 명령 고루틴에서 쓴다.
+// copyCmd 는 글을 OSC 52 와 시스템 클립보드(R71.4)에 보낸다. 렌더러와 섞이지 않고 시스템 명령(최대 2초)이
+// 화면을 막지 않게 명령 고루틴에서 쓴다.
 func copyCmd(s string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := osc52.New(s).WriteTo(clipboardOut); err != nil {
+		if err := clipboard.Write(clipboardOut, s); err != nil {
 			return editor.ClipboardErrMsg{Err: err}
 		}
 		return nil
 	}
+}
+
+// openCopyMenu 는 복사 고르기 창(R71)을 연다. 커서는 target 에서 마지막으로 고른 꼴에 둔다.
+// 그 대상에 없는 꼴(IN 목록은 열만)이면 그 꼴이 있는 첫 대상, 그것도 없으면 target 의 첫 꼴이다.
+func (m *model) openCopyMenu(t *queryTab, target grid.CopyTarget) {
+	choices := t.grid.CopyChoices()
+	if len(choices) == 0 {
+		m.status = "복사할 행 없음"
+		return
+	}
+	labels := make([]string, len(choices))
+	byLabel := make(map[string]grid.CopyChoice, len(choices))
+	for i, c := range choices {
+		labels[i] = c.String()
+		byLabel[labels[i]] = c
+	}
+	cursor := slices.Index(choices, grid.CopyChoice{Target: target, Format: m.copyFormat})
+	if cursor < 0 {
+		cursor = slices.IndexFunc(choices, func(c grid.CopyChoice) bool { return c.Format == m.copyFormat })
+	}
+	if cursor < 0 {
+		cursor = max(0, slices.IndexFunc(choices, func(c grid.CopyChoice) bool { return c.Target == target }))
+	}
+	m.openPicker("복사 ", labels, nil, func(label string) tea.Cmd {
+		c := byLabel[label]
+		m.copyFormat = c.Format
+		a := t.grid.CopyWith(c)
+		m.status = a.Status
+		if a.Copy == nil {
+			return nil
+		}
+		return copyCmd(*a.Copy)
+	}, nil)
+	m.pickerCursor = cursor
 }
 
 // openPicker 는 고르기 창(파일·데이터베이스·스키마·즐겨찾기)을 연다. do 가 nil 이면 queries 파일 열기다.
@@ -2113,6 +2158,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, notifyCmd(c.Name, time.Since(msg.job.start), int(msg.rows), msg.err != nil, canceled)
 	case editor.ClipboardErrMsg:
+		var big clipboard.TooBigError
+		if errors.As(msg.Err, &big) {
+			m.status = big.Status()
+			return m, nil
+		}
 		m.status = "클립보드 복사 실패: " + msg.Err.Error()
 		return m, nil
 	case fkMsg:
@@ -2726,7 +2776,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		wheel := tea.MouseEvent(msg).IsWheel()
-		if !wheel && msg.Button != tea.MouseButtonLeft {
+		// 오른쪽 클릭은 결과 칸의 복사 고르기 창(R71.3)만 쓴다
+		right := msg.Button == tea.MouseButtonRight && msg.X > rightX && msg.Y >= l.edH+4 && msg.Y <= l.bodyH
+		if !wheel && msg.Button != tea.MouseButtonLeft && !right {
 			return m, nil
 		}
 		switch {
@@ -2787,6 +2839,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			gm.X, gm.Y = msg.X-rightX-1, msg.Y-l.edH-5-len(m.resultLines(t, l.rightW))
 			t.grid.HandleMouse(gm)
 			if t.redis != nil || t.planOn || wheel {
+				return m, nil
+			}
+			// 오른쪽 클릭은 그 칸으로 옮긴 뒤 현재 행 대상의 복사 고르기 창을 연다(R71.3)
+			if msg.Button == tea.MouseButtonRight {
+				if t.grid.CellAt(gm.X, gm.Y) {
+					m.openCopyMenu(t, grid.TargetRow)
+				}
 				return m, nil
 			}
 			// 테이블 보기 바로 위 줄은 WHERE·ORDER BY 칸이다. 누른 칸의 입력을 연다(R16.4)

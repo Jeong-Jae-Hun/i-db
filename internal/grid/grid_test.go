@@ -20,7 +20,7 @@ var specialKeys = map[string]tea.KeyType{
 	"pgdown": tea.KeyPgDown, "pgup": tea.KeyPgUp, "ctrl+d": tea.KeyCtrlD, "ctrl+u": tea.KeyCtrlU,
 	"home": tea.KeyHome, "end": tea.KeyEnd, " ": tea.KeySpace, "tab": tea.KeyTab, "ctrl+c": tea.KeyCtrlC,
 	"f2": tea.KeyF2, "ctrl+n": tea.KeyCtrlN, "ctrl+s": tea.KeyCtrlS, "delete": tea.KeyDelete,
-	"ctrl+a": tea.KeyCtrlA, "ctrl+e": tea.KeyCtrlE, "ctrl+o": tea.KeyCtrlO,
+	"ctrl+a": tea.KeyCtrlA, "ctrl+e": tea.KeyCtrlE, "ctrl+o": tea.KeyCtrlO, "ctrl+k": tea.KeyCtrlK,
 }
 
 // press 는 키를 차례로 누르고 마지막 Action 을 돌려준다.

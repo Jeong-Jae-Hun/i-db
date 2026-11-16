@@ -4,7 +4,6 @@ package editor
 
 import (
 	"cmp"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"maps"
@@ -19,6 +18,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Jeong-Jae-Hun/i-db/internal/clipboard"
 )
 
 const (
@@ -720,11 +721,10 @@ func wordLeft(s string, off int) int {
 	return off
 }
 
-// copyCmd 는 OSC 52 로 터미널 클립보드에 쓴다. SSH 너머에서도 로컬 클립보드로 간다.
+// copyCmd 는 OSC 52(SSH 너머에서도 로컬 클립보드로 간다)와 시스템 클립보드에 쓴다(R71.4).
 func copyCmd(s string) tea.Cmd {
 	return func() tea.Msg {
-		_, err := fmt.Fprintf(clipboardOut, "\x1b]52;c;%s\a", base64.StdEncoding.EncodeToString([]byte(s)))
-		if err != nil {
+		if err := clipboard.Write(clipboardOut, s); err != nil {
 			return ClipboardErrMsg{Err: err}
 		}
 		return nil

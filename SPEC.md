@@ -245,7 +245,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 - R23.1 TUI 가 대체 화면에 들어가면 kitty 키 프로토콜(`CSI > 1 u`)을 켜고 나올 때 끈다(`CSI < u`). stdin·stdout 이 터미널이 아니거나 `DB_KITTY_KEYS=0` 이면 켜지 않는다. `db mcp` 는 켜지 않는다.
 - R23.2 ⌘ 조합은 같은 동작의 Ctrl 키로 바꿔 받는다. 표에 없는 ⌘ 조합은 글자로 넣지 않고 버린다. 붙여넣기 본문은 바꾸지 않는다.
-  - 예: ⌘R·⌘↩ → Ctrl+R(실행), ⌥⌘E → Alt+E(EXPLAIN ANALYZE), ⌘K → Ctrl+K(복사), ⌘A → Ctrl+A(전체 선택), ⌘⇧Z → Ctrl+Y(다시 하기), ⌘⇧F → F8(정렬).
+  - 예: ⌘R·⌘↩ → Ctrl+R(실행), ⌥⌘E → Alt+E(EXPLAIN ANALYZE), ⌘K → Ctrl+K(복사, 결과 영역은 복사 꼴 고르기 R71), ⌘A → Ctrl+A(전체 선택), ⌘⇧Z → Ctrl+Y(다시 하기), ⌘⇧F → F8(정렬).
   - 예: 프로토콜을 모르는 터미널(Terminal.app)에서는 지금처럼 Ctrl 키로 쓴다.
 - R23.3 kitty 키 감싸기는 맥, 그리고 프로토콜을 아는 터미널(`TERM_PROGRAM`이 ghostty·WezTerm·iTerm.app·kitty, `TERM`이 xterm-kitty·xterm-ghostty)에서만 켠다. Windows Terminal(`WT_SESSION`)에서는 켜지 않는다. `DB_KITTY_KEYS=1`·`0`이 먼저다. 감싼 입력은 덜 온 `ESC [` 시퀀스를 끝까지 들고 있다가 넘긴다.
   - 예: ConPTY가 마우스 보고 `ESC[<64;84;23M`을 둘로 나눠 보내도 하나로 받는다. 글자로 새어 든 마우스 보고(`<64;84;23M`)는 붙여넣기가 아니면 버린다.
@@ -718,6 +718,21 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: json 은 패널마다 `{"panel":"오늘 결제","conn":"shop-stg","view":"number","value":"3","warn":true}`, 표·차트는 `columns`·`rows`(50행까지, 넘으면 `"truncated":true`), 흐름은 `columns` `["stage","name","metrics","warn"]`·상자마다 `rows`다. prod 패널은 `"prod":true`, 건너뛰면 `"note":"--prod 로 확인"`, 실패는 `"error"`다.
   - 예: 표·tsv 의 `value`는 숫자 패널 값(경고면 뒤에 ` !`), 표·차트는 `50행`(잘렸으면 `50행+`), 흐름은 상자를 ` · `로 이은 글, 건너뛴 prod 는 note 다.
 
+### R71 복사 꼴 고르기
+
+들일 시간: 하루. 함정: OSC 52 를 막은 터미널(설정에 따라 iTerm2·tmux·Windows Terminal 일부)에서는 복사가 조용히 사라진다. 그래서 시스템 클립보드 명령에도 같이 쓴다. `clip.exe`는 BOM 없는 입력을 콘솔 코드 페이지로 읽어 한글이 깨진다.
+
+- R71.1 결과 영역에서 `Ctrl+K`(맥 ⌘K, 팔레트 `복사 꼴 고르기`)는 복사 고르기 창을 연다. 항목은 `대상 · 꼴`이고 다른 고르기 창처럼 글자로 거른다. 대상은 `현재 행`·`선택`(`V` 중에만)·`보이는 행 전체`(거른 행, 보이는 순서)·`현재 열`(보이는 행의 커서 열 값, 줄마다 하나)이다. 꼴은 `TSV (헤더)`·`CSV (헤더)`·`JSON`·`Markdown 표`·`SQL INSERT`·`IN 목록`이다. 고르면 복사하고 상태 줄에 `복사함 (N줄) · <항목>`을 보인다. 행이 없거나 표 화면이 아니면 열지 않는다.
+  - 예: 커서는 기본 대상(선택 중이면 `선택`, 아니면 `현재 행`)에서 이 세션에 마지막으로 고른 꼴에 둔다(처음은 TSV). 그 대상에 없는 꼴이면 그 꼴이 있는 첫 대상이다. 기억은 끄면 사라진다.
+  - 예: `TSV (헤더)`는 첫 줄이 열 이름이고 칸은 `Y`와 같은 이스케이프다. `CSV (헤더)`·`JSON`은 R14.2 내보내기와 같은 함수다(CSV 수식 주입 막기, JSON 은 숫자·bool·json 타입은 JSON 값, NULL 은 null, 나머지는 문자열). `Markdown 표`는 칸 안 `|`를 `\|`, 줄바꿈을 `<br>`로 바꾸고 숫자 열은 `---:`로 오른쪽 정렬이다.
+  - 예: `SQL INSERT`는 원본 테이블을 아는 결과(Origin)에서 열 대상이 아닐 때만 있고 `i`와 같은 `InsertSQL`로 고른 행 전체를 한 문으로 만든다(선택도 열 범위는 보지 않는다). `IN 목록`은 `현재 열`에만 있고 `C`와 같다(R35).
+  - 단, TSV·CSV·JSON·Markdown 은 `y`·`Y`처럼 화면 값(보류 중인 바꿈·복호화 보기 반영)이고 INSERT·IN 은 `i`·`C`처럼 DB 값이다. 추가 행은 INSERT·IN 에서 빠진다.
+- R71.2 `y`·`Y`·`V` 뒤 `y`·`C`·`i`·`U`·값 보기 `y`·`Y`의 출력은 바꾸지 않는다. 헤더 붙은 꼴은 R71.1 창에서만 고른다. `Ctrl+K`는 결과 표에 쓰던 동작이 없어(편집기 복사만 있었다) 새 키를 늘리지 않고 ⌘K(복사) 짝을 그대로 쓴다.
+- R71.3 결과 칸을 마우스 오른쪽으로 누르면 커서를 그 칸으로 옮기고 결과 포커스로 바꾼 뒤 대상 `현재 행`으로 R71.1 창을 연다. 머리 줄·빈 자리·Redis 값 편집기·실행 계획 화면에서는 열지 않는다.
+- R71.4 모든 복사(결과 표·값 보기·편집기 `Ctrl+X`·`Ctrl+K`)는 같은 함수로 OSC 52 와 시스템 클립보드에 쓴다. 시스템 명령은 맥 `pbcopy`, WSL(`WSL_DISTRO_NAME` 또는 `/proc/sys/fs/binfmt_misc/WSLInterop`)·Windows `clip.exe`(BOM 붙은 UTF-16LE), 리눅스는 `WAYLAND_DISPLAY`가 있으면 `wl-copy` 먼저, 아니면 `xclip -selection clipboard` 먼저 PATH 에 있는 것이다. 명령은 2초 제한으로 명령 고루틴에서 돌려 화면을 막지 않는다. `DB_CLIPBOARD=osc52`는 OSC 52 만, `system`은 시스템 명령만, 기본 `both`는 둘 다다.
+  - 예: `both`에서 시스템 명령이 없거나 실패해도 OSC 52 를 썼으면 조용히 넘긴다. 둘 다 실패하면 `클립보드 복사 실패: …`다.
+- R71.5 10 MB(10 MiB)를 넘는 글은 어디에도 쓰지 않고 `너무 커서 복사하지 않음 (12.3 MB) — e/E 로 내보내기`를 보인다.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |
@@ -765,12 +780,13 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | 칸 고치는 중 `space` · `now`·`today` · `Ctrl+O` | bool 순환 · 지금 시각 · 전체 화면 편집기(`Ctrl+S` 저장, `F8` JSON 정렬, `esc` 버림, R49) |
 | 결과 `w` `[` `]` `#` · `p` `P` `{` `}` · `K` `X` · `t` | 테이블 보기 WHERE·페이지·개수(일반 결과 `]`는 다음 1,000행 더 읽기, R14.7) · 결과 고정·풀기·이동 · 백엔드 취소·종료 · 계획 나무↔JSON |
 | 결과 `c` · `V` · `=` | 차트(R28) · 사각형 선택 합계(R31.1) · 고정 결과와 비교(R31.2) |
+| 결과 `Ctrl+K` (⌘K) · 오른쪽 클릭 | 복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN(R71) |
 | 결과 `C` · `F` `R` · `D` · `+` `-` | IN 목록 복사(R35) · 외래 키 따라가기·참조하는 테이블(R36) · 복호화 보기(R37) · 칸 값으로 WHERE 거르기(R38) |
 | `Ctrl+P` (⌘P) | 명령 팔레트(R40, 자동완성 창이 열려 있으면 위로 이동) |
 | 값 보기 `t` `Enter` `y` `Y` | JSON 나무↔원문 / 접기·펴기 / 값·경로 복사(R32) |
 | `q` | 트리·결과에서 종료(실행 중이면 취소 후) |
 
-환경 변수: `DB_RESTORE=0` 탭 저장·복원 끄기(R41, 창 크기·최근 파일은 남김) · `DB_AUTO_SAVE=0` 자동 저장 끄기(R45) · `DB_AUTO_OPEN=0` 최근 파일 자동 열기 끄기(R44) · `DB_KEYS=cmd|ctrl` 키 안내 글자(R47) · `DB_KITTY_KEYS=0` kitty 키 프로토콜 끄기(R23) · `DB_NOTIFY_SECS` 긴 실행 알림 기준(R30) · `DB_PROD_UNLOCK_MIN` prod 쓰기 잠금을 여는 시간(분, 기본 10, R54).
+환경 변수: `DB_RESTORE=0` 탭 저장·복원 끄기(R41, 창 크기·최근 파일은 남김) · `DB_AUTO_SAVE=0` 자동 저장 끄기(R45) · `DB_AUTO_OPEN=0` 최근 파일 자동 열기 끄기(R44) · `DB_KEYS=cmd|ctrl` 키 안내 글자(R47) · `DB_KITTY_KEYS=0` kitty 키 프로토콜 끄기(R23) · `DB_NOTIFY_SECS` 긴 실행 알림 기준(R30) · `DB_PROD_UNLOCK_MIN` prod 쓰기 잠금을 여는 시간(분, 기본 10, R54) · `DB_CLIPBOARD=osc52|system|both` 복사할 곳(기본 both, R71.4).
 
 터미널이 60×14보다 작으면 화면 대신 크기 안내만 보여 준다. DB 값·키의 제어 문자는 보이는 글자로 바꿔 그린다.
 

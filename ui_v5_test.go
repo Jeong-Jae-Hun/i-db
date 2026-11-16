@@ -22,7 +22,8 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/tableview"
 )
 
-// TestMain 은 종료 때 세션을 저장하는(R41) 테스트들이 사용자의 실제 상태 폴더에 쓰지 않게 한다.
+// TestMain 은 종료 때 세션을 저장하는(R41) 테스트들이 사용자의 실제 상태 폴더에 쓰지 않게 하고,
+// 복사 테스트가 실제 시스템 클립보드 명령을 부르지 않게 OSC 52 만 쓰게 한다(R71.4).
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "dbtui-state-")
 	if err != nil {
@@ -30,6 +31,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	os.Setenv("XDG_STATE_HOME", dir)
+	os.Setenv("DB_CLIPBOARD", "osc52")
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
