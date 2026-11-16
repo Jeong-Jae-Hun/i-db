@@ -65,10 +65,52 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// 작업들을 동시에 돌려 (자리, 결과)를 모은다. 순서는 끝난 순서다.
+/// 패닉한 작업은 그 자리의 `internal error` 다. 패닉 값에는 SQL·서버 응답이 섞여 비밀번호가 나올 수 있어 싣지 않는다.
+pub async fn join_indexed<T, F>(jobs: impl IntoIterator<Item = (usize, F)>) -> Vec<(usize, Result<T, Error>)>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    let mut set = tokio::task::JoinSet::new();
+    let mut at = std::collections::HashMap::new();
+    for (i, f) in jobs {
+        at.insert(set.spawn(f).id(), i);
+    }
+    let mut out = Vec::with_capacity(at.len());
+    while let Some(done) = set.join_next_with_id().await {
+        match done {
+            Ok((id, v)) => out.push((at[&id], Ok(v))),
+            Err(e) => out.push((at[&e.id()], Err(Error::msg("internal error")))),
+        }
+    }
+    out
+}
+
 /// fut 를 deadline 까지만 기다린다. 넘으면 Error::Deadline 이고 fut 는 버린다(연결도 함께 닫힌다).
 pub async fn with_deadline<T>(deadline: Instant, fut: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
     match tokio::time::timeout_at(deadline, fut).await {
         Ok(r) => r,
         Err(_) => Err(Error::Deadline),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn 패닉한_작업은_그_자리의_오류가_되고_값은_싣지_않는다() {
+        let jobs = (0..3).map(|i| {
+            (i, async move {
+                if i == 1 {
+                    panic!("secret-pw-9");
+                }
+                i * 10
+            })
+        });
+        let mut got = join_indexed(jobs).await;
+        got.sort_by_key(|(i, _)| *i);
+        assert_eq!(got, [(0, Ok(0)), (1, Err(Error::msg("internal error"))), (2, Ok(20))]);
     }
 }

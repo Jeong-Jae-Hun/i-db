@@ -135,6 +135,22 @@ async fn PG_큰_결과는_1000행에서_끊고_남은_행을_기다리지_않는
 }
 
 #[tokio::test]
+async fn PG_결과는_칸_글자_예산을_넘으면_거기서_자른다() {
+    let pg = need!(pg().await);
+    let mut p = pg.acquire().await.unwrap();
+    p.conn().set_result_budget(100);
+    let rows = p
+        .conn()
+        .query_cells("select repeat('x', 40) from generate_series(1, 10)", &[], usize::MAX)
+        .await
+        .unwrap();
+    assert!(rows.rows.len() == 2 && rows.truncated, "{} {}", rows.rows.len(), rows.truncated);
+    // 남은 행은 끝까지 읽어 버려 연결을 이어 쓴다
+    assert_eq!(p.conn().query_cells("select 1", &[], 10).await.unwrap().rows.len(), 1);
+    p.release();
+}
+
+#[tokio::test]
 async fn PG_여러_문장은_실행하지_않는다() {
     let pg = need!(pg().await);
     exec(&pg, "create table if not exists rs_multi(a int)").await;

@@ -256,7 +256,7 @@ impl Pg {
         let c = p.conn();
         let w = first_sql_word(sql);
         let res = if !matches!(w.as_str(), "select" | "values" | "table") || !is_read_only_sql(sql) {
-            c.query(sql, &params, MAX_ROWS).await.map(to_result)
+            c.query_cells(sql, &params, MAX_ROWS).await.map(to_result)
         } else {
             // 트랜잭션 밖이면 커서용 트랜잭션을 직접 열고, 실패하면 직접 닫는다
             let began = !c.in_tx();
@@ -271,7 +271,7 @@ impl Pg {
                 )
                 .await?;
                 let rows = c
-                    .query(&format!("FETCH FORWARD {} FROM dbtui_cursor", MAX_ROWS + 1), &[], MAX_ROWS)
+                    .query_cells(&format!("FETCH FORWARD {} FROM dbtui_cursor", MAX_ROWS + 1), &[], MAX_ROWS)
                     .await?;
                 c.exec("CLOSE dbtui_cursor").await?;
                 if began {
@@ -355,7 +355,7 @@ impl Pg {
             match c.query(&search_sql(schema, name, cols, pk), &[Some(&pattern)], usize::MAX).await {
                 Ok(hits) => {
                     for h in 0..hits.rows.len() {
-                        let val = hits.rows[h][2].as_deref().map(cap_cell).unwrap_or_default();
+                        let val = hits.rows[h][2].as_deref().map(|v| cap_cell(v.as_bytes())).unwrap_or_default();
                         res.rows.push(vec![name.clone(), hits.text(h, 0), hits.text(h, 1), val]);
                     }
                 }
@@ -442,22 +442,20 @@ impl Pg {
         let mut counts = vec![-1i64; cols.len()];
         let mut errs: Vec<Option<Error>> = vec![None; cols.len()];
         let slots = Arc::new(Semaphore::new(workers.max(1)));
-        let mut set = tokio::task::JoinSet::new();
-        for (i, c) in cols.iter().enumerate().filter(|(_, c)| c.indexed) {
+        let jobs = cols.iter().enumerate().filter(|(_, c)| c.indexed).map(|(i, c)| {
             let (pg, slots, sql) = (self.clone(), slots.clone(), linked::count_sql(c, value));
-            set.spawn(async move {
+            (i, async move {
                 let _slot = slots.acquire_owned().await;
-                (i, pg.count_one(&sql).await)
-            });
-        }
-        while let Some(done) = set.join_next().await {
-            match done {
-                Ok((i, Ok(n))) => counts[i] = n,
-                Ok((i, Err(e))) => {
+                pg.count_one(&sql).await
+            })
+        });
+        for (i, done) in crate::join_indexed(jobs).await {
+            match done.and_then(|r| r) {
+                Ok(n) => counts[i] = n,
+                Err(e) => {
                     counts[i] = 0;
                     errs[i] = Some(e);
                 }
-                Err(_) => {}
             }
         }
         (counts, errs)
@@ -509,11 +507,11 @@ async fn read_only(c: &mut wire::Conn, sql: &str, limit: usize) -> Result<QueryR
         "" => return Err(Error::msg("empty statement")),
         _ => sql,
     };
-    let rows = c.query(run, &[], limit).await?;
+    let rows = c.query_cells(run, &[], limit).await?;
     Ok(to_result(rows))
 }
 
-/// 텍스트 결과를 표로 만든다. NULL 은 "NULL", 긴 칸은 cap_cell 로 자른다. 열이 없으면 명령 태그를 text 에 싣는다.
+/// 텍스트 결과를 표로 만든다. NULL 은 "NULL" 이고 긴 칸은 query_cells 가 이미 잘랐다. 열이 없으면 명령 태그를 text 에 싣는다.
 fn to_result(rows: Rows) -> QueryResult {
     let mut res = QueryResult {
         cols: rows.fields.iter().map(|(n, _)| n.clone()).collect(),
@@ -524,11 +522,7 @@ fn to_result(rows: Rows) -> QueryResult {
     res.rows = rows
         .rows
         .into_iter()
-        .map(|r| {
-            r.into_iter()
-                .map(|v| v.as_deref().map_or_else(|| NULL_TEXT.to_string(), cap_cell))
-                .collect()
-        })
+        .map(|r| r.into_iter().map(|v| v.unwrap_or_else(|| NULL_TEXT.to_string())).collect())
         .collect();
     if res.cols.is_empty() {
         res.text = rows.tag;

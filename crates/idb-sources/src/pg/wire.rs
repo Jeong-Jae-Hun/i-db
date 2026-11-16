@@ -16,12 +16,20 @@ use postgres_protocol::message::frontend;
 use postgres_protocol::{IsNull, Oid};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use idb_core::result::cap_cell;
+
 use crate::net::{Stream, dial, io_reason, resolve};
 use crate::tls::{Verify, handshake};
 use crate::{Error, PgError};
 
 /// 접속 하나를 여는 데 쓰는 한도(pgx connect_timeout=8)
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// 서버 메시지 하나의 길이 상한. 서버는 메시지 버퍼를 MaxAllocSize(1GB-1) 넘게 만들지 못해 정상 서버는 넘지 않는다.
+/// pgx 는 상한이 없지만, 깨졌거나 악의적인 서버가 길이 칸 하나로 4GiB 를 잡게 두지 않는다
+const MAX_FRAME_BYTES: usize = 1 << 30;
+/// 결과 한 벌에 싣는 칸 글자의 합. 행(--max-rows 1만)·칸(64KiB) 상한만으로는 수 GiB 까지 쌓일 수 있어 따로 둔다.
+/// 넘으면 행 상한처럼 거기서 자르고 truncated 를 세운다
+pub(crate) const MAX_RESULT_BYTES: usize = 256 << 20;
 
 /// 접속 설정이다. 비밀번호가 있어 Debug 를 두지 않는다.
 #[derive(Clone)]
@@ -34,10 +42,10 @@ pub(crate) struct Config {
     pub sslmode: String,
 }
 
-/// 실행 결과다. 칸은 서버 텍스트 그대로이고 None 은 NULL 이다. limit 행을 넘으면 버리고 truncated 를 세운다.
+/// 실행 결과다. 칸은 서버 텍스트이고 None 은 NULL 이다. limit 행이나 결과 예산을 넘으면 버리고 truncated 를 세운다.
 pub(crate) struct Rows {
     pub fields: Vec<(String, Oid)>,
-    pub rows: Vec<Vec<Option<Vec<u8>>>>,
+    pub rows: Vec<Vec<Option<String>>>,
     pub truncated: bool,
     pub tag: String,
 }
@@ -45,14 +53,11 @@ pub(crate) struct Rows {
 impl Rows {
     /// row 행 i 칸의 글이다. NULL 은 빈 글이다(카탈로그 조회는 coalesce 로 NULL 을 막는다).
     pub fn text(&self, row: usize, i: usize) -> String {
-        self.rows[row][i]
-            .as_deref()
-            .map(|b| String::from_utf8_lossy(b).into_owned())
-            .unwrap_or_default()
+        self.rows[row][i].clone().unwrap_or_default()
     }
 
     pub fn flag(&self, row: usize, i: usize) -> bool {
-        self.rows[row][i].as_deref() == Some(b"t")
+        self.rows[row][i].as_deref() == Some("t")
     }
 }
 
@@ -61,6 +66,8 @@ pub(crate) struct Conn {
     rbuf: BytesMut,
     tx_status: u8,
     broken: bool,
+    /// 결과 한 벌의 칸 글자 예산(MAX_RESULT_BYTES). 시험이 줄인다
+    result_budget: usize,
 }
 
 /// 한 번의 접속 시도(주소·TLS 조합)의 실패다. fatal 이면 다음 시도를 하지 않는다(pgx connectPreferred).
@@ -136,6 +143,7 @@ impl Conn {
             rbuf: BytesMut::with_capacity(8192),
             tx_status: b'I',
             broken: false,
+            result_budget: MAX_RESULT_BYTES,
         };
         c.startup(cfg, tls.is_some()).await?;
         Ok(c)
@@ -154,11 +162,19 @@ impl Conn {
             .await
             .map_err(|e| soft(format!("failed to write startup message: {e}")))?;
         let mut scram: Option<ScramSha256> = None;
+        // SCRAM 은 서버 서명(AuthenticationSaslFinal)을 확인해야 끝난다. 그 전의 AuthenticationOk·ReadyForQuery 는
+        // 서버가 비밀번호를 모르는 채 통과시킨 것일 수 있어 받지 않는다
+        let (mut scram_verified, mut authed) = (false, false);
         loop {
             let msg = self.read().await.map_err(|e| soft(format!("failed to receive message: {e}")))?;
             let mut out = BytesMut::new();
             match msg {
-                Message::AuthenticationOk => {}
+                Message::AuthenticationOk => {
+                    if scram.is_some() && !scram_verified {
+                        return Err(soft("failed SASL auth: server skipped SCRAM verification".into()));
+                    }
+                    authed = true;
+                }
                 Message::AuthenticationCleartextPassword => {
                     frontend::password_message(cfg.password.as_bytes(), &mut out).map_err(|e| soft(e.to_string()))?;
                 }
@@ -188,6 +204,7 @@ impl Conn {
                 Message::AuthenticationSaslFinal(body) => {
                     let s = scram.as_mut().ok_or_else(|| soft("failed SASL auth: unexpected message".into()))?;
                     s.finish(body.data()).map_err(|e| soft(format!("failed SASL auth: {e}")))?;
+                    scram_verified = true;
                 }
                 Message::ErrorResponse(body) => {
                     let e = pg_error(&body);
@@ -198,6 +215,7 @@ impl Conn {
                         fatal,
                     });
                 }
+                Message::ReadyForQuery(_) if !authed => return Err(soft("received unexpected message".into())),
                 Message::ReadyForQuery(body) => {
                     self.tx_status = body.status();
                     return Ok(());
@@ -249,7 +267,22 @@ impl Conn {
     }
 
     /// extended protocol 로 sql 하나를 실행하고 결과를 텍스트로 받는다. params 는 텍스트로 보내 서버가 타입을 정한다.
+    #[cfg(test)]
+    pub fn set_result_budget(&mut self, n: usize) {
+        self.result_budget = n;
+    }
+
+    /// 카탈로그 조회용이다. 칸을 자르지 않는다.
     pub async fn query(&mut self, sql: &str, params: &[Option<&str>], limit: usize) -> Result<Rows, Error> {
+        self.query_inner(sql, params, limit, false).await
+    }
+
+    /// 사용자 문장용이다. 칸을 받는 대로 cap_cell(64KiB)로 잘라 원값 전체를 쌓아 두지 않는다.
+    pub async fn query_cells(&mut self, sql: &str, params: &[Option<&str>], limit: usize) -> Result<Rows, Error> {
+        self.query_inner(sql, params, limit, true).await
+    }
+
+    async fn query_inner(&mut self, sql: &str, params: &[Option<&str>], limit: usize, cap: bool) -> Result<Rows, Error> {
         let mut buf = BytesMut::new();
         let enc = |e: std::io::Error| Error::msg(e.to_string());
         frontend::parse("", sql, std::iter::empty::<Oid>(), &mut buf).map_err(enc)?;
@@ -282,6 +315,7 @@ impl Conn {
             tag: String::new(),
         };
         let mut first: Option<Error> = None;
+        let mut left = self.result_budget;
         loop {
             match self.read_or_break().await? {
                 Message::RowDescription(body) => {
@@ -294,11 +328,19 @@ impl Conn {
                     if first.is_some() {
                         continue;
                     }
-                    if out.rows.len() >= limit {
+                    if out.truncated || out.rows.len() >= limit {
                         out.truncated = true;
                         continue;
                     }
-                    out.rows.push(row_values(&body).map_err(|e| Error::msg(e.to_string()))?);
+                    let row = row_values(&body, cap).map_err(|e| Error::msg(e.to_string()))?;
+                    let size: usize = row.iter().flatten().map(String::len).sum();
+                    match left.checked_sub(size) {
+                        Some(l) => {
+                            left = l;
+                            out.rows.push(row);
+                        }
+                        None => out.truncated = true,
+                    }
                 }
                 Message::CommandComplete(body) => out.tag = body.tag().unwrap_or_default().to_string(),
                 Message::ErrorResponse(body) => {
@@ -336,6 +378,13 @@ impl Conn {
 
     async fn read(&mut self) -> Result<Message, String> {
         loop {
+            // 머리(종류 1 + 길이 4)를 보고 길이부터 막는다. postgres-protocol 은 길이만큼 버퍼를 먼저 잡는다
+            if self.rbuf.len() >= 5 {
+                let len = u32::from_be_bytes([self.rbuf[1], self.rbuf[2], self.rbuf[3], self.rbuf[4]]) as usize;
+                if len > MAX_FRAME_BYTES {
+                    return Err(format!("message length {len} exceeds {MAX_FRAME_BYTES} bytes"));
+                }
+            }
             if let Some(m) = Message::parse(&mut self.rbuf).map_err(|e| e.to_string())? {
                 return Ok(m);
             }
@@ -363,9 +412,19 @@ impl Conn {
     }
 }
 
-fn row_values(body: &DataRowBody) -> std::io::Result<Vec<Option<Vec<u8>>>> {
+fn row_values(body: &DataRowBody, cap: bool) -> std::io::Result<Vec<Option<String>>> {
     let buf = body.buffer();
-    body.ranges().map(|r| Ok(r.map(|r| buf[r].to_vec()))).collect()
+    body.ranges()
+        .map(|r| {
+            Ok(r.map(|r| {
+                if cap {
+                    cap_cell(&buf[r])
+                } else {
+                    String::from_utf8_lossy(&buf[r]).into_owned()
+                }
+            }))
+        })
+        .collect()
 }
 
 fn pg_error(body: &ErrorResponseBody) -> PgError {
@@ -394,5 +453,86 @@ fn connect_error(cfg: &Config, details: &str) -> Error {
         Error::msg(format!("{prefix}\n\t{}", details.replace('\n', "\n\t")))
     } else {
         Error::msg(format!("{prefix} {details}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut m = vec![tag];
+        m.extend_from_slice(&(body.len() as u32 + 4).to_be_bytes());
+        m.extend_from_slice(body);
+        m
+    }
+
+    /// 시작 메시지를 받은 뒤 replies 를 차례로 보내는 가짜 서버다. 각 답 앞에 클라이언트 메시지 하나를 읽는다(첫 답 제외).
+    async fn fake_server(replies: Vec<Vec<u8>>) -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).await.unwrap();
+            let mut rest = vec![0u8; u32::from_be_bytes(len) as usize - 4];
+            s.read_exact(&mut rest).await.unwrap();
+            for (i, r) in replies.into_iter().enumerate() {
+                if i > 0 {
+                    let mut head = [0u8; 5];
+                    if s.read_exact(&mut head).await.is_err() {
+                        return;
+                    }
+                    let mut body = vec![0u8; u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize - 4];
+                    let _ = s.read_exact(&mut body).await;
+                }
+                let _ = s.write_all(&r).await;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        port
+    }
+
+    fn cfg(port: u16) -> Config {
+        Config {
+            host: "127.0.0.1".into(),
+            port,
+            user: "u".into(),
+            password: "pw".into(),
+            database: "d".into(),
+            sslmode: "disable".into(),
+        }
+    }
+
+    async fn connect_err(replies: Vec<Vec<u8>>) -> String {
+        let port = fake_server(replies).await;
+        match tokio::time::timeout(Duration::from_secs(3), Conn::connect(&cfg(port))).await {
+            Ok(Ok(_)) => "connected".into(),
+            Ok(Err(e)) => e.to_string(),
+            Err(_) => "timed out".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn SCRAM_서버_서명_확인_없이는_인증_성공으로_보지_않는다() {
+        let sasl = msg(b'R', b"\0\0\0\x0aSCRAM-SHA-256\0\0");
+        let ok = msg(b'R', &0u32.to_be_bytes());
+        let ready = msg(b'Z', b"I");
+        let err = connect_err(vec![sasl, [ok.clone(), ready.clone()].concat()]).await;
+        assert!(err.ends_with("failed SASL auth: server skipped SCRAM verification"), "{err}");
+        // AuthenticationOk 없이 ReadyForQuery 만 와도 받지 않는다
+        let err = connect_err(vec![ready]).await;
+        assert!(err.ends_with("received unexpected message"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn 길이_칸이_너무_큰_메시지는_버퍼를_잡기_전에_거절한다() {
+        let mut huge = vec![b'R'];
+        huge.extend_from_slice(&u32::MAX.to_be_bytes());
+        let err = connect_err(vec![huge]).await;
+        assert!(
+            err.ends_with("failed to receive message: message length 4294967295 exceeds 1073741824 bytes"),
+            "{err}"
+        );
     }
 }

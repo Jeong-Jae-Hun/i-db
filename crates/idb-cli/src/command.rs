@@ -20,7 +20,7 @@ use idb_core::textutil::{go_upper, printable};
 use idb_core::user360;
 use idb_sources::linked::{LINKED_CAP, LINKED_MAX_COLUMNS, LinkedColumn, linked_base};
 use idb_sources::schemadiff::diff_snapshots;
-use idb_sources::{Clients, Error, TableRef, with_deadline};
+use idb_sources::{Clients, Error, TableRef, join_indexed, with_deadline};
 use tokio::time::Instant;
 
 use crate::cli::{EXIT_ERR, EXIT_REFUSED, EXIT_USAGE, Opts};
@@ -417,7 +417,7 @@ async fn user360(env: &Env<'_>) -> Result<Vec<CliResult>, CmdError> {
     if qs.is_empty() {
         return Err(Error::msg("맞는 조회가 없음").into());
     }
-    let mut set = tokio::task::JoinSet::new();
+    let mut jobs = Vec::new();
     let mut out: Vec<CliResult> = Vec::with_capacity(qs.len());
     for (i, q) in qs.iter().enumerate() {
         let mut r = CliResult {
@@ -431,21 +431,20 @@ async fn user360(env: &Env<'_>) -> Result<Vec<CliResult>, CmdError> {
             (None, Some(c)) => {
                 r.conn = c.name.clone();
                 let (clients, c, sql, deadline) = (env.clients.clone(), c.clone(), inline_args(&q.sql, &q.args), env.deadline);
-                set.spawn(async move {
-                    let res = with_deadline(deadline, async {
+                jobs.push((i, async move {
+                    with_deadline(deadline, async {
                         let pg = clients.pg(&c).await?;
                         pg.run_read_only_rows(&sql, MAX_ROWS).await
                     })
-                    .await;
-                    (i, res)
-                });
+                    .await
+                }));
             }
         }
         out.push(r);
     }
-    while let Some(done) = set.join_next().await {
-        let Ok((i, res)) = done else { continue };
-        match res {
+    // 패닉한 조회도 그 칸의 오류(internal error)로 남겨 결과가 조용히 빠지지 않게 한다
+    for (i, done) in join_indexed(jobs).await {
+        match done.and_then(|r| r) {
             Ok(res) => out[i].res = Some(res),
             // 오류 글은 run_cli 가 접속 비밀번호를 지워 찍는다
             Err(e) => out[i].err = Some(e.to_string()),
@@ -558,11 +557,10 @@ fn linked_conns<'a>(proj: &'a Project, cur: &'a Conn) -> Vec<&'a Conn> {
 async fn find_linked(env: &Env<'_>, conns: &[Conn], col: &str, base: &str, value: &str) -> Vec<LinkedFound> {
     let deadline = env.deadline.min(Instant::now() + LINKED_TIMEOUT);
     let slots = Arc::new(tokio::sync::Semaphore::new(LINKED_CONN_WORKERS));
-    let mut set = tokio::task::JoinSet::new();
-    for (i, c) in conns.iter().enumerate() {
+    let jobs = conns.iter().enumerate().map(|(i, c)| {
         let (clients, c, slots) = (env.clients.clone(), c.clone(), slots.clone());
         let (col, base, value) = (col.to_string(), base.to_string(), value.to_string());
-        set.spawn(async move {
+        (i, async move {
             let _slot = slots.acquire_owned().await;
             let mut f = LinkedFound::default();
             let r = with_deadline(deadline, async {
@@ -576,14 +574,16 @@ async fn find_linked(env: &Env<'_>, conns: &[Conn], col: &str, base: &str, value
                 Ok((cols, truncated, counts, errs)) => (f.cols, f.truncated, f.counts, f.errs) = (cols, truncated, counts, errs),
                 Err(e) => f.err = Some(e),
             }
-            (i, f)
-        });
-    }
+            f
+        })
+    });
     let mut found: Vec<LinkedFound> = conns.iter().map(|_| LinkedFound::default()).collect();
-    while let Some(done) = set.join_next().await {
-        if let Ok((i, f)) = done {
-            found[i] = f;
-        }
+    // 패닉한 접속은 접속 실패 줄로 보이고 종료 코드 1 이 된다(빈 결과로 보이지 않게)
+    for (i, done) in join_indexed(jobs).await {
+        found[i] = done.unwrap_or_else(|e| LinkedFound {
+            err: Some(e),
+            ..Default::default()
+        });
     }
     found
 }
