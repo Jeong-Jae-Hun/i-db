@@ -91,7 +91,9 @@ func TestGolden(t *testing.T) {
 }
 
 func goldenText(c goldenCase, code int, out, errw, dir string) string {
-	norm := func(s string) string { return elapsedRe.ReplaceAllString(strings.ReplaceAll(s, dir, "{P}"), `"elapsed_ms":0`) }
+	norm := func(s string) string {
+		return elapsedRe.ReplaceAllString(strings.ReplaceAll(s, dir, "{P}"), `"elapsed_ms":0`)
+	}
 	args, _ := json.Marshal(c.Args)
 	var b strings.Builder
 	b.WriteString("args: " + string(args) + "\n")
