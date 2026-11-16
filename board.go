@@ -309,6 +309,8 @@ func (r panelResult) failed() bool {
 // 비싼 질의(ErrNeedsConfirm)는 Force 로 다시 보내지 않는다. prod 가 거짓이면 흐름의 prod 접속은 묻지 않는다(CLI).
 func runPanel(ctx context.Context, clients *db.Clients, sources *sourcePool, proj *db.Project, p boardPanel, prod bool) panelResult {
 	r := panelResult{at: time.Now()}
+	ctx, cancel := context.WithTimeout(ctx, boardTimeout)
+	defer cancel()
 	if p.View == "flow" {
 		r.boxes = flowBoxes(p.flow, resolveFlow(ctx, clients, sources, proj, p.flow, prod), true)
 		r.elapsed = time.Since(r.at)
@@ -320,8 +322,6 @@ func runPanel(ctx context.Context, clients *db.Clients, sources *sourcePool, pro
 		return r
 	}
 	c := proj.Conns[i]
-	ctx, cancel := context.WithTimeout(ctx, boardTimeout)
-	defer cancel()
 	limit := boardRows
 	if p.View == "chart" {
 		limit = sourceDefaultRows

@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/awsres"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/flows"
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
@@ -230,6 +231,21 @@ func TestRunPanel_비싼_질의는_Force_로_보내지_않고_까닭을_보인�
 	f.run = func(source.Query) (*db.Result, error) { return nil, source.ErrWrite }
 	if r := runPanel(context.Background(), nil, sources, p, boardPanel{Conn: "logs-stg", Query: "x", View: "table"}, true); r.err != msgReadOnlySource {
 		t.Fatalf("쓰기 거절: %+v", r)
+	}
+}
+
+func TestRunPanel_흐름_패널도_15초_제한_안에서_푼다(t *testing.T) {
+	fakeFlow(t, flows.Stat{}, sampleTopic(), nil)
+	var left time.Duration
+	flowTopic = func(ctx context.Context, _ *sourcePool, _ db.Conn, _ string) (*awsres.Topic, error) {
+		if d, ok := ctx.Deadline(); ok {
+			left = time.Until(d)
+		}
+		return sampleTopic(), nil
+	}
+	runPanel(context.Background(), nil, nil, boardProject(t), boardPanel{View: "flow", flow: flows.Flow{Name: "x", AWS: "aws-stg", Topic: "t"}}, true)
+	if left <= 0 || left > boardTimeout {
+		t.Fatalf("흐름 풀이에 패널 제한이 걸린다: %v", left)
 	}
 }
 
