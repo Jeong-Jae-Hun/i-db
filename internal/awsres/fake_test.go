@@ -125,7 +125,19 @@ func (f *fakeLambda) ListFunctions(context.Context, *lambda.ListFunctionsInput, 
 	return &lambda.ListFunctionsOutput{Functions: f.fns}, nil
 }
 
+// ListEventSourceMappings 는 FunctionName 으로 고르고, EventSourceArn 을 주면 모든 함수에서 그 소스의 매핑을 모은다.
 func (f *fakeLambda) ListEventSourceMappings(_ context.Context, in *lambda.ListEventSourceMappingsInput, _ ...func(*lambda.Options)) (*lambda.ListEventSourceMappingsOutput, error) {
+	if src := aws.ToString(in.EventSourceArn); src != "" {
+		out := &lambda.ListEventSourceMappingsOutput{}
+		for _, ms := range f.mappings {
+			for _, m := range ms {
+				if aws.ToString(m.EventSourceArn) == src {
+					out.EventSourceMappings = append(out.EventSourceMappings, m)
+				}
+			}
+		}
+		return out, nil
+	}
 	return &lambda.ListEventSourceMappingsOutput{EventSourceMappings: f.mappings[aws.ToString(in.FunctionName)]}, nil
 }
 

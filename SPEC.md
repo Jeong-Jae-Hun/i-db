@@ -19,6 +19,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `.idea/data_source_mapping.xml` | `queries/` 파일별 접속 uuid |
 | `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 저장소 비밀값 `OS_`·`LOKI_`·`PROM_<이름>_PASSWORD`·`GRAFANA_<이름>_TOKEN`(R60.1), 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
 | `.dbtui/user360.json` | 사용자 한눈에 보기 조회 목록(R51, 없으면 빈 목록) |
+| `.dbtui/flows.json` | 이벤트 흐름 목록(R69, 없으면 빈 목록). 접속 이름·테이블·열 이름만 든다 |
 | `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`athena`·`aws`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`·`workgroup`·`output`, R60.1·R67.1·R68) |
 
 `<이름>`은 접속 이름을 대문자로 바꾸고 영숫자 외 문자를 `_`로 바꾼 것이다.
@@ -605,7 +606,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R64 대시보드
 
-- R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 아직 결과 없음)·지연(ms)·버전·주요 수치다. 다시 확인하는 동안에는 줄·수치·요약이 마지막 결과를 그대로 보이고 머리에 `확인 중 N`만 센다. 표가 다섯 줄을 못 얻을 만큼 낮으면 요약 카드를 한 줄 글로 접는다.
+- R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). aws 접속이 있으면 `DLQ 쌓인 큐`(aws 줄 `DLQ 쌓임` 합), 흐름(R69)에 `retry` 열이 있는 아웃박스가 있으면 `아웃박스 재시도`(그 재시도 수 합) 카드를 더하고 0보다 크면 경고 색이다. 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 아직 결과 없음)·지연(ms)·버전·주요 수치다. 다시 확인하는 동안에는 줄·수치·요약이 마지막 결과를 그대로 보이고 머리에 `확인 중 N`만 센다. 표가 다섯 줄을 못 얻을 만큼 낮으면 요약 카드를 한 줄 글로 접는다.
   - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`, Athena `ENABLED · 스캔 상한 10.0GB`(버전 열은 엔진 판), aws `큐 63 · DLQ 쌓임 2`(R67.1).
   - 예: PostgreSQL `활성`은 확인하는 연결 자신을 뺀다. Redis 메모리는 `maxmemory:0`이면 `1.1GB/제한 없음`, `maxmemory` 필드를 숨긴 서버는 사용량만 `1.1GB`다.
   - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있거나, aws DLQ에 메시지가 쌓인 큐가 있으면 그 칸을 경고 색으로 그린다.
@@ -670,6 +671,24 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 실행 중 취소(R3.4, CLI `--timeout`)하면 `StopQueryExecution`을 따로 5초 기한으로 보낸다. 읽기 전용 저장소에서 유일하게 읽기가 아닌 호출이고, 보내지 않으면 서버에서 질의가 끝까지 돌며 스캔 요금을 쌓는다. `StartQueryExecution` 응답 전에 취소하면 질의 id가 없어 멈추지 못한다.
   - 필요한 IAM 권한: `athena:ListDatabases`·`ListTableMetadata`·`GetTableMetadata`·`StartQueryExecution`·`GetQueryExecution`·`GetQueryResults`·`StopQueryExecution`·`GetWorkGroup`, Glue 카탈로그 읽기(`glue:GetDatabases`·`GetTables`·`GetTable`·`GetPartitions`), 데이터 S3 읽기와 결과 위치 S3 쓰기(`s3:GetObject`·`ListBucket`·`PutObject`·`GetBucketLocation`).
 
+### R69 이벤트 흐름
+
+들일 시간: 반나절. 함정: 아웃박스 `where`는 사용자 SQL 조각이라 한 문장만 받고 READ ONLY 가 나머지를 막는다. SNS 토픽 이름은 ARN 이 아니라 `ListTopics`를 다 훑어 찾는다.
+
+- R69.1 `.dbtui/flows.json`은 흐름 배열이다. 항목은 `name`, 선택인 `outbox`(`conn`·`table`·`type`, 선택 `retry`·`due`·`where`), `aws`, `topic`(이름 또는 ARN)이다. `outbox.conn`은 PostgreSQL 접속, `aws`는 `aws` 종류(R67) 접속 이름이어야 한다. 파일이 없으면 흐름이 없고 db 는 그대로 켜진다. JSON 이 깨졌으면 흐름 탭 맨 위·CLI 오류에 `설정 오류: .dbtui/flows.json: …`을, 항목 하나가 틀리면 그 항목만 `설정 오류: <까닭>`으로 보이고 나머지는 푼다.
+  - 예: `{"name":"shop-hub-stg","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at","where":"event_type like 'DATA_%'"},"aws":"aws-stg","topic":"stg-shop-hub"}`.
+  - 예: `aws`에 PostgreSQL 접속을 주면 `설정 오류: aws shop-stg: want kind aws, got postgresql`, 없는 접속은 `aws nope: no such connection`, 이름이 겹치면 뒤 것이 `duplicate name …`, `table`이 `a.b.c`면 `outbox.table must be table or schema.table`이다.
+- R69.2 아웃박스 수는 `대기 N`(`where`에 맞는 행 수), `재시도 N`(`retry > 0`, `retry`가 있을 때), `오래됨 N`(`due < now() - interval '5 minutes'`, `due`가 있을 때)이다. 한 문장으로 묻고, `table`(`스키마.테이블`은 마디마다)·열 이름은 `db.QuoteIdent`로 감싼다. `where`는 사용자 개인 설정 파일의 SQL 이라 편집기 SQL 처럼 그대로 `AND`로 붙이되(줄을 바꿔 괄호로 감싸 끝의 `--` 주석이 뒤를 먹지 않게), 문장 경계로 나눠 하나이고 문자열·주석 밖에 `;`가 없어야 한다(아니면 `outbox.where must be a single condition without ';'` 설정 오류). 질의는 늘 READ ONLY 트랜잭션(`RunReadOnly`)으로, 여는 데 15초·질의 5초 제한(R64.2와 같음)이다. 상세(`Enter`)는 종류별 상위 10개 `type`·`count`·`retrying`·`oldest_due` 표다.
+  - 예: `select count(*), count(*) filter (where "retry_count" > 0), count(*) filter (where "check_needed_at" < now() - interval '5 minutes') from "public"."t_outbox" where (⏎event_type like 'DATA_%'⏎)`.
+  - 단, `where` 안에 쓰기를 숨겨도(CTE 안 `delete` 등) 서버 READ ONLY 가 막아 그 흐름의 아웃박스가 오류로 보인다.
+- R69.3 토픽은 `aws` 접속으로 푼다: 이름이면 `ListTopics`에서 끝 마디가 같은 ARN → `ListSubscriptionsByTopic` → 같은 계정 SQS 구독마다 `GetQueueUrl`·`GetQueueAttributes`(대기·처리 중·지연·RedrivePolicy) → DLQ 대기 수(R67.2와 같음, 못 읽으면 `?`) → `ListEventSourceMappings`(`EventSourceArn`=큐)의 함수 이름·상태·마지막 결과. 다른 프로토콜(lambda·https·email…)과 다른 계정 큐는 프로토콜·대상만 보이는 잎이고, email 받는 사람은 `a***@domain`으로 가린다. 큐 하나가 실패하면 그 상자만 오류다. 부르는 API 는 R67.1 규칙 그대로 읽기뿐이다.
+- R69.4 `Alt+F`(팔레트 `흐름`)는 흐름 탭을 하나만 열고, aws 트리의 SNS 토픽 줄 `F`는 그 토픽을 아웃박스 없는 흐름(`<토픽> · <접속>`)으로 목록 끝에 더해 고른다(다른 줄의 `F`는 데이터 검색 R33.2 그대로). 왼쪽은 흐름 목록(`●` 문제 없음, `!` 경고, `✕` 설정 오류·실패, `…` 아직 결과 없음), 오른쪽은 고른 흐름의 그림이다. 대시보드(R64.2)처럼 모든 흐름을 동시에 풀고, 탭이 활성인 동안 30초마다 다시, `r`은 바로 다시 푼다. 다시 풀 때와 탭을 닫을 때 진행 중인 이전 풀이를 취소하고, 그 사이 이전 결과를 그대로 보이며 머리에 `확인 중 N`을 센다. 대시보드처럼 prod 접속도 푼다. 세션 복원(R41)은 이 탭을 되살리지 않는다.
+  - 그림은 왼쪽 → 오른쪽 `[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 오래됨 1] ──▶ [SNS stg-shop-hub] ─┬─▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]`이고, 구독이 여럿이면 `├─▶`·`└─▶`로 갈라지며, DLQ 는 큐 아래 `└─ DLQ q1-dlq 4` 가지다. 가장 긴 줄이 폭을 넘으면 위 → 아래(`▼`, 큐 아래 `├─ DLQ`·`└─▶ [λ …]`)로 쌓는다.
+  - DLQ 대기 > 0, 재시도 > 0, 오래됨 > 0, Lambda 매핑 상태가 `Enabled`가 아니거나 마지막 결과가 `OK`가 아니면 그 상자를 경고 색(`dashWarnStyle`)으로 그린다. 단, 마지막 결과 `No records processed`는 메시지가 없던 매핑의 보통 값이라 경고하지 않는다. 오류 상자는 빨강이다.
+  - `↑↓`·`j k`는 흐름, `←→`·`h l`은 상자를 고르고(고른 상자는 뒤집어 그림), `Enter`는 상세를 새 결과 탭에 연다: 아웃박스는 R69.2 종류별 표, SNS 는 구독 표(R67.2), 큐·DLQ 는 속성 표(R67.2), Lambda 는 매핑 표(R67.3). 잎 구독은 `열 상세가 없음`이다.
+- R69.5 CLI `db flows [-f 흐름…] [--format table|tsv|json] [--prod]`는 흐름(`-f`·위치 인자로 고르고, 없으면 모두)을 동시에 한 번 풀어 상자마다 한 줄 `flow`·`stage`(`outbox`·`sns`·`sqs`·`dlq`·`lambda`·`sub`·`config`)·`name`·`metrics`·`warn`을 찍는다. prod 접속은 `--prod`가 없으면 묻지 않고 `--prod 로 확인`이다(R58.2·R64.3). 설정 오류나 실패한 상자가 하나라도 있으면 종료 코드 1, 없는 흐름 이름·`--format csv`는 2다.
+  - 예: json 은 줄마다 `{"flow":"hub","stage":"dlq","name":"q1-dlq","metrics":"4","warn":true}`이고 실패는 `"error"`, 확인하지 않은 prod 는 `"note":"--prod 로 확인"`을 더한다. 표·tsv 의 `metrics` 칸은 오류·note 가 있으면 그것이다.
+
 ## 4. 화면과 키
 
 | 영역 | 자리 | 내용 |
@@ -699,12 +718,13 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Alt+C` (⌘⇧C) | 같은 쿼리를 다른 접속에서 실행해 비교(R53.1) |
 | `Ctrl+L` (⌘L) | 활성 탭 prod 접속의 쓰기 잠금 열기·닫기(R54) |
 | `Ctrl+G` (⌘G) | 대시보드: 모든 접속의 상태·지연·버전·수치(`r` 다시 확인, `Enter` 트리에서 고르기, `/` 거르기, R64) |
+| `Alt+F` | 흐름: 아웃박스 → SNS → SQS → DLQ·Lambda 그림(`r` 다시 풀기, `↑↓` 흐름, `←→` 상자, `Enter` 상세, R69) |
 | `Ctrl+]` | Loki·Prometheus·Grafana 탭의 범위 `15m·1h·6h·24h·7d` 돌리기(탭마다, 편집기 위 줄에 `최근 1h`, R62.2) |
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |
 | 트리 `Enter` `/` `r` `d` `D` `I` `A` `L` `S` | 펼치기·테이블 보기·값 편집·쿼리 파일 열기(접속은 최근 파일 자동 열기, R44) / 거르기 / 새로고침(쿼리 파일 목록도) / 구조 / DDL / CSV 가져오기 / 활동·잠금·크기(Redis 는 INFO·SLOWLOG·큰 키) |
 | 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블·aws 노드 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔, Athena 파티션 테이블은 `비싼 질의: 파티션 조건 없음: y/N` 뒤 `LIMIT 50`) / 펼치기(R60~R63·R67·R68) |
-| 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄) |
+| 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄), aws SNS 토픽 줄은 그 토픽의 흐름(R69.3) |
 | 트리 `X` | Redis 패턴 키 일괄 삭제(접속·이름공간 줄, `esc` 멈춤, R42). db 전용 PostgreSQL 접속 줄은 접속 지우기(R59.3) |
 | 트리 `N` `E` `Alt+X` | 새 접속(URL 붙여넣기·`Ctrl+T` 시험) / db 전용 접속 고치기 / 지우기(Redis 포함, 팔레트 `접속 지우기`, R59) |
 | 트리 `=` | 다른 접속과 스키마 비교(PostgreSQL 접속·스키마 줄, R53.2) |

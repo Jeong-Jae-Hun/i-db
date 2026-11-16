@@ -73,10 +73,10 @@ func (m *model) saveSession() error {
 	if restoreOff() {
 		return session.Save(path, m.proj.Dir, st)
 	}
-	// 대시보드 탭(R64)은 글이 없어 되살리지 않는다. 활성 탭 자리는 남은 탭 기준으로 맞춘다
+	// 대시보드(R64)·흐름(R69) 탭은 글이 없어 되살리지 않는다. 활성 탭 자리는 남은 탭 기준으로 맞춘다
 	st.Active, st.Tabs = 0, nil
 	for _, t := range m.tabs {
-		if t.dash != nil {
+		if t.dash != nil || t.flow != nil {
 			continue
 		}
 		if t == m.cur() {

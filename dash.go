@@ -11,7 +11,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/awsres"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/flows"
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
@@ -52,6 +54,8 @@ type dashState struct {
 	// cursor 는 거른 줄 수를 넘을 수 있다(접속을 다시 읽어 줄었을 때). 그릴 때는 잘라 쓰고 키를 받을 때 맞춘다
 	cursor int
 	filter string
+	// outbox 는 흐름(R69) 아웃박스의 재시도 수다. 흐름 이름으로 들고 재시도 열이 있는 아웃박스만 센다
+	outbox map[string]int64
 }
 
 // dashProbeMsg 는 접속 하나의 확인 결과다.
@@ -59,6 +63,14 @@ type dashProbeMsg struct {
 	tab, gen int
 	uuid     string
 	h        db.Health
+}
+
+// dashOutboxMsg 는 흐름 아웃박스 하나의 재시도 수다. 실패하면 ok 가 거짓이고 합에서 뺀다.
+type dashOutboxMsg struct {
+	tab, gen int
+	name     string
+	retry    int64
+	ok       bool
 }
 
 // dashTickMsg 는 다시 확인할 때가 됐다는 알림이다. 탭을 닫았거나 gen 이 낡았으면 버려 타이머가 멈춘다.
@@ -87,7 +99,7 @@ func (m *model) openDash() tea.Cmd {
 	t := m.newTab()
 	m.setConn(t, -1)
 	t.title = "대시보드"
-	t.dash = &dashState{health: map[string]db.Health{}, pending: map[string]bool{}}
+	t.dash = &dashState{health: map[string]db.Health{}, pending: map[string]bool{}, outbox: map[string]int64{}}
 	m.setFocus(fResult)
 	return m.dashRefresh(t)
 }
@@ -109,8 +121,66 @@ func (m *model) dashRefresh(t *queryTab) tea.Cmd {
 			return dashProbeMsg{tab: id, gen: gen, uuid: c.UUID, h: probeConn(ctx, clients, sources, c)}
 		})
 	}
+	cmds = append(cmds, m.dashOutboxes(ctx, t)...)
 	m.status = "대시보드 확인 중…"
 	return tea.Batch(cmds...)
+}
+
+// dashOutboxes 는 흐름(R69) 아웃박스 가운데 재시도 열이 있는 것의 재시도 수를 확인과 같은 제한(5초)으로 센다.
+// 대시보드는 prod 접속도 확인하므로 prod 아웃박스도 센다. flows.json 이 없거나 깨졌으면 아무것도 하지 않는다.
+func (m *model) dashOutboxes(ctx context.Context, t *queryTab) []tea.Cmd {
+	d := t.dash
+	fs, _ := flows.Load(m.proj.Dir, m.proj.Conns)
+	id, gen, clients := t.id, d.gen, m.clients
+	// 다시 확인하는 동안에도 이전 수를 보인다(R64.1). flows.json 에서 빠진 흐름만 지운다
+	keep := map[string]bool{}
+	var cmds []tea.Cmd
+	for _, f := range fs {
+		o := f.Outbox
+		if f.Err != "" || o == nil || o.Retry == "" {
+			continue
+		}
+		i := connByName(m.proj, o.Conn)
+		if i < 0 {
+			continue
+		}
+		c, name := m.conn(i), f.Name
+		d.pending["outbox:"+name] = true
+		keep[name] = true
+		if _, ok := d.outbox[name]; !ok {
+			d.outbox[name] = -1 // 아직 결과 없음. 카드는 보이되 합에 넣지 않는다
+		}
+		cmds = append(cmds, func() tea.Msg {
+			st, err := flowOutbox(ctx, clients, c, *o)
+			return dashOutboxMsg{tab: id, gen: gen, name: name, retry: st.Retry, ok: err == nil}
+		})
+	}
+	for name := range d.outbox {
+		if !keep[name] {
+			delete(d.outbox, name)
+		}
+	}
+	return cmds
+}
+
+func (m *model) dashOutboxed(msg dashOutboxMsg) {
+	t := m.findTab(msg.tab)
+	if t == nil || t.dash == nil || t.dash.gen != msg.gen {
+		return
+	}
+	t.dash.outbox[msg.name] = -1
+	if msg.ok {
+		t.dash.outbox[msg.name] = msg.retry
+	}
+	m.dashSettle(t.dash, "outbox:"+msg.name)
+}
+
+// dashSettle 은 확인 하나가 끝났다고 적고, 모두 끝났으면 상태 줄을 바꾼다.
+func (m *model) dashSettle(d *dashState, key string) {
+	delete(d.pending, key)
+	if len(d.pending) == 0 && strings.HasPrefix(m.status, "대시보드 확인 중") {
+		m.status = "대시보드 확인함 " + time.Now().Format("15:04:05")
+	}
 }
 
 // stop 은 진행 중인 확인 회차를 취소한다.
@@ -126,10 +196,7 @@ func (m *model) dashProbed(msg dashProbeMsg) {
 		return
 	}
 	t.dash.health[msg.uuid] = msg.h
-	delete(t.dash.pending, msg.uuid)
-	if len(t.dash.pending) == 0 && strings.HasPrefix(m.status, "대시보드 확인 중") {
-		m.status = "대시보드 확인함 " + time.Now().Format("15:04:05")
-	}
+	m.dashSettle(t.dash, msg.uuid)
 }
 
 // dashTicked 는 타이머가 돌아오면 대시보드가 활성 탭일 때만 다시 확인한다. 다른 탭이면 확인 없이 다음 타이머만 건다.
@@ -221,6 +288,9 @@ type dashSummary struct {
 	ok, fail                 int
 	pgActive, redisClients   int
 	openTx, unlocked         int
+	// aws 는 aws 접속 수, dlq 는 그 접속들의 `DLQ 쌓임` 합이다. outboxes 는 재시도를 세는 흐름 아웃박스 수, retry 는 그 합이다(R69)
+	aws, dlq        int
+	outboxes, retry int
 }
 
 func (m *model) dashSum(d *dashState) dashSummary {
@@ -235,6 +305,9 @@ func (m *model) dashSum(d *dashState) dashSummary {
 			s.redis++
 		default:
 			s.source++
+		}
+		if c.Kind == db.KindAWS {
+			s.aws++
 		}
 		switch c.Env() {
 		case "prod":
@@ -264,7 +337,13 @@ func (m *model) dashSum(d *dashState) dashSummary {
 			s.pgActive += metricInt(h, db.MetricPGActive)
 		case db.KindRedis:
 			s.redisClients += metricInt(h, db.MetricRedisClients)
+		case db.KindAWS:
+			s.dlq += metricInt(h, awsres.MetricDLQ)
 		}
+	}
+	for _, n := range d.outbox {
+		s.outboxes++
+		s.retry += int(max(0, n))
 	}
 	return s
 }
@@ -302,6 +381,12 @@ func (m *model) dashView(t *queryTab, w, h int) string {
 		dashCard("열린 트랜잭션", strconv.Itoa(s.openTx)),
 		dashCard("prod 잠금 해제", strconv.Itoa(s.unlocked)),
 	}
+	if s.aws > 0 {
+		cards = append(cards, dashCard("DLQ 쌓인 큐", warnIf(s.dlq)))
+	}
+	if s.outboxes > 0 {
+		cards = append(cards, dashCard("아웃박스 재시도", warnIf(s.retry)))
+	}
 	lines := strings.Split(wrapCards(cards, w), "\n")
 	var extra []string
 	if d.filter != "" {
@@ -310,12 +395,32 @@ func (m *model) dashView(t *queryTab, w, h int) string {
 	// 머리 줄 하나를 뺀 표 줄이 dashMinRows 보다 적으면 카드를 한 줄 요약으로 접는다
 	if h-len(lines)-len(extra)-1 < dashMinRows {
 		lines = []string{truncate(fmt.Sprintf("접속 %d · prod %d · stg %d · local %d · ● %d ✕ %d · PG 활성 %d · Redis 클라이언트 %d · 트랜잭션 %d · 잠금 해제 %d",
-			s.total, s.prod, s.stg, s.local, s.ok, s.fail, s.pgActive, s.redisClients, s.openTx, s.unlocked), w)}
+			s.total, s.prod, s.stg, s.local, s.ok, s.fail, s.pgActive, s.redisClients, s.openTx, s.unlocked)+dashFlowSummary(s), w)}
 	}
 	lines = append(lines, extra...)
 	rows := m.dashRows(d)
 	table := dashTable(m, d, rows, w, max(1, h-len(lines)), m.focus != fTree)
 	return strings.Join(append(lines, table...), "\n")
+}
+
+// dashFlowSummary 는 접은 한 줄 요약에 붙일 DLQ·아웃박스 재시도다. 카드가 없으면 빈 글이다.
+func dashFlowSummary(s dashSummary) string {
+	var out string
+	if s.aws > 0 {
+		out += fmt.Sprintf(" · DLQ 쌓인 큐 %d", s.dlq)
+	}
+	if s.outboxes > 0 {
+		out += fmt.Sprintf(" · 아웃박스 재시도 %d", s.retry)
+	}
+	return out
+}
+
+// warnIf 는 0보다 크면 경고 색인 수다.
+func warnIf(n int) string {
+	if n > 0 {
+		return dashWarnStyle.Render(strconv.Itoa(n))
+	}
+	return strconv.Itoa(n)
 }
 
 func dashCard(title, value string) string {
