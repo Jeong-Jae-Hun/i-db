@@ -151,6 +151,24 @@ async fn PG_결과는_칸_글자_예산을_넘으면_거기서_자른다() {
 }
 
 #[tokio::test]
+async fn PG_카탈로그_조회는_결과_예산을_넘으면_자르지_않고_오류다() {
+    let pg = need!(pg().await);
+    let mut p = pg.acquire().await.unwrap();
+    p.conn().set_result_budget(100);
+    // 잘린 정의로 DDL·스키마 비교를 성공처럼 내지 않는다
+    let err = p
+        .conn()
+        .query("select repeat('x', 40) from generate_series(1, 10)", &[], usize::MAX)
+        .await
+        .err()
+        .expect("budget overflow must fail");
+    assert_eq!(err.to_string(), "catalog result exceeds 100 bytes");
+    // 남은 행은 끝까지 읽어 버려 연결을 이어 쓴다
+    assert_eq!(p.conn().query("select 1", &[], 10).await.unwrap().rows.len(), 1);
+    p.release();
+}
+
+#[tokio::test]
 async fn PG_여러_문장은_실행하지_않는다() {
     let pg = need!(pg().await);
     exec(&pg, "create table if not exists rs_multi(a int)").await;

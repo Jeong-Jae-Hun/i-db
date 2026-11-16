@@ -294,7 +294,10 @@ impl RedisConn {
     /// \r\n 을 뗀 한 줄이다.
     async fn read_line(&mut self) -> Result<Vec<u8>, Error> {
         loop {
-            if let Some(i) = self.rbuf[self.pos..].iter().position(|&b| b == b'\n') {
+            // 큰 bulk 를 읽은 뒤에는 버퍼에 긴 줄이 통째로 들어와 있을 수 있어, 찾는 범위와 줄 길이를 상한·예산으로 먼저 본다
+            let window = &self.rbuf[self.pos..self.rbuf.len().min(self.pos + MAX_LINE_BYTES + 1)];
+            if let Some(i) = window.iter().position(|&b| b == b'\n') {
+                self.spend(i + 1)?;
                 let line = self.rbuf[self.pos..self.pos + i + 1].to_vec();
                 self.pos += i + 1;
                 if line.len() <= 2 || line[line.len() - 2] != b'\r' {
@@ -303,7 +306,6 @@ impl RedisConn {
                         go_quote(&String::from_utf8_lossy(&line))
                     )));
                 }
-                self.spend(line.len())?;
                 return Ok(line[..line.len() - 2].to_vec());
             }
             if self.rbuf.len() - self.pos > MAX_LINE_BYTES {
@@ -674,6 +676,27 @@ mod tests {
         let mut long = vec![b'+'; MAX_LINE_BYTES + 10];
         long.push(b'x');
         assert_eq!(reply_err(read_raw(long).await), "redis: reply line too long");
+    }
+
+    #[tokio::test]
+    async fn 버퍼에_이미_든_긴_줄도_상한을_넘으면_오류다() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _keep = l.accept().await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let mut c = RedisConn::new(Stream::Plain(tokio::net::TcpStream::connect(addr).await.unwrap()));
+        // 앞서 큰 bulk 를 읽어 버퍼가 커진 뒤처럼, 줄 끝까지 이미 버퍼에 있다
+        c.rbuf = [b"+".as_slice(), &vec![b'x'; MAX_LINE_BYTES + 10], b"\r\n"].concat();
+        let r = tokio::time::timeout(Duration::from_secs(2), c.read_reply(0)).await.unwrap();
+        assert_eq!(reply_err(r), "redis: reply line too long");
+        // 상한 안쪽이어도 답 바이트 예산을 넘으면 오류다
+        c.rbuf = b"+OK\r\n".to_vec();
+        c.pos = 0;
+        c.left_bytes = 3;
+        let r = tokio::time::timeout(Duration::from_secs(2), c.read_reply(0)).await.unwrap();
+        assert_eq!(reply_err(r), format!("redis: reply exceeds {MAX_REPLY_BYTES} bytes"));
     }
 
     #[test]

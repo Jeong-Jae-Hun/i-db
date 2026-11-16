@@ -272,7 +272,7 @@ impl Conn {
         self.result_budget = n;
     }
 
-    /// 카탈로그 조회용이다. 칸을 자르지 않는다.
+    /// 카탈로그 조회용이다. 칸을 자르지 않고, 결과 예산을 넘으면 자르지 않고 오류다.
     pub async fn query(&mut self, sql: &str, params: &[Option<&str>], limit: usize) -> Result<Rows, Error> {
         self.query_inner(sql, params, limit, false).await
     }
@@ -316,6 +316,7 @@ impl Conn {
         };
         let mut first: Option<Error> = None;
         let mut left = self.result_budget;
+        let mut over_budget = false;
         loop {
             match self.read_or_break().await? {
                 Message::RowDescription(body) => {
@@ -339,7 +340,10 @@ impl Conn {
                             left = l;
                             out.rows.push(row);
                         }
-                        None => out.truncated = true,
+                        None => {
+                            out.truncated = true;
+                            over_budget = true;
+                        }
                     }
                 }
                 Message::CommandComplete(body) => out.tag = body.tag().unwrap_or_default().to_string(),
@@ -353,6 +357,10 @@ impl Conn {
                 }
                 Message::ReadyForQuery(body) => {
                     self.tx_status = body.status();
+                    // 카탈로그 결과는 잘리면 틀린 DDL·스키마 비교가 성공처럼 나가서 오류로 낸다. 남은 행은 위에서 읽어 버렸다
+                    if first.is_none() && over_budget && !cap {
+                        return Err(Error::msg(format!("catalog result exceeds {} bytes", self.result_budget)));
+                    }
                     return first.map_or(Ok(out), Err);
                 }
                 _ => {}
