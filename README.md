@@ -313,7 +313,7 @@ claude mcp add db -- db mcp -p ~/work/db-project --max-rows 100
 | `DB_RESTORE=0` | do not save or restore tabs |
 | `DB_KITTY_KEYS=0`/`1` | force the kitty keyboard protocol off/on |
 | `DB_KEYS=cmd`/`ctrl` | show key hints as ⌘ or Ctrl |
-| `DB_CLIPBOARD=osc52`/`system`/`both` | where copies go: OSC 52 only, the system clipboard only (`pbcopy`, `clip.exe` on WSL, `wl-copy`/`xclip`), or both (default). Copies over 10 MB are refused; export with `e`/`E` |
+| `DB_CLIPBOARD=osc52`/`system`/`both` | where copies go: OSC 52 only, the system clipboard only (`pbcopy`, `clip` through `cmd.exe` with the UTF-8 code page on WSL and Windows, `wl-copy`/`xclip`), or both (default). Copies over 10 MB are refused; export with `e`/`E` |
 | `DB_UPDATE_CHECK=0` | do not check GitHub for a new release at startup |
 | `GITHUB_TOKEN` | sent with `db update` and the startup check to GitHub API requests (higher rate limit) |
 | `XDG_STATE_HOME` | where history, session, parameter values, undo log and the last update check live (default `~/.local/state/db/`) |

@@ -14,13 +14,15 @@ import (
 	"runtime"
 	"strings"
 	"time"
-	"unicode/utf16"
 
 	"github.com/aymanbagabas/go-osc52/v2"
 )
 
 // MaxBytes 보다 큰 글은 복사하지 않는다. 터미널이 OSC 52 를 버리거나 멈추는 크기라 파일 내보내기로 돌린다
 const MaxBytes = 10 << 20
+
+// wslCmd 는 WSL 기본 마운트 자리의 cmd.exe 다(/etc/wsl.conf 의 automount root 를 바꿨으면 PATH 에 cmd.exe 가 있어야 한다)
+const wslCmd = "/mnt/c/Windows/System32/cmd.exe"
 
 const (
 	ModeOSC52  = "osc52"
@@ -52,11 +54,10 @@ func (e TooBigError) Status() string {
 	return fmt.Sprintf("너무 커서 복사하지 않음 (%.1f MB) — e/E 로 내보내기", float64(e.Bytes)/(1<<20))
 }
 
-// command 는 시스템 클립보드 명령이다. utf16 이면 stdin 을 BOM 붙은 UTF-16LE 로 보낸다.
+// command 는 시스템 클립보드 명령이다. stdin 은 UTF-8 이다.
 type command struct {
-	name  string
-	args  []string
-	utf16 bool
+	name string
+	args []string
 }
 
 // Mode 는 DB_CLIPBOARD 값이다. 모르는 값은 기본(both)이다.
@@ -83,12 +84,8 @@ func Write(out io.Writer, s string) error {
 		return oscErr
 	}
 	if c, ok := systemCommand(); ok {
-		in := []byte(s)
-		if c.utf16 {
-			in = UTF16LE(s)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
-		sysErr = run(ctx, c.name, c.args, in)
+		sysErr = run(ctx, c.name, c.args, []byte(s))
 		cancel()
 	} else {
 		sysErr = errors.New("no system clipboard command")
@@ -109,7 +106,11 @@ func systemCommand() (command, bool) {
 	case goos == "darwin":
 		cands = []command{{name: "pbcopy"}}
 	case goos == "windows", getenv("WSL_DISTRO_NAME") != "" || exists(wslMarker):
-		cands = []command{{name: "clip.exe", utf16: true}}
+		// clip.exe 는 stdin 을 콘솔 코드 페이지로 읽는다. BOM 붙은 UTF-16LE 는 BOM 이 클립보드에 U+FEFF 로 남고,
+		// BOM 없는 UTF-16LE 는 한 글자("가")를 글자로 알아보지 못한다. 그래서 코드 페이지를 UTF-8 로 바꾼 셸에서 부른다.
+		// WSL 이 Windows PATH 를 잇지 않는 설정(appendWindowsPath=false)이면 기본 자리 /mnt/c 를 쓴다
+		clip := []string{"/c", "chcp 65001 >nul && clip"}
+		cands = []command{{name: "cmd.exe", args: clip}, {name: wslCmd, args: clip}}
 	case getenv("WAYLAND_DISPLAY") != "":
 		cands = []command{{name: "wl-copy"}, {name: "xclip", args: []string{"-selection", "clipboard"}}}
 	default:
@@ -121,17 +122,6 @@ func systemCommand() (command, bool) {
 		}
 	}
 	return command{}, false
-}
-
-// UTF16LE 는 s 를 BOM 붙은 UTF-16LE 로 바꾼다. clip.exe 는 BOM 이 없으면 stdin 을 콘솔 코드 페이지로 읽어 한글이 깨진다.
-func UTF16LE(s string) []byte {
-	units := utf16.Encode([]rune(s))
-	b := make([]byte, 2, 2+2*len(units))
-	b[0], b[1] = 0xFF, 0xFE
-	for _, u := range units {
-		b = append(b, byte(u), byte(u>>8))
-	}
-	return b
 }
 
 // runCommand 는 명령에 in 을 넣고 끝나길 기다린다. stdout·stderr 를 잇지 않는다.

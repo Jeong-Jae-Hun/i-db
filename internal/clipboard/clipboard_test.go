@@ -50,7 +50,7 @@ type failWriter struct{}
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
 
 func TestSystemCommand_OS마다_클립보드_명령을_고른다(t *testing.T) {
-	all := []string{"pbcopy", "clip.exe", "wl-copy", "xclip"}
+	all := []string{"pbcopy", "cmd.exe", wslCmd, "wl-copy", "xclip"}
 	cases := []struct {
 		name   string
 		os     string
@@ -58,23 +58,23 @@ func TestSystemCommand_OS마다_클립보드_명령을_고른다(t *testing.T) {
 		onPath []string
 		wsl    bool
 		want   string
-		utf16  bool
 	}{
-		{"맥은 pbcopy", "darwin", nil, all, false, "pbcopy", false},
-		{"WSL 환경 변수면 clip.exe", "linux", map[string]string{"WSL_DISTRO_NAME": "Ubuntu"}, all, false, "clip.exe", true},
-		{"WSLInterop 파일이면 clip.exe", "linux", nil, all, true, "clip.exe", true},
-		{"Windows 는 clip.exe", "windows", nil, all, false, "clip.exe", true},
-		{"Wayland 면 wl-copy", "linux", map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, all, false, "wl-copy", false},
-		{"X 는 xclip", "linux", nil, all, false, "xclip", false},
-		{"xclip 이 없으면 wl-copy", "linux", nil, []string{"wl-copy"}, false, "wl-copy", false},
-		{"명령이 없으면 없음", "linux", nil, nil, false, "", false},
-		{"WSL 에 clip.exe 가 없으면 없음", "linux", nil, []string{"xclip"}, true, "", false},
+		{"맥은 pbcopy", "darwin", nil, all, false, "pbcopy"},
+		{"WSL 환경 변수면 cmd.exe 로 clip", "linux", map[string]string{"WSL_DISTRO_NAME": "Ubuntu"}, all, false, "cmd.exe"},
+		{"WSLInterop 파일이면 cmd.exe 로 clip", "linux", nil, all, true, "cmd.exe"},
+		{"Windows 는 cmd.exe 로 clip", "windows", nil, all, false, "cmd.exe"},
+		{"WSL PATH 에 Windows 가 없으면 /mnt/c 의 cmd.exe", "linux", nil, []string{wslCmd, "xclip"}, true, wslCmd},
+		{"Wayland 면 wl-copy", "linux", map[string]string{"WAYLAND_DISPLAY": "wayland-0"}, all, false, "wl-copy"},
+		{"X 는 xclip", "linux", nil, all, false, "xclip"},
+		{"xclip 이 없으면 wl-copy", "linux", nil, []string{"wl-copy"}, false, "wl-copy"},
+		{"명령이 없으면 없음", "linux", nil, nil, false, ""},
+		{"WSL 에 cmd.exe 가 없으면 없음", "linux", nil, []string{"xclip"}, true, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			fakeEnv(t, c.os, c.env, c.onPath, c.wsl, nil)
 			got, ok := systemCommand()
-			if got.name != c.want || ok != (c.want != "") || got.utf16 != c.utf16 {
+			if got.name != c.want || ok != (c.want != "") {
 				t.Fatalf("got %+v ok=%v", got, ok)
 			}
 			if got.name == "xclip" && strings.Join(got.args, " ") != "-selection clipboard" {
@@ -107,13 +107,13 @@ func TestWrite_기본은_OSC52와_시스템_클립보드에_모두_쓴다(t *tes
 	}
 }
 
-func TestWrite_WSL은_clip_exe에_UTF16LE로_보낸다(t *testing.T) {
-	calls := fakeEnv(t, "linux", map[string]string{"WSL_DISTRO_NAME": "Ubuntu"}, []string{"clip.exe"}, false, nil)
+func TestWrite_WSL은_코드_페이지를_UTF8로_바꾼_clip에_UTF8로_보낸다(t *testing.T) {
+	calls := fakeEnv(t, "linux", map[string]string{"WSL_DISTRO_NAME": "Ubuntu"}, []string{wslCmd}, false, nil)
 	if err := Write(&bytes.Buffer{}, "가"); err != nil {
 		t.Fatal(err)
 	}
-	if len(*calls) != 1 || !bytes.Equal((*calls)[0].in, []byte{0xFF, 0xFE, 0x00, 0xAC}) {
-		t.Fatalf("clip.exe 입력: %+v", *calls)
+	if len(*calls) != 1 || (*calls)[0].name != wslCmd || strings.Join((*calls)[0].args, " ") != "/c chcp 65001 >nul && clip" || string((*calls)[0].in) != "가" {
+		t.Fatalf("clip 호출: %+v", *calls)
 	}
 }
 
@@ -164,20 +164,5 @@ func TestWrite_10MB를_넘으면_아무_데도_쓰지_않고_크기를_알린다
 	}
 	if got := big.Status(); got != "너무 커서 복사하지 않음 (10.5 MB) — e/E 로 내보내기" {
 		t.Fatalf("상태: %q", got)
-	}
-}
-
-func TestUTF16LE_BOM을_붙이고_한글과_BMP_밖_글자를_LE로_쓴다(t *testing.T) {
-	cases := map[string][]byte{
-		"":    {0xFF, 0xFE},
-		"A":   {0xFF, 0xFE, 'A', 0},
-		"한":   {0xFF, 0xFE, 0x5C, 0xD5},
-		"😀":   {0xFF, 0xFE, 0x3D, 0xD8, 0x00, 0xDE},
-		"a\n": {0xFF, 0xFE, 'a', 0, '\n', 0},
-	}
-	for in, want := range cases {
-		if got := UTF16LE(in); !bytes.Equal(got, want) {
-			t.Fatalf("%q → % X, want % X", in, got, want)
-		}
 	}
 }
