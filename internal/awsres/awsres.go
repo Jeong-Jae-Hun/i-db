@@ -37,6 +37,7 @@ type Backend struct {
 	sfn       sfnAPI
 	s3        s3API
 	regions   sync.Map // S3 버킷 이름 → 리전
+	region    string   // 접속 리전. 다른 리전 ARN(흐름의 DLQ)을 가른다
 }
 
 type stsAPI interface {
@@ -72,6 +73,7 @@ func New(ctx context.Context, c db.Conn) (source.Backend, error) {
 		scheduler: scheduler.NewFromConfig(cfg),
 		sfn:       sfn.NewFromConfig(cfg),
 		s3:        s3.NewFromConfig(cfg),
+		region:    cfg.Region,
 	}, nil
 }
 

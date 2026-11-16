@@ -224,6 +224,28 @@ func TestSQS_큐_Enter_는_QueueUrl_먼저_속성_이름순이고_JSON_은_원�
 	}
 }
 
+func TestSQS_ARN_으로_열면_그_계정의_큐를_열고_다른_리전은_안내만_둔다(t *testing.T) {
+	b, _, sq, _ := newBackend()
+	b.region = "ap-northeast-2"
+	u := "https://sqs.ap-northeast-2.amazonaws.com/999988887777/shared-dlq"
+	sq.byName["shared-dlq"] = u
+	sq.attrs[u] = map[string]string{attrVisible: "3"}
+	res, err := b.Open(ctx, "sqs/arn:aws:sqs:ap-northeast-2:999988887777:shared-dlq", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(sq.urlCalls, []string{"shared-dlq@999988887777"}) || res.Rows[0][1] != u {
+		t.Fatalf("ARN 의 계정으로 GetQueueUrl: %v %v", sq.urlCalls, res.Rows)
+	}
+	res, err = b.Open(ctx, "sqs/arn:aws:sqs:us-east-1:999988887777:shared-dlq", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sq.urlCalls) != 1 || !reflect.DeepEqual(res.Rows[1], []string{"note", "다른 리전 큐는 수만 보임"}) {
+		t.Fatalf("다른 리전은 부르지 않고 안내: %v %v", sq.urlCalls, res.Rows)
+	}
+}
+
 // ─── Lambda ───
 
 func TestLambda_함수_Info_는_런타임과_KST_수정_시각이고_Enter_는_이벤트_소스_매핑이다(t *testing.T) {

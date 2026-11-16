@@ -43,7 +43,7 @@ func TestTopicFlow_토픽_이름에서_큐_DLQ_Lambda_까지_따라간다(t *tes
 	if got.Arn != topicArn || got.Name != "orders" || len(got.Subs) != 3 {
 		t.Fatalf("토픽: %+v", got)
 	}
-	want := &Queue{Name: "orders-worker", Arn: workerArn, Visible: "0", InFlight: "2", Delayed: "0", DLQ: "orders-worker-dlq", DLQCount: "4",
+	want := &Queue{Name: "orders-worker", Arn: workerArn, Visible: "0", InFlight: "2", Delayed: "0", DLQ: "orders-worker-dlq", DLQArn: dlqQArn, DLQCount: "4",
 		Lambdas: []Mapping{{Function: "worker", State: "Enabled", LastResult: "OK"}}}
 	if s := got.Subs[0]; s.Protocol != "sqs" || s.Endpoint != "orders-worker" || !reflect.DeepEqual(s.Queue, want) {
 		t.Fatalf("같은 계정 큐: %+v %+v", s, s.Queue)

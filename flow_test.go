@@ -30,7 +30,7 @@ const flowsJSON = `[
 // sampleTopic 은 큐 둘(첫째는 DLQ 4건·Lambda 하나, 둘째는 비어 있음)과 https 구독 하나다.
 func sampleTopic() *awsres.Topic {
 	return &awsres.Topic{Arn: "arn:aws:sns:ap-northeast-2:1:stg-hub", Name: "stg-hub", Subs: []awsres.Sub{
-		{Protocol: "sqs", Endpoint: "q1", Queue: &awsres.Queue{Name: "q1", Visible: "0", InFlight: "2", Delayed: "0", DLQ: "q1-dlq", DLQCount: "4",
+		{Protocol: "sqs", Endpoint: "q1", Queue: &awsres.Queue{Name: "q1", Visible: "0", InFlight: "2", Delayed: "0", DLQ: "q1-dlq", DLQArn: "arn:aws:sqs:ap-northeast-2:999:q1-dlq", DLQCount: "4",
 			Lambdas: []awsres.Mapping{{Function: "worker", State: "Enabled", LastResult: "OK"}}}},
 		{Protocol: "sqs", Endpoint: "q2", Queue: &awsres.Queue{Name: "q2", Visible: "1", InFlight: "0", Delayed: "0"}},
 		{Protocol: "https", Endpoint: "https://hook.example.com"},
@@ -141,6 +141,9 @@ func TestFlowBoxes_아웃박스_SNS_큐_DLQ_Lambda_순서와_경고(t *testing.T
 	}
 	if boxes[2].path != "sqs/q1" || boxes[4].path != "lambda/worker" || boxes[1].path != "sns/arn:aws:sns:ap-northeast-2:1:stg-hub" || boxes[6].path != "" {
 		t.Fatalf("열 경로: %+v", boxes)
+	}
+	if boxes[3].path != "sqs/arn:aws:sqs:ap-northeast-2:999:q1-dlq" {
+		t.Fatalf("DLQ 는 다른 계정일 수 있어 ARN 으로 연다: %q", boxes[3].path)
 	}
 }
 

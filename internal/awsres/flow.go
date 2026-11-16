@@ -29,10 +29,11 @@ type Sub struct {
 }
 
 // Queue 는 구독한 큐의 수다. 속성을 못 읽었으면 Err 다. DLQ 가 없으면 DLQ 가 비고, 수를 못 읽었으면 DLQCount 가 `?` 다.
+// DLQArn 은 DLQ 의 ARN 이다. 다른 계정 DLQ 도 상세(Open `sqs/<ARN>`)가 같은 이름의 지금 계정 큐로 가지 않게 남긴다.
 type Queue struct {
 	Name, Arn                  string
 	Visible, InFlight, Delayed string
-	DLQ, DLQCount              string
+	DLQ, DLQArn, DLQCount      string
 	Lambdas                    []Mapping
 	Err                        string
 }
@@ -103,7 +104,7 @@ func (b *Backend) flowQueue(ctx context.Context, arn string) *Queue {
 	}
 	q.Visible, q.InFlight, q.Delayed = a[attrVisible], a[attrInFlight], a[attrDelayed]
 	if dlq := dlqArn(a); dlq != "" {
-		q.DLQ, q.DLQCount = arnPart(dlq, 5), "?"
+		q.DLQ, q.DLQArn, q.DLQCount = arnPart(dlq, 5), dlq, "?"
 		if d, err := b.dlqAttrs(ctx, dlq); err == nil && d[attrVisible] != "" {
 			q.DLQCount = d[attrVisible]
 		}

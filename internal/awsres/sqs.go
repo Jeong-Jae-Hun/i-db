@@ -7,6 +7,7 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -128,9 +129,19 @@ func (b *Backend) dlqAttrs(ctx context.Context, arn string) (map[string]string, 
 }
 
 // queueTable 은 큐 Enter 의 `attribute, value` 표다. 첫 줄은 QueueUrl 이고 나머지는 속성 이름순이다.
-// RedrivePolicy·Policy 같은 JSON 은 원문 그대로다(값 보기 R32 로 연다).
+// RedrivePolicy·Policy 같은 JSON 은 원문 그대로다(값 보기 R32 로 연다). name 이 ARN 이면 그 계정의 큐를 연다(흐름의 DLQ).
+// 접속과 다른 리전 큐는 이 리전 클라이언트로 열 수 없어 안내 한 줄만 둔다.
 func (b *Backend) queueTable(ctx context.Context, name string) (*db.Result, error) {
-	u, err := b.sqs.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(name)})
+	in := &sqs.GetQueueUrlInput{QueueName: aws.String(name)}
+	if strings.HasPrefix(name, "arn:") {
+		if r := arnPart(name, 3); b.region != "" && r != b.region {
+			res := table("attribute", "value")
+			res.Rows = append(res.Rows, []string{"QueueArn", name}, []string{"note", "다른 리전 큐는 수만 보임"})
+			return res, nil
+		}
+		in = &sqs.GetQueueUrlInput{QueueName: aws.String(arnPart(name, 5)), QueueOwnerAWSAccountId: aws.String(arnPart(name, 4))}
+	}
+	u, err := b.sqs.GetQueueUrl(ctx, in)
 	if err != nil {
 		return nil, wrap("sqs:GetQueueUrl", err)
 	}
