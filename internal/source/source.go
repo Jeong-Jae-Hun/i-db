@@ -1,4 +1,4 @@
-// Package source 는 PostgreSQL·Redis 밖의 읽기 전용 저장소(OpenSearch·Loki·Prometheus·Grafana·DynamoDB)를
+// Package source 는 PostgreSQL·Redis 밖의 읽기 전용 저장소(OpenSearch·Loki·Prometheus·Grafana·DynamoDB·Athena)를
 // 같은 트리·편집기·결과 표로 다루는 공통 틀이다(명세 R60~R63). 종류마다 하위 패키지가 Backend 를 구현하고
 // 통합(ui·cli)은 이 인터페이스만 본다.
 package source
@@ -98,6 +98,20 @@ func RedirectError(resp *http.Response) error {
 		return nil
 	}
 	return fmt.Errorf("redirect not followed: %s", resp.Status)
+}
+
+// SQLWords 는 SQL 한 문장을 보낼 글과 문자열·주석·"따옴표 이름" 밖의 낱말(소문자)로 나눈다. 끝의 ;·공백·주석은 떼고,
+// 그 뒤에도 ; 가 남으면 여러 문장이라 ErrWrite 다(R61.2·R68.2). 어휘는 db.MaskSQL 로 읽는다. 종류마다 낱말로 쓰기를 가른다.
+// 단, MaskSQL 은 PostgreSQL 의 $태그$ 도 문자열로 본다. OpenSearch·Athena SQL 에는 없는 꼴이라 그 안에 숨긴 글은 서버가 문법 오류로 거절한다.
+func SQLWords(text string) (string, []string, error) {
+	masked := db.MaskSQL(text)
+	n := len(strings.TrimRight(masked, "; \t\r\n\f\v"))
+	masked = masked[:n]
+	if strings.Contains(masked, ";") {
+		return "", nil, fmt.Errorf("%w: multiple statements", ErrWrite)
+	}
+	words := strings.FieldsFunc(strings.ToLower(masked), func(r rune) bool { return r > 0x7f || !db.IsIdentByte(byte(r)) })
+	return strings.TrimSpace(text[:n]), words, nil
 }
 
 // Secret 은 .env 에서 접속 비밀값을 고른다. 비밀번호(basic)·토큰(grafana)을 같은 자리에서 읽는다(R59.1 키 규칙).

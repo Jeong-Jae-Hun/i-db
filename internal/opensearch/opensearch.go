@@ -595,23 +595,18 @@ func (b *backend) runSQL(ctx context.Context, text string, limit int) (*db.Resul
 // 백틱 이름(`delete`)도 걸리지만 안전 쪽이다.
 var sqlWriteWords = []string{"delete", "update", "insert", "drop", "create", "alter", "truncate", "replace"}
 
-// sqlStatement 는 SELECT 한 문장을 보낼 글로 다듬는다. 끝의 ;·공백·주석은 떼고, 그 뒤에도 문자열·주석 밖에 ; 가 남거나
-// 쓰기 낱말이 있으면 source.ErrWrite 다(R61.2). 어휘는 db.MaskSQL(따옴표·주석 가리기)로 읽는다.
-// 단, MaskSQL 은 PostgreSQL 의 $태그$ 도 문자열로 본다. OpenSearch SQL 에는 없는 꼴이라 그 안에 숨긴 글은 플러그인이 문법 오류로 거절한다.
+// sqlStatement 는 SELECT 한 문장을 보낼 글로 다듬는다. 여러 문장(source.SQLWords)이거나 쓰기 낱말이 있으면 source.ErrWrite 다(R61.2).
 func sqlStatement(text string) (string, error) {
-	masked := db.MaskSQL(text)
-	n := len(strings.TrimRight(masked, "; \t\r\n\f\v"))
-	masked = masked[:n]
-	if strings.Contains(masked, ";") {
-		return "", fmt.Errorf("%w: multiple statements", source.ErrWrite)
+	stmt, words, err := source.SQLWords(text)
+	if err != nil {
+		return "", err
 	}
-	words := strings.FieldsFunc(strings.ToLower(masked), func(r rune) bool { return r > 0x7f || !db.IsIdentByte(byte(r)) })
 	for _, w := range words {
 		if slices.Contains(sqlWriteWords, w) {
 			return "", fmt.Errorf("%w: %s", source.ErrWrite, w)
 		}
 	}
-	return strings.TrimSpace(text[:n]), nil
+	return stmt, nil
 }
 
 // searchEndpoints 는 `<인덱스>/<끝>` 꼴로 GET 할 수 있는 읽기 끝점이다. POST 는 _search 만 받는다.

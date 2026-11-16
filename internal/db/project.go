@@ -27,6 +27,7 @@ const (
 	KindPrometheus Kind = "prometheus"
 	KindGrafana    Kind = "grafana"
 	KindDynamoDB   Kind = "dynamodb"
+	KindAthena     Kind = "athena" // R68
 	// KindAWS 는 SNS·SQS·Lambda 등을 트리로만 보는 접속이다(R67). 편집기 질의 언어가 없다
 	KindAWS Kind = "aws"
 )
@@ -34,16 +35,16 @@ const (
 type Kind string
 
 // SourceKinds 는 R60~R63 읽기 전용 저장소 종류다. 접속 창이 PostgreSQL·Redis 뒤에 이 순서로 돈다.
-var SourceKinds = []Kind{KindOpenSearch, KindLoki, KindPrometheus, KindGrafana, KindDynamoDB, KindAWS}
+var SourceKinds = []Kind{KindOpenSearch, KindLoki, KindPrometheus, KindGrafana, KindDynamoDB, KindAthena, KindAWS}
 
 // IsSource 는 읽기 전용 저장소(R60) 종류인지다. 이 종류는 internal/source 의 Backend 로만 다룬다.
 func (k Kind) IsSource() bool { return slices.Contains(SourceKinds, k) }
 
 // IsHTTP 는 url 칸이 필요한 HTTP 저장소(OpenSearch·Loki·Prometheus·Grafana)인지다.
-func (k Kind) IsHTTP() bool { return k.IsSource() && k != KindDynamoDB && k != KindAWS }
+func (k Kind) IsHTTP() bool { return k.IsSource() && !k.UsesRegion() }
 
-// UsesRegion 은 region·profile 칸이 늘 필요한 AWS 종류(DynamoDB·aws)인지다. OpenSearch 는 sigv4 일 때만 필요하다.
-func (k Kind) UsesRegion() bool { return k == KindDynamoDB || k == KindAWS }
+// UsesRegion 은 region·profile 칸이 늘 필요한 AWS 종류(DynamoDB·Athena·aws)인지다. OpenSearch 는 sigv4 일 때만 필요하다.
+func (k Kind) UsesRegion() bool { return k == KindDynamoDB || k == KindAthena || k == KindAWS }
 
 type Conn struct {
 	Name     string
@@ -61,6 +62,9 @@ type Conn struct {
 	Auth    string
 	Region  string
 	Profile string
+	// Workgroup·Output 은 Athena(R68) 작업 그룹과 결과 S3 위치다. 비면 primary·작업 그룹 설정을 따른다
+	Workgroup string
+	Output    string
 	// SSLMode 는 PostgreSQL 접속의 sslmode 를 덮어쓴다(R59.1). 비면 원격 require·로컬 prefer 다
 	SSLMode string
 	// Folder 는 트리에서 옮긴 폴더다(R66.2, .dbtui/folders.json). 비면 Group 으로 보인다. AES 키는 늘 Group 으로 찾는다
@@ -275,7 +279,7 @@ var secretPrefix = map[Kind]string{KindPG: "PG_", KindRedis: "REDIS_", KindOpenS
 	KindPrometheus: "PROM_", KindGrafana: "GRAFANA_"}
 
 // PasswordKey 는 접속 비밀값을 두는 .env 키다(PG_<이름>_PASSWORD·REDIS_·OS_·LOKI_·PROM_, Grafana 는 GRAFANA_<이름>_TOKEN).
-// 비밀값이 없는 종류(DynamoDB)는 빈 글이다. 모르는 종류는 예전처럼 PG_ 로 둔다.
+// 비밀값이 없는 종류(DynamoDB·Athena)는 빈 글이다. 모르는 종류는 예전처럼 PG_ 로 둔다.
 func PasswordKey(kind Kind, name string) string {
 	if kind.UsesRegion() {
 		return ""

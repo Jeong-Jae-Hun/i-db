@@ -51,11 +51,11 @@ var envBadges = map[string]lipgloss.Style{
 var (
 	kindIcons = map[nodeKind]string{nSchema: "▣ ", nTable: "▦ ", nKey: "◇ ", nFolder: "▤ ", nQueries: "▥ ", nFile: "▢ ", nSource: "▫ "}
 	connIcons = map[db.Kind]string{db.KindPG: "◆ ", db.KindRedis: "◈ ", db.KindOpenSearch: "◇ ", db.KindLoki: "◇ ",
-		db.KindPrometheus: "◇ ", db.KindGrafana: "◇ ", db.KindDynamoDB: "◇ ", db.KindAWS: "◇ "}
+		db.KindPrometheus: "◇ ", db.KindGrafana: "◇ ", db.KindDynamoDB: "◇ ", db.KindAthena: "◇ ", db.KindAWS: "◇ "}
 	connColor = map[db.Kind]lipgloss.Color{db.KindPG: colPG, db.KindRedis: colRedis, db.KindOpenSearch: colSource, db.KindLoki: colSource,
-		db.KindPrometheus: colSource, db.KindGrafana: colSource, db.KindDynamoDB: colSource, db.KindAWS: colSource}
+		db.KindPrometheus: colSource, db.KindGrafana: colSource, db.KindDynamoDB: colSource, db.KindAthena: colSource, db.KindAWS: colSource}
 	connKinds = map[db.Kind]string{db.KindPG: "PostgreSQL", db.KindRedis: "Redis", db.KindOpenSearch: "OpenSearch", db.KindLoki: "Loki",
-		db.KindPrometheus: "Prometheus", db.KindGrafana: "Grafana", db.KindDynamoDB: "DynamoDB", db.KindAWS: "AWS"}
+		db.KindPrometheus: "Prometheus", db.KindGrafana: "Grafana", db.KindDynamoDB: "DynamoDB", db.KindAthena: "Athena", db.KindAWS: "AWS"}
 )
 
 type paneSpec struct {

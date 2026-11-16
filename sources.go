@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/athena"
 	"github.com/Jeong-Jae-Hun/i-db/internal/awsres"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/dynamo"
@@ -30,6 +31,7 @@ var sourceOpeners = map[db.Kind]func(context.Context, db.Conn) (source.Backend, 
 	db.KindGrafana:    func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewGrafana(c) },
 	db.KindDynamoDB:   dynamo.New,
 	db.KindAWS:        awsres.New,
+	db.KindAthena:     athena.New,
 }
 
 const (
@@ -299,8 +301,12 @@ func (m *model) openSourceNode(t *queryTab, n *node) tea.Cmd {
 		if q, ok := obs.OpenQuery(c.Kind, path, limit); ok {
 			p.src = &q
 		}
-	case db.KindDynamoDB:
+	// Athena 파티션 테이블은 확인 뒤 `SELECT * FROM "db"."테이블" LIMIT 50` 을 Force 로 보낸다(R68.1)
+	case db.KindDynamoDB, db.KindAthena:
 		q := source.Query{Text: dynamoScanSQL(path), Limit: limit, Force: true}
+		if c.Kind == db.KindAthena {
+			q.Text = athena.OpenSQL(path, limit)
+		}
 		retry := p
 		retry.sql, retry.src = q.Text, &q
 		retry.exec = m.sourceExec(c, sourceRun(q))
