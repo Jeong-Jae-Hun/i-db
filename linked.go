@@ -120,12 +120,6 @@ func findLinked(ctx context.Context, clients *db.Clients, conns []db.Conn, col, 
 	return found
 }
 
-// sameLinkedServer 는 찾을 때의 접속 a 와 지금 접속 b 가 같은 서버·사용자·환경인지다. 데이터베이스는 호출부가 따로 본다.
-// uuid 가 같아도 호스트를 고쳤으면(R59.3) 찾은 값을 다른 서버(prod 일 수도 있다)로 보내지 않는다.
-func sameLinkedServer(a, b db.Conn) bool {
-	return a.UUID == b.UUID && a.Kind == b.Kind && a.Host == b.Host && a.Port == b.Port && a.User == b.User && a.Env() == b.Env()
-}
-
 // linkedTable 은 찾기 결과를 표로 만든다. 줄은 접속 실패, 주인 테이블, 센 행 수 큰 순, 세지 않은 열, 0행 순이고 같으면 이름순이다.
 // targets 는 표 줄의 앞 세 칸(접속·테이블·열)으로 찾는다. failed 는 접속·테이블 하나라도 실패했는지다.
 func linkedTable(conns []db.Conn, found []linkedFound, errText func(i int, err error) string) (res *db.Result, targets map[string]linkedTarget, summary string, failed bool) {
@@ -286,7 +280,8 @@ func (m *model) openLinked(t *queryTab) tea.Cmd {
 	conn, was := lv.conns[tg.conn], lv.searched[tg.conn]
 	now := m.conn(conn)
 	switch {
-	case lv.stale || !sameLinkedServer(was, now):
+	// uuid 가 같아도 호스트를 고쳤으면(R59.3) 찾은 값을 다른 서버(prod 일 수도 있다)로 보내지 않는다. 데이터베이스는 아래에서 따로 본다
+	case lv.stale || was.UUID != now.UUID || was.Kind != now.Kind || was.Host != now.Host || was.Port != now.Port || was.User != now.User || was.Env() != now.Env():
 		m.status = "찾은 뒤 접속을 고치거나 지워 열지 않음 (다시 찾으세요)"
 		return nil
 	case was.DB != now.DB:
