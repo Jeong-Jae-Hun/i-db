@@ -138,6 +138,13 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R12.1 `db mcp [-p DIR] [--allow-prod] [--max-rows N]`은 같은 프로젝트 설정으로 stdio MCP 서버를 띄워야 한다. stdout에는 MCP 메시지만 쓰고 안내·오류는 stderr로 보낸다.
   - 예: `claude mcp add db -- db mcp`.
 - R12.2 MCP 도구는 모두 읽기 전용이다. SQL은 읽기 전용 트랜잭션에서 돌리고, `--allow-prod`가 없으면 prod 접속 도구는 접속하지 않고 거부한다.
+- R12.3 도구는 `list_connections`·`list_schemas`·`list_tables`·`describe_table`·`query`·`redis_scan`·`redis_get`·`redis_command`·`aws_tree`·`aws_open`이다. `list_connections`는 이름·그룹·종류·환경과 저장소의 `region`·`profile`을 주고 비밀번호·토큰·자격 증명은 주지 않는다. 표 결과는 `--max-rows`(기본 200, 상한 10,000) 행까지이고 `max_rows` 인자는 그보다 작게만 줄인다.
+  - 예: `{"name":"athena-prod","kind":"athena","env":"prod","region":"ap-northeast-2","profile":"team"}`.
+- R12.4 `query`는 PostgreSQL 말고도 `aws`를 뺀 저장소 접속(R60~R63·R68)을 받아 그 질의를 `Backend.Run`으로 보낸다. 쓰기로 보이는 질의는 보내기 전에 거절한다(R60.2). 비싼 질의(Athena `LIMIT`·`WHERE` 없는 `SELECT`, DynamoDB 전체 스캔 등)는 `force: true`가 없으면 보내지 않고 `expensive query needs confirmation: <까닭>; nothing was sent. Retry with force=true …` 오류다. 사람에게 y/N을 물을 수 없어 CLI `--force`와 같은 자리다.
+  - 예: `{"connection":"athena-stg","sql":"SELECT * FROM \"sales\".\"orders\""}` → 거절. 같은 인자에 `"force":true` → 보내고 Athena 스캔 요금이 든다.
+  - 예: `aws` 접속을 `query`로 부르면 `browse aws connections with aws_tree and aws_open`으로 거절한다(R67.1).
+- R12.5 `aws_tree {connection, path}`는 `aws` 접속 노드의 자식(`name`·`path`·`info`·`warn`·`has_children`·`openable`)을, `aws_open {connection, path}`는 그 노드의 표(R67.2~R67.6 `Enter` 표)를 `query`와 같은 꼴(`columns`·`rows`·`text`·`truncated`)로 준다. `path`는 `aws_tree`가 준 값이고 비면 맨 위 폴더다.
+  - 예: `aws_tree {"connection":"aws-stg","path":"sqs"}` → `{"nodes":[{"name":"orders","path":"sqs/orders","info":"대기 12 · DLQ orders-dlq 3","warn":true,"has_children":false,"openable":true}],"truncated":false}`.
 
 ### R13 화면 틀·마우스·탭
 

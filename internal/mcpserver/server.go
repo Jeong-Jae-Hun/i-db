@@ -1,4 +1,4 @@
-// Package mcpserver 는 DataGrip 프로젝트의 접속을 MCP(stdio) 도구로 내보낸다. 모든 도구는 읽기 전용이다.
+// Package mcpserver 는 DataGrip 프로젝트와 db 전용 접속을 MCP(stdio) 도구로 내보낸다. 모든 도구는 읽기 전용이다.
 package mcpserver
 
 import (
@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 )
 
 const (
@@ -30,6 +32,8 @@ var scanTimeout = 10 * time.Second
 type Options struct {
 	AllowProd bool // false 면 Env()=="prod" 접속을 쓰는 도구를 모두 거부한다
 	MaxRows   int  // 표 결과의 기본·최대 행 수. 0 이면 200, db.MaxRows 를 넘으면 db.MaxRows
+	// OpenSource 는 읽기 전용 저장소(R60~R68) Backend 생성기다. 종류별 구현은 main 에 등록돼 있어 주입받는다. nil 이면 저장소 도구를 거부한다
+	OpenSource func(context.Context, db.Conn) (source.Backend, error)
 }
 
 type handler struct {
@@ -41,8 +45,11 @@ type handler struct {
 type connInfo struct {
 	Name  string `json:"name"`
 	Group string `json:"group"`
-	Kind  string `json:"kind" jsonschema:"postgresql or redis"`
+	Kind  string `json:"kind" jsonschema:"postgresql, redis, or a read-only source: opensearch, loki, prometheus, grafana, dynamodb, athena, aws"`
 	Env   string `json:"env" jsonschema:"prod, stg or local (derived from the name)"`
+	// 리전·프로필은 비밀값이 아니다. AWS 자격 증명은 프로필로 받고 접속에 저장하지 않는다(R60.1)
+	Region  string `json:"region,omitempty" jsonschema:"AWS region (dynamodb, athena, aws)"`
+	Profile string `json:"profile,omitempty" jsonschema:"AWS profile name; empty means the default credential chain"`
 }
 
 type listConnectionsOutput struct {
@@ -65,9 +72,29 @@ type tableInput struct {
 }
 
 type queryInput struct {
-	Connection string `json:"connection" jsonschema:"PostgreSQL connection name"`
-	SQL        string `json:"sql" jsonschema:"a single read-only statement (select, with, values, table, show, explain without analyze)"`
+	Connection string `json:"connection" jsonschema:"PostgreSQL or read-only source connection name (not aws)"`
+	SQL        string `json:"sql" jsonschema:"a single read-only statement: PostgreSQL or Athena SQL (select, with, show, describe, explain), OpenSearch SQL or DSL, LogQL, PromQL or DynamoDB PartiQL SELECT"`
 	MaxRows    int    `json:"max_rows,omitempty" jsonschema:"maximum rows to return; capped by the server limit"`
+	Force      bool   `json:"force,omitempty" jsonschema:"send a query the source flagged as expensive. Athena bills per byte scanned and DynamoDB scans read the whole table; set only after the user accepts the cost. Ignored for PostgreSQL"`
+}
+
+type awsPathInput struct {
+	Connection string `json:"connection" jsonschema:"aws connection name"`
+	Path       string `json:"path,omitempty" jsonschema:"node path from aws_tree; empty for the top folders"`
+}
+
+type treeNode struct {
+	Name        string `json:"name"`
+	Path        string `json:"path" jsonschema:"pass to aws_tree or aws_open"`
+	Info        string `json:"info,omitempty"`
+	Warn        bool   `json:"warn,omitempty" jsonschema:"info needs attention, e.g. messages waiting in a dead-letter queue"`
+	HasChildren bool   `json:"has_children"`
+	Openable    bool   `json:"openable" jsonschema:"aws_open returns a table for this node"`
+}
+
+type treeOutput struct {
+	Nodes     []treeNode `json:"nodes"`
+	Truncated bool       `json:"truncated"`
 }
 
 type redisScanInput struct {
@@ -117,7 +144,7 @@ func (h *handler) server() *mcp.Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "db", Version: "v2"}, nil)
 	readOnly := &mcp.ToolAnnotations{ReadOnlyHint: true}
 	mcp.AddTool(s, &mcp.Tool{Name: "list_connections", Annotations: readOnly,
-		Description: "List PostgreSQL and Redis connections defined in the DataGrip project (name, group, kind, env). Passwords are never returned."},
+		Description: "List PostgreSQL, Redis and read-only source connections (name, group, kind, env, and AWS region/profile). Passwords, tokens and credentials are never returned."},
 		h.listConnections)
 	mcp.AddTool(s, &mcp.Tool{Name: "list_schemas", Annotations: readOnly,
 		Description: "List non-system schemas of a PostgreSQL connection."}, h.listSchemas)
@@ -126,8 +153,14 @@ func (h *handler) server() *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{Name: "describe_table", Annotations: readOnly,
 		Description: "Describe a PostgreSQL table or view: columns (name, type, nullable, default, comment) as rows, plus comment, constraints and indexes as text."}, h.describeTable)
 	mcp.AddTool(s, &mcp.Tool{Name: "query", Annotations: readOnly,
-		Description: "Run one read-only SQL statement on a PostgreSQL connection inside a READ ONLY transaction (30s timeout) on a connection that is discarded afterwards. Writes and multiple statements are rejected. Calls to known side-effect functions (pg_terminate_backend, pg_notify, dblink, advisory locks, file access, large objects, ...) are blocked on a best-effort basis only; connect with a read-only database role for real protection."},
+		Description: "Run one read-only statement. PostgreSQL: inside a READ ONLY transaction (30s timeout) on a connection that is discarded afterwards; writes and multiple statements are rejected, and calls to known side-effect functions (pg_terminate_backend, pg_notify, dblink, advisory locks, file access, large objects, ...) are blocked on a best-effort basis only, so connect with a read-only database role for real protection. Read-only sources (Athena, DynamoDB, OpenSearch, Loki, Prometheus, Grafana) get their own query language; write-like queries are refused before sending, and expensive ones (Athena SELECT without LIMIT or WHERE, DynamoDB full scan, OpenSearch size over 10000) are refused unless force is true. Athena queries cost money per byte scanned. aws connections have no query language; use aws_tree and aws_open."},
 		h.query)
+	mcp.AddTool(s, &mcp.Tool{Name: "aws_tree", Annotations: readOnly,
+		Description: "List the children of a node in an aws connection (SNS topics and subscriptions, SQS queues with depth and DLQ, Lambda, EventBridge, Scheduler, Step Functions, S3). Read-only List/Get/Describe calls only; never receives, sends or deletes messages. Start with an empty path."},
+		h.awsTree)
+	mcp.AddTool(s, &mcp.Tool{Name: "aws_open", Annotations: readOnly,
+		Description: "Show the detail table of an openable aws_tree node (subscriptions, queue attributes, event source mappings, rule targets, schedule, recent executions, S3 object metadata and small text body). Read-only."},
+		h.awsOpen)
 	mcp.AddTool(s, &mcp.Tool{Name: "redis_scan", Annotations: readOnly,
 		Description: "List Redis keys matching a pattern using SCAN (sorted, deduplicated, stops after 10s)."}, h.redisScan)
 	mcp.AddTool(s, &mcp.Tool{Name: "redis_get", Annotations: readOnly,
@@ -138,14 +171,25 @@ func (h *handler) server() *mcp.Server {
 	return s
 }
 
+// queryKinds 는 query 도구가 받는 종류다. aws 는 질의 언어가 없어 aws_tree·aws_open 으로 본다(R67.1).
+var queryKinds = append([]db.Kind{db.KindPG}, slices.DeleteFunc(slices.Clone(db.SourceKinds), func(k db.Kind) bool { return k == db.KindAWS })...)
+
 // lookup 은 이름으로 접속을 찾고 종류와 prod 허용을 확인한다. 접속을 열기 전에 거부해야 prod 에 연결 자체를 하지 않는다.
-func (h *handler) lookup(name string, kind db.Kind) (db.Conn, error) {
+func (h *handler) lookup(name string, kinds ...db.Kind) (db.Conn, error) {
 	for _, c := range h.proj.Conns {
 		if c.Name != name {
 			continue
 		}
-		if c.Kind != kind {
-			return db.Conn{}, fmt.Errorf("connection %q is %s, not %s", name, c.Kind, kind)
+		if !slices.Contains(kinds, c.Kind) {
+			names := make([]string, len(kinds))
+			for i, k := range kinds {
+				names[i] = string(k)
+			}
+			err := fmt.Errorf("connection %q is %s, not %s", name, c.Kind, strings.Join(names, "/"))
+			if c.Kind == db.KindAWS {
+				err = fmt.Errorf("%w; browse aws connections with aws_tree and aws_open", err)
+			}
+			return db.Conn{}, err
 		}
 		if c.Env() == "prod" && !h.opt.AllowProd {
 			return db.Conn{}, fmt.Errorf("connection %q is prod; this MCP server was started without prod access", name)
@@ -182,7 +226,7 @@ func (h *handler) redis(ctx context.Context, name string) (*db.RedisConn, db.Con
 func (h *handler) listConnections(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listConnectionsOutput, error) {
 	out := listConnectionsOutput{Connections: []connInfo{}}
 	for _, c := range h.proj.Conns {
-		out.Connections = append(out.Connections, connInfo{Name: c.Name, Group: db.GroupOf(c), Kind: string(c.Kind), Env: c.Env()})
+		out.Connections = append(out.Connections, connInfo{Name: c.Name, Group: db.GroupOf(c), Kind: string(c.Kind), Env: c.Env(), Region: c.Region, Profile: c.Profile})
 	}
 	return nil, out, nil
 }
@@ -224,23 +268,109 @@ func (h *handler) describeTable(ctx context.Context, _ *mcp.CallToolRequest, in 
 }
 
 func (h *handler) query(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, resultOutput, error) {
-	// 접속을 열기 전에 거른다(prod 에는 연결도 하지 않는다). 놓친 쓰기는 RunReadOnly 의 READ ONLY 트랜잭션이 막는다
-	if err := db.CheckReadOnlySQL(in.SQL); err != nil {
-		return nil, resultOutput{}, err
-	}
-	p, c, err := h.pg(ctx, in.Connection)
+	c, err := h.lookup(in.Connection, queryKinds...)
 	if err != nil {
 		return nil, resultOutput{}, err
-	}
-	res, err := p.RunReadOnly(ctx, in.SQL)
-	if err != nil {
-		return nil, resultOutput{}, redactErr(err, c.Password)
 	}
 	limit := h.opt.MaxRows
 	if in.MaxRows > 0 {
 		limit = min(in.MaxRows, limit)
 	}
+	if c.Kind != db.KindPG {
+		return h.querySource(ctx, c, in, limit)
+	}
+	// 접속을 열기 전에 거른다(prod 에는 연결도 하지 않는다). 놓친 쓰기는 RunReadOnly 의 READ ONLY 트랜잭션이 막는다
+	if err := db.CheckReadOnlySQL(in.SQL); err != nil {
+		return nil, resultOutput{}, err
+	}
+	p, err := h.clients.PG(ctx, c)
+	if err != nil {
+		return nil, resultOutput{}, redactErr(err, c.Password)
+	}
+	res, err := p.RunReadOnly(ctx, in.SQL)
+	if err != nil {
+		return nil, resultOutput{}, redactErr(err, c.Password)
+	}
 	return nil, boundResult(res, limit), nil
+}
+
+// querySource 는 저장소 Backend.Run 이다. 쓰기 거절·비싼 질의 확인은 Backend 가 보내기 전에 한다(R60.2).
+// MCP 는 사람에게 y/N 을 물을 수 없어 force 가 그 확인을 대신한다(CLI --force 와 같다).
+func (h *handler) querySource(ctx context.Context, c db.Conn, in queryInput, limit int) (*mcp.CallToolResult, resultOutput, error) {
+	text := strings.TrimSpace(in.SQL)
+	if text == "" {
+		return nil, resultOutput{}, errors.New("sql is empty")
+	}
+	b, err := h.openSource(ctx, c)
+	if err != nil {
+		return nil, resultOutput{}, err
+	}
+	defer b.Close()
+	res, err := b.Run(ctx, source.Query{Text: text, Limit: limit, Force: in.Force})
+	if errors.Is(err, source.ErrNeedsConfirm) {
+		return nil, resultOutput{}, fmt.Errorf("%s; nothing was sent. Retry with force=true only if the user accepts the cost", redactErr(err, c.Password))
+	}
+	if err != nil {
+		return nil, resultOutput{}, redactErr(err, c.Password)
+	}
+	return nil, boundResult(res, limit), nil
+}
+
+func (h *handler) openSource(ctx context.Context, c db.Conn) (source.Backend, error) {
+	if h.opt.OpenSource == nil {
+		return nil, fmt.Errorf("%s connections are not supported by this server", c.Kind)
+	}
+	b, err := h.opt.OpenSource(ctx, c)
+	if err != nil {
+		return nil, redactErr(err, c.Password)
+	}
+	return b, nil
+}
+
+func (h *handler) aws(ctx context.Context, name string) (source.Backend, error) {
+	c, err := h.lookup(name, db.KindAWS)
+	if err != nil {
+		return nil, err
+	}
+	return h.openSource(ctx, c)
+}
+
+func (h *handler) awsTree(ctx context.Context, _ *mcp.CallToolRequest, in awsPathInput) (*mcp.CallToolResult, treeOutput, error) {
+	b, err := h.aws(ctx, in.Connection)
+	if err != nil {
+		return nil, treeOutput{}, err
+	}
+	defer b.Close()
+	nodes, err := b.Children(ctx, in.Path)
+	if err != nil {
+		return nil, treeOutput{}, err
+	}
+	out := treeOutput{Nodes: []treeNode{}}
+	budget := maxOutputBytes
+	for i, n := range nodes {
+		if i >= db.MaxRows || budget <= 0 {
+			out.Truncated = true
+			break
+		}
+		t := treeNode{Name: clip(n.Name, maxCellBytes), Path: n.Path, Info: clip(n.Info, maxCellBytes), Warn: n.Warn, HasChildren: n.HasChildren, Openable: n.Openable}
+		out.Truncated = out.Truncated || t.Name != n.Name || t.Info != n.Info
+		budget -= len(t.Name) + len(t.Path) + len(t.Info)
+		out.Nodes = append(out.Nodes, t)
+	}
+	return nil, out, nil
+}
+
+func (h *handler) awsOpen(ctx context.Context, _ *mcp.CallToolRequest, in awsPathInput) (*mcp.CallToolResult, resultOutput, error) {
+	b, err := h.aws(ctx, in.Connection)
+	if err != nil {
+		return nil, resultOutput{}, err
+	}
+	defer b.Close()
+	res, err := b.Open(ctx, in.Path, h.opt.MaxRows)
+	if err != nil {
+		return nil, resultOutput{}, err
+	}
+	return nil, boundResult(res, h.opt.MaxRows), nil
 }
 
 func (h *handler) redisScan(ctx context.Context, _ *mcp.CallToolRequest, in redisScanInput) (*mcp.CallToolResult, namesOutput, error) {

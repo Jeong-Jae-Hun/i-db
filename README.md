@@ -216,6 +216,8 @@ Output formats are `table`, `tsv`, `csv` and `json` (table on a terminal, tsv ot
 
 `db mcp` starts a read-only MCP server over stdio with the same project settings. Prod connections are only exposed with `--allow-prod`.
 
+Tools: `list_connections`, `list_schemas`, `list_tables`, `describe_table`, `query`, `redis_scan`, `redis_get`, `redis_command`, `aws_tree`, `aws_open`. `query` also runs read-only source queries (Athena, DynamoDB, OpenSearch, Loki, Prometheus, Grafana); expensive ones such as an Athena `SELECT` without `LIMIT` or `WHERE` (billed per byte scanned) or a DynamoDB full scan are refused unless the call passes `"force": true`. `aws` connections have no query language: `aws_tree {connection, path}` lists a node's children and `aws_open {connection, path}` returns its detail table. Results are capped by `--max-rows`.
+
 ```sh
 claude mcp add db -- db mcp
 claude mcp add db -- db mcp -p ~/work/db-project --max-rows 100
