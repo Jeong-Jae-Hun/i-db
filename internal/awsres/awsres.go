@@ -7,10 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/scheduler"
+	"github.com/aws/aws-sdk-go-v2/service/sfn"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -23,10 +28,15 @@ import (
 
 // Backend 는 aws 접속 하나다. 서비스마다 클라이언트를 들고, 시험은 가짜로 바꿔 끼운다.
 type Backend struct {
-	sts    stsAPI
-	sns    snsAPI
-	sqs    sqsAPI
-	lambda lambdaAPI
+	sts       stsAPI
+	sns       snsAPI
+	sqs       sqsAPI
+	lambda    lambdaAPI
+	events    eventsAPI
+	scheduler schedulerAPI
+	sfn       sfnAPI
+	s3        s3API
+	regions   sync.Map // S3 버킷 이름 → 리전
 }
 
 type stsAPI interface {
@@ -54,10 +64,14 @@ func New(ctx context.Context, c db.Conn) (source.Backend, error) {
 	}
 	cfg.HTTPClient = source.HTTPClient() // 리다이렉트를 따라가지 않는다(3xx 는 SDK 가 오류로 낸다)
 	return &Backend{
-		sts:    sts.NewFromConfig(cfg),
-		sns:    sns.NewFromConfig(cfg),
-		sqs:    sqs.NewFromConfig(cfg),
-		lambda: lambda.NewFromConfig(cfg),
+		sts:       sts.NewFromConfig(cfg),
+		sns:       sns.NewFromConfig(cfg),
+		sqs:       sqs.NewFromConfig(cfg),
+		lambda:    lambda.NewFromConfig(cfg),
+		events:    eventbridge.NewFromConfig(cfg),
+		scheduler: scheduler.NewFromConfig(cfg),
+		sfn:       sfn.NewFromConfig(cfg),
+		s3:        s3.NewFromConfig(cfg),
 	}, nil
 }
 
@@ -73,6 +87,10 @@ var folders = []struct{ key, name string }{
 	{"sns", "SNS 토픽"},
 	{"sqs", "SQS 큐"},
 	{"lambda", "Lambda"},
+	{"events", "EventBridge"},
+	{"scheduler", "Scheduler"},
+	{"sfn", "Step Functions"},
+	{"s3", "S3"},
 }
 
 // Children 은 "" 이면 폴더, 그 밖은 서비스별 목록이다. 맨 위는 GetCallerIdentity 로 자격 증명부터 확인한다:
@@ -105,24 +123,42 @@ func (b *Backend) Children(ctx context.Context, path string) ([]source.Node, err
 		if rest == "" {
 			out, err = b.functions(ctx)
 		}
+	case "events": // 규칙은 잎이라 rest 는 "" 또는 버스 이름이다
+		out, err = b.eventsChildren(ctx, rest)
+	case "scheduler":
+		out, err = b.schedulerChildren(ctx, rest)
+	case "sfn":
+		if rest == "" {
+			out, err = b.machines(ctx)
+		}
+	case "s3":
+		out, err = b.s3Children(ctx, rest)
 	}
 	if action := deniedAction(err); action != "" {
-		return []source.Node{{Name: "권한 없음: " + action, Path: path + "/#denied"}}, nil
+		return []source.Node{{Name: "권한 없음: " + action, Path: "#denied:" + path}}, nil
 	}
 	return out, err
 }
 
-// Open 은 노드 Enter 의 표다. 경로 첫 마디로 서비스를 고른다.
+// Open 은 노드 Enter 의 표다. 경로 첫 마디로 서비스를 고른다. `권한 없음`·`… 앞 N개만` 줄(#로 시작)은 열 것이 없다.
 func (b *Backend) Open(ctx context.Context, path string, _ int) (*db.Result, error) {
 	svc, rest, _ := strings.Cut(path, "/")
 	switch {
-	case rest == "" || strings.HasSuffix(rest, "#denied"):
+	case rest == "":
 	case svc == "sns":
 		return b.subscriptionTable(ctx, rest)
 	case svc == "sqs":
 		return b.queueTable(ctx, rest)
 	case svc == "lambda":
 		return b.mappingTable(ctx, rest)
+	case svc == "events":
+		return b.targetTable(ctx, rest)
+	case svc == "scheduler":
+		return b.scheduleTable(ctx, rest)
+	case svc == "sfn":
+		return b.executionTable(ctx, rest)
+	case svc == "s3" && strings.Contains(rest, "/") && !strings.HasSuffix(rest, "/"):
+		return b.objectTable(ctx, rest)
 	}
 	return nil, fmt.Errorf("nothing to open: %s", path)
 }
@@ -193,6 +229,14 @@ func shortTime(t time.Time) string {
 		return ""
 	}
 	return t.In(kst).Format("2006-01-02 15:04")
+}
+
+// longTime 은 KST 초까지다. 영 값은 빈 글이다.
+func longTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(kst).Format("2006-01-02 15:04:05")
 }
 
 // arnPart 는 ARN 의 i 번째 마디다(arn:partition:service:region:account:resource). 없으면 빈 글이다.

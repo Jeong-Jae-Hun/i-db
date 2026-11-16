@@ -615,10 +615,10 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R67 AWS
 
-- R67.1 `kind: "aws"` 접속은 AWS 메시징·인프라를 트리로만 보는 읽기 전용 저장소다. 칸은 이름·그룹·종류·리전·프로필이고(`url`·`auth` 없음, `region` 필수) 자격 증명은 DynamoDB처럼 `profile` 또는 표준 체인으로 받는다(R60.1). 트리 맨 위는 폴더 `SNS 토픽`·`SQS 큐`·`Lambda`이고 펼칠 때 `sts:GetCallerIdentity`로 자격 증명부터 확인한다(접속 시험이 자격 증명 없이 성공하지 않게). 편집기 질의 언어는 없어 `Ctrl+R`·`db query`는 보내지 않고 `aws 접속은 트리로 본다`를 보인다(CLI는 종료 코드 2). `db tables -c`는 맨 위 폴더다.
+- R67.1 `kind: "aws"` 접속은 AWS 메시징·인프라를 트리로만 보는 읽기 전용 저장소다. 칸은 이름·그룹·종류·리전·프로필이고(`url`·`auth` 없음, `region` 필수) 자격 증명은 DynamoDB처럼 `profile` 또는 표준 체인으로 받는다(R60.1). 트리 맨 위는 폴더 `SNS 토픽`·`SQS 큐`·`Lambda`·`EventBridge`·`Scheduler`·`Step Functions`·`S3`이고 펼칠 때 `sts:GetCallerIdentity`로 자격 증명부터 확인한다(접속 시험이 자격 증명 없이 성공하지 않게). 편집기 질의 언어는 없어 `Ctrl+R`·`db query`는 보내지 않고 `aws 접속은 트리로 본다`를 보인다(CLI는 종료 코드 2). `db tables -c`는 맨 위 폴더다.
   - 예: `{"name":"infra-stg","kind":"aws","region":"ap-northeast-2","profile":"stg"}`. `db conn add infra-stg --kind aws --region ap-northeast-2 --profile stg`.
   - 예: 목록 API가 권한 거절(`AccessDenied`·`AccessDeniedException`·`AuthorizationError`)이면 그 폴더는 `권한 없음: sns:ListTopics` 한 줄이고 다른 폴더는 그대로 쓴다. 그 밖의 오류는 노드 오류다.
-  - 부르는 API는 `List*`·`Get*`·`Describe*`·`Head*`뿐이다. 메시지를 받거나(`ReceiveMessage`) 보내거나 지우는 호출은 없고, 시험이 패키지 소스에서 쓰기 호출을 찾으면 실패한다.
+  - 부르는 API는 `List*`·`Get*`·`Describe*`·`Head*`(S3 본문은 범위 `GetObject`, R67.6)뿐이다. 메시지를 받거나(`ReceiveMessage`) 보내거나 지우는 호출은 없고, 시험이 패키지 소스에서 쓰기 호출을 찾으면 실패한다.
   - 대시보드(R64) 수치는 `큐 63 · DLQ 쌓임 2`다. DLQ 쌓임은 RedrivePolicy의 DLQ에 메시지(`ApproximateNumberOfMessages`)가 있는 큐 수이고 0보다 크면 경고다. 큐 속성은 8개씩 동시에 읽고, 큐가 200개를 넘으면 앞 200개만 세어 `DLQ 쌓임 0 (앞 200개)`로 알린다. 속성을 못 읽은 큐가 있으면 `읽기 실패 N`(경고)을 붙인다.
   - 단, 대시보드는 목록에 없는 DLQ(다른 계정)를 세지 않는다. 트리는 따로 읽는다.
 - R67.2 `SNS 토픽`은 토픽 → 구독이다. 구독 줄은 대상(같은 계정 SQS 큐는 큐 이름으로 줄임)과 프로토콜이다. 토픽 `Enter`는 `protocol`·`endpoint`·`subscription_arn`·`raw`·`filter` 표다(`raw`·`filter`는 구독마다 `GetSubscriptionAttributes`의 `RawMessageDelivery`·`FilterPolicy`). `SQS 큐`는 큐마다 `대기 12 · 처리 중 3 · 지연 0`이고, RedrivePolicy가 있으면 ` · DLQ <이름> <대기 수>`를 붙이며 DLQ에 메시지가 있으면 경고 색이다. 큐 `Enter`는 `attribute`·`value` 표(첫 줄 `QueueUrl`, 나머지 속성 이름순, RedrivePolicy JSON은 원문)다.
@@ -627,6 +627,14 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 단, 큐 목록은 `GetQueueAttributes`(`All`)를 큐마다 8개씩 동시에 부른다. 큐 수백 개 계정은 펼치는 데 몇 초 걸린다.
 - R67.3 `Lambda`는 함수 목록이다(`런타임 · 마지막 수정 KST`, 컨테이너 이미지는 `Image`). 함수 `Enter`는 이벤트 소스 매핑 `source`·`state`·`batch`·`last_result` 표다.
   - 예: `worker nodejs20.x · 2026-11-01 12:04` → `Enter` → `arn:aws:sqs:…:orders | Enabled | 10 | OK`.
+- R67.4 `EventBridge`는 이벤트 버스 → 규칙(`<일정 식 또는 pattern> · <상태>`)이고 규칙 `Enter`는 대상 `target_id`·`arn`·`input`·`dlq` 표다(`input`은 Input, 없으면 InputPath, 없으면 InputTransformer 템플릿). `Scheduler`는 일정 그룹 → 일정(`<식> · <상태>`)이고 일정 `Enter`는 `attribute`·`value` 표(식·시간대·상태·대상 ARN·input·역할·DLQ)다.
+  - 예: `nightly cron(0 18 * * ? *) · ENABLED`, `on-order pattern · DISABLED`. 파트너 버스(`aws.partner/…`) 이름의 `/`도 그대로 받는다.
+  - 단, Scheduler 목록에는 식이 없어 일정마다 `GetSchedule`을 8개씩 동시에 부른다. 못 읽은 일정은 `권한 없음: scheduler:GetSchedule`·`읽기 실패`다.
+- R67.5 `Step Functions`는 상태 기계(`STANDARD·EXPRESS · 만든 시각`)이고 `Enter`는 최근 실행 50개 `name`·`status`·`start`·`stop`(KST 초까지, 실행 중이면 `stop` 빈 칸) 표다. 더 있으면 잘림으로 보인다. 실행을 시작·멈추는 기능은 없다.
+- R67.6 `S3`는 버킷(리전) → `/`로 나눈 접두 → 객체(`크기 · 마지막 수정`)다. 한 단계는 `ListObjectsV2` 한 페이지(1,000개)이고 넘치면 끝에 `… 앞 1000개만 보임`이다. 버킷은 목록이 준 리전(없으면 `GetBucketLocation`)으로 묻는다(리다이렉트를 따라가지 않아서). 객체 `Enter`는 `HeadObject` 메타데이터(`key`·`size`·`last_modified`·`content_type`·`etag`·`storage_class`·`x-amz-meta-*` 등)를 `attribute`·`value` 표로 보이고, 텍스트로 보이는 64KiB 이하 객체만 `body` 줄에 본문을 붙인다.
+  - 본문은 `Range: bytes=0-65535` 범위 `GetObject`로만 받는다. 그 사이 객체가 커져도 64KiB 넘게 받지 않는다. 큰 객체는 내려받지 않는다.
+  - 예: `text/*`·JSON·XML·YAML·CSV Content-Type, 또는 형식이 없거나 `application/octet-stream`인 `.txt`·`.log`·`.csv`·`.json`·`.md`·`.yaml` 등 → 본문. 64KiB 초과 텍스트 → `body (64KiB 를 넘어 받지 않음)`. 이미지·`Content-Encoding: gzip` → `body` 줄 없음. UTF-8이 아니면 `(텍스트가 아님)`.
+  - 단, 콘솔이 만든 빈 "폴더" 객체(키가 접두와 같은 것)는 보이지 않는다. 버전·삭제 표시는 보지 않는다.
 
 ## 4. 화면과 키
 

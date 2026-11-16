@@ -35,7 +35,7 @@ func TestChildren_맨_위는_자격_증명을_확인한_뒤_폴더를_정한_순
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"SNS 토픽", "SQS 큐", "Lambda"}; !reflect.DeepEqual(names(ns), want) {
+	if want := []string{"SNS 토픽", "SQS 큐", "Lambda", "EventBridge", "Scheduler", "Step Functions", "S3"}; !reflect.DeepEqual(names(ns), want) {
 		t.Fatalf("폴더: %v", names(ns))
 	}
 	if !ns[0].HasChildren || ns[0].Openable || ns[1].Path != "sqs" {
