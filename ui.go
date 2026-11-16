@@ -369,8 +369,9 @@ type node struct {
 	gen      int // 자식 읽기 요청 세대. 늦게 온 이전 응답을 버린다
 	children []*node
 	parent   *node
-	// nSource 만 쓴다(R60): 오른쪽 흐린 글, Enter 로 Open 할 수 있는지, 펼칠 자식이 있는지
+	// nSource 만 쓴다(R60): 오른쪽 흐린 글(warn 이면 경고 색, R67.2), Enter 로 Open 할 수 있는지, 펼칠 자식이 있는지
 	info     string
+	warn     bool
 	openable bool
 	hasKids  bool
 }
@@ -1186,7 +1187,7 @@ func (m *model) expand(n *node) tea.Cmd {
 				return childrenMsg{n: n, gen: gen, err: err}
 			}
 			for _, sn := range ns {
-				out = append(out, &node{kind: nSource, label: sn.Name, key: sn.Path, info: sn.Info, openable: sn.Openable,
+				out = append(out, &node{kind: nSource, label: sn.Name, key: sn.Path, info: sn.Info, warn: sn.Warn, openable: sn.Openable,
 					hasKids: sn.HasChildren, loaded: !sn.HasChildren, conn: idx, parent: n})
 			}
 		case kind == nConn && c.Kind == db.KindRedis:
@@ -4344,7 +4345,11 @@ func (m *model) View() string {
 			style = dimStyle
 		case nSource:
 			if n.info != "" {
-				label += " " + dimStyle.Render(textutil.Printable(n.info, false))
+				st := dimStyle
+				if n.warn {
+					st = dashWarnStyle
+				}
+				label += " " + st.Render(textutil.Printable(n.info, false))
 			}
 		}
 		if i == m.cursor {

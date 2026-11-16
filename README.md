@@ -17,7 +17,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Redis: key browser, value editor for every type, TTL/rename, monitor (INFO, SLOWLOG, big keys), pattern bulk delete
 - `queries/` folder integration: files are attached to connections via DataGrip's `data_source_mapping.xml`, auto-save, session restore
 - Optional client-side decryption view and `enc('...')` expansion for AES-CBC values stored as `<iv hex>^|^<ciphertext hex>` (pgcrypto `encrypt_iv` compatible). Keys come from `.env` (`<GROUP>_AES_KEY`, `<GROUP>_AES_IV`); nothing is installed in your database. Without a key/IV, `enc(...)` is sent as a call to an existing `staticEncrypt(...)` function, so it only works if your database already has one
-- Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources) and DynamoDB in the same tree, editor and results grid (see Sources)
+- Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources) and DynamoDB in the same tree, editor and results grid, plus a tree-only `aws` view of SNS, SQS (with DLQ counts) and Lambda (see Sources)
 - Dashboard (`Ctrl+G`) and `db status`: every connection's state, latency, version and key numbers at a glance (see Dashboard)
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
@@ -122,10 +122,11 @@ OpenSearch, Loki, Prometheus, Grafana and DynamoDB connections are read-only and
 ```json
 [{"uuid":"…","name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"},
  {"uuid":"…","name":"logs-stg","kind":"loki","url":"http://loki.stg.internal:3100"},
- {"uuid":"…","name":"orders","kind":"dynamodb","region":"ap-northeast-2"}]
+ {"uuid":"…","name":"orders","kind":"dynamodb","region":"ap-northeast-2"},
+ {"uuid":"…","name":"infra-stg","kind":"aws","region":"ap-northeast-2","profile":"stg"}]
 ```
 
-In the connection form the kind field cycles through all seven kinds and shows only the fields that kind needs; pasting an `https://user:pw@host:9200` URL fills url, user and password. In the tree, these connections expand lazily (indices and mapping fields, Loki labels and values, Prometheus metrics, Grafana data sources, DynamoDB tables and keys) with details dimmed on the right. `Enter` previews an index, label value, metric or table in a result tab, `l` expands, `r` reloads. `Ctrl+R` sends the editor text as the source's own query language (`GET idx/_search` + JSON body or `SELECT …` for OpenSearch, LogQL, PromQL, PartiQL `SELECT`). Anything that looks like a write is refused before sending (`읽기 전용 저장소라 보내지 않음`), and expensive queries (DynamoDB full scan, OpenSearch `size` over 10,000, Loki/Prometheus ranges over 7 days) ask `비싼 질의: y/N` first. Loki/Prometheus/Grafana tabs show the range (`최근 1h`) above the editor; `Ctrl+]` cycles 15m, 1h, 6h, 24h, 7d per tab. Results are ordinary grids, so `c` charts metric series. Table view, editing and transactions do not apply.
+In the connection form the kind field cycles through all eight kinds and shows only the fields that kind needs; pasting an `https://user:pw@host:9200` URL fills url, user and password. In the tree, these connections expand lazily (indices and mapping fields, Loki labels and values, Prometheus metrics, Grafana data sources, DynamoDB tables and keys) with details dimmed on the right. `Enter` previews an index, label value, metric or table in a result tab, `l` expands, `r` reloads. `Ctrl+R` sends the editor text as the source's own query language (`GET idx/_search` + JSON body or `SELECT …` for OpenSearch, LogQL, PromQL, PartiQL `SELECT`). Anything that looks like a write is refused before sending (`읽기 전용 저장소라 보내지 않음`), and expensive queries (DynamoDB full scan, OpenSearch `size` over 10,000, Loki/Prometheus ranges over 7 days) ask `비싼 질의: y/N` first. Loki/Prometheus/Grafana tabs show the range (`최근 1h`) above the editor; `Ctrl+]` cycles 15m, 1h, 6h, 24h, 7d per tab. Results are ordinary grids, so `c` charts metric series. Table view, editing and transactions do not apply.
 
 ```sh
 db conn add logs-stg --kind loki --url http://loki.stg.internal:3100
@@ -139,6 +140,15 @@ db query -c orders 'SELECT * FROM "orders"' --force   # full scan needs --force 
 ```
 
 `--max-rows` defaults to 1,000 for sources. Prod sources need `--prod` like everything else; write-looking queries and unconfirmed expensive queries exit with 3. `describe`, `ddl`, `explain`, `redis`, `search`, `schemas` and `schema-diff` are usage errors on these connections.
+
+An `aws` connection (fields: name, group, kind, region, profile; no url) has no query language: it is browsed in the tree only, and `Ctrl+R` or `db query` answers `aws 접속은 트리로 본다`. The tree has the folders `SNS 토픽` (topics → subscriptions; same-account SQS endpoints show the queue name), `SQS 큐` (each queue shows `대기 12 · 처리 중 3 · 지연 0`, plus `· DLQ <name> <n>` highlighted when its dead-letter queue has messages) and `Lambda` (runtime and last modified). `Enter` on a topic lists its subscriptions (`protocol, endpoint, subscription_arn, raw, filter`), on a queue all of its attributes, and on a function its event source mappings. A folder the credentials may not list shows a single `권한 없음: <action>` line and the other folders keep working. Only `List*`, `Get*`, `Describe*` and `Head*` calls are made (a test scans the package for anything else); nothing receives, sends, purges or deletes messages. The dashboard shows `큐 63 · DLQ 쌓임 2` for these connections.
+
+```sh
+db conn add infra-stg --kind aws --region ap-northeast-2 --profile stg
+db tables -c infra-stg    # top-level folders
+```
+
+IAM permissions used: `sts:GetCallerIdentity`, `sns:ListTopics`, `sns:ListSubscriptionsByTopic`, `sns:GetSubscriptionAttributes`, `sqs:ListQueues`, `sqs:GetQueueAttributes`, `sqs:GetQueueUrl`, `lambda:ListFunctions`, `lambda:ListEventSourceMappings`.
 
 ## TUI
 

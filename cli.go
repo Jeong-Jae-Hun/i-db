@@ -988,6 +988,9 @@ var sourceCmdKinds = map[string][]db.Kind{
 func runSourceCommand(ctx context.Context, o cliOpts, proj *db.Project, kind db.Kind, stdin io.Reader) ([]cliResult, error) {
 	switch o.cmd {
 	case "query", "tables":
+		if o.cmd == "query" && kind == db.KindAWS {
+			return nil, usageErr("%s (db tables -c %s)", msgTreeOnly, o.conn)
+		}
 	case "logs", "metrics":
 		if !slices.Contains(sourceCmdKinds[o.cmd], kind) {
 			return nil, usageErr("%s 는 %s 접속이 아님 (%s)", o.conn, o.cmd, kind)

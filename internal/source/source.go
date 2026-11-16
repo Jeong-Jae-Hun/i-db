@@ -21,6 +21,7 @@ type Node struct {
 	Info        string // 타입·개수 같은 오른쪽 흐린 글
 	HasChildren bool
 	Openable    bool // Enter 로 Open 할 수 있다(인덱스·테이블·라벨 값)
+	Warn        bool // Info 를 경고 색으로 그린다(예: DLQ 에 메시지가 있는 SQS 큐, R67.2)
 }
 
 // Query 는 편집기 실행 한 번이다. Since·Until 은 Loki·Prometheus 범위이고 0 이면 종류 기본값(1시간)을 쓴다.
