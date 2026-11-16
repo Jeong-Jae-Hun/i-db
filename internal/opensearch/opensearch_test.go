@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -497,5 +498,138 @@ func TestRedirect_를_따라가지_않고_오류로_본다(t *testing.T) {
 	}
 	if atomic.LoadInt32(&second) != 0 || atomic.LoadInt32(&leaked) != 0 {
 		t.Fatalf("리다이렉트를 따라갔다: 두 번째 요청 %d, 인증 헤더 %d", second, leaked)
+	}
+}
+
+// ─── R61.3 정렬·거르기 다시 읽기 ───
+
+func sortOnly(text, field string, desc bool) (string, bool) {
+	return rewrite(text, Rewrite{Sort: field, Desc: desc}, noFieldInfo)
+}
+
+func TestRewrite_본문_sort_만_바꾸고_다른_키는_둔다(t *testing.T) {
+	cases := []struct {
+		name, text, field string
+		desc              bool
+		want              string
+	}{
+		{"본문 없음", "GET logs/_search", "status", false,
+			"GET logs/_search\n" + `{"sort":[{"status":{"missing":"_last","order":"asc"}}]}`},
+		{"기존 sort 를 바꾼다", "GET logs/_search\n" + `{"size":20,"sort":["_doc"]}`, "status", true,
+			"GET logs/_search\n" + `{"size":20,"sort":[{"status":{"missing":"_last","order":"desc"}}]}`},
+		{"_score 는 missing 이 없다", "POST _search\n{}", "_score", true,
+			"POST _search\n" + `{"sort":[{"_score":{"order":"desc"}}]}`},
+		{"미리 보기 글", OpenText("logs", 0), "_id", false,
+			"POST logs/_search\n" + `{"query":{"match_all":{}},"size":50,"sort":[{"_id":{"missing":"_last","order":"asc"}}]}`},
+	}
+	for _, c := range cases {
+		got, ok := sortOnly(c.text, c.field, c.desc)
+		if !ok || got != c.want {
+			t.Errorf("%s: %v %q", c.name, ok, got)
+		}
+	}
+}
+
+func TestRewrite_search_가_아니면_바꾸지_않는다(t *testing.T) {
+	for _, text := range []string{
+		"SELECT * FROM logs",
+		"GET logs/_count",
+		"GET _cat/indices",
+		"GET logs/_search\n[1]",
+		"GET logs/_search\n{bad",
+	} {
+		if got, ok := sortOnly(text, "status", false); ok || IsSearch(text) && !strings.Contains(text, "\n") {
+			t.Errorf("%q → %q", text, got)
+		}
+	}
+	if !IsSearch("POST logs/_search\n{}") || IsSearch("SELECT 1") {
+		t.Error("IsSearch")
+	}
+}
+
+// rewriteInfo 는 거르기 시험의 필드 정보다: msg 는 keyword 하위 필드가 있는 text, body 는 그것이 없는 text, n 은 long 이다.
+func rewriteInfo(name string) (string, string) {
+	switch name {
+	case "msg":
+		return "text", "msg.keyword"
+	case "body":
+		return "text", ""
+	case "n":
+		return "long", ""
+	}
+	return "", ""
+}
+
+func TestRewrite_거르기는_원래_query_를_must_에_두고_조건을_더한다(t *testing.T) {
+	base := "GET logs/_search\n" + `{"query":{"match":{"app":"api"}},"size":5}`
+	must := `{"bool":{"%s":[%s],"must":[{"match":{"app":"api"}}]}}`
+	cases := []struct {
+		f     Filter
+		where string
+		want  string
+	}{
+		{Filter{"status", "=", "500"}, "filter", `{"term":{"status":"500"}}`},
+		{Filter{"msg", "=", "a b"}, "filter", `{"term":{"msg.keyword":"a b"}}`},
+		{Filter{"status", "!=", "500"}, "must_not", `{"term":{"status":"500"}}`},
+		{Filter{"n", ">", "5"}, "filter", `{"range":{"n":{"gt":5}}}`},
+		{Filter{"day", "<=", "2026-11-01"}, "filter", `{"range":{"day":{"lte":"2026-11-01"}}}`},
+		{Filter{"msg", ":", "a*b"}, "filter", `{"wildcard":{"msg.keyword":{"case_insensitive":true,"value":"*a\\*b*"}}}`},
+		{Filter{"body", ":", "err"}, "filter", `{"wildcard":{"body":{"case_insensitive":true,"value":"*err*"}}}`},
+		{Filter{"n", ":", "7"}, "filter", `{"term":{"n":"7"}}`},
+		{Filter{"msg", ":", ""}, "filter", `{"exists":{"field":"msg"}}`},
+		{Filter{"msg", "null", ""}, "must_not", `{"exists":{"field":"msg"}}`},
+		{Filter{"msg", "notnull", ""}, "filter", `{"exists":{"field":"msg"}}`},
+		{Filter{"", ":", `a "b" OR c`}, "filter", `{"query_string":{"lenient":true,"query":"\"a \\\"b\\\" OR c\""}}`},
+		{Filter{"", "!:", "x"}, "must_not", `{"query_string":{"lenient":true,"query":"\"x\""}}`},
+	}
+	for _, c := range cases {
+		f := c.f
+		got, ok := rewrite(base, Rewrite{Filter: &f}, rewriteInfo)
+		q := fmt.Sprintf(must, c.where, c.want)
+		if c.where == "must_not" { // JSON 키는 이름순이다
+			q = `{"bool":{"must":[{"match":{"app":"api"}}],"must_not":[` + c.want + `]}}`
+		}
+		want := "GET logs/_search\n" + `{"query":` + q + `,"size":5}`
+		if !ok || got != want {
+			t.Errorf("%+v:\n got %s\nwant %s", c.f, got, want)
+		}
+	}
+	got, _ := rewrite("GET logs/_search", Rewrite{Sort: "msg", Filter: &Filter{"", ":", ""}}, rewriteInfo)
+	if got != "GET logs/_search\n"+`{"sort":[{"msg.keyword":{"missing":"_last","order":"asc"}}]}` {
+		t.Errorf("빈 모든 필드 찾기는 거르기 없음, text 정렬은 keyword: %s", got)
+	}
+	got, _ = rewrite("GET logs/_search", Rewrite{Filter: &Filter{"a", "=", "1"}}, rewriteInfo)
+	if !strings.Contains(got, `"must":[{"match_all":{}}]`) {
+		t.Errorf("query 가 없으면 match_all: %s", got)
+	}
+}
+
+func TestRequery_매핑은_인덱스마다_한_번_읽어_text_정렬을_keyword_로_보낸다(t *testing.T) {
+	srv, got := fakeServer(t, map[string]string{
+		"GET /logs/_mapping": `{"logs":{"mappings":{"properties":{"msg":{"type":"text","fields":{"raw":{"type":"keyword"},"keyword":{"type":"keyword"}}},"n":{"type":"long"}}}}}`,
+		"GET /logs/_search":  searchResp,
+	})
+	b := newBackend(t, db.Conn{URL: srv.URL})
+	q := source.Query{Text: "GET logs/_search\n{\"size\":2}"}
+	for range 2 {
+		sent, res, err := Requery(context.Background(), b, q, Rewrite{Sort: "msg", Desc: true})
+		if err != nil || len(res.Rows) != 2 {
+			t.Fatal(err)
+		}
+		if want := "GET logs/_search\n" + `{"size":2,"sort":[{"msg.keyword":{"missing":"_last","order":"desc"}}]}`; sent != want {
+			t.Fatalf("보낸 글: %s", sent)
+		}
+	}
+	mappings := 0
+	for _, s := range got() {
+		if s.path == "/logs/_mapping" {
+			mappings++
+		}
+	}
+	if mappings != 1 {
+		t.Fatalf("매핑은 한 번만 읽는다: %d", mappings)
+	}
+	if _, _, err := Requery(context.Background(), b, source.Query{Text: "GET logs/_count"}, Rewrite{Sort: "n"}); err == nil {
+		t.Error("_search 가 아니면 보내지 않는다")
 	}
 }

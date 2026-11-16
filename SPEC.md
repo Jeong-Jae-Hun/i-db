@@ -19,7 +19,9 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `.idea/data_source_mapping.xml` | `queries/` 파일별 접속 uuid |
 | `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 저장소 비밀값 `OS_`·`LOKI_`·`PROM_<이름>_PASSWORD`·`GRAFANA_<이름>_TOKEN`(R60.1), 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
 | `.dbtui/user360.json` | 사용자 한눈에 보기 조회 목록(R51, 없으면 빈 목록) |
-| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`, R60.1) |
+| `.dbtui/flows.json` | 이벤트 흐름 목록(R69, 없으면 빈 목록). 접속 이름·테이블·열 이름만 든다 |
+| `.dbtui/boards/<이름>.json` | 쿼리 보드(R70, 없으면 보드 없음). 제목·새로고침 간격·패널(접속 이름·질의·흐름 이름·보기)만 든다 |
+| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`athena`·`aws`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`·`workgroup`·`output`, R60.1·R67.1·R68) |
 
 `<이름>`은 접속 이름을 대문자로 바꾸고 영숫자 외 문자를 `_`로 바꾼 것이다.
 
@@ -138,6 +140,13 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R12.1 `db mcp [-p DIR] [--allow-prod] [--max-rows N]`은 같은 프로젝트 설정으로 stdio MCP 서버를 띄워야 한다. stdout에는 MCP 메시지만 쓰고 안내·오류는 stderr로 보낸다.
   - 예: `claude mcp add db -- db mcp`.
 - R12.2 MCP 도구는 모두 읽기 전용이다. SQL은 읽기 전용 트랜잭션에서 돌리고, `--allow-prod`가 없으면 prod 접속 도구는 접속하지 않고 거부한다.
+- R12.3 도구는 `list_connections`·`list_schemas`·`list_tables`·`describe_table`·`query`·`redis_scan`·`redis_get`·`redis_command`·`aws_tree`·`aws_open`이다. `list_connections`는 이름·그룹·종류·환경과 저장소의 `region`·`profile`을 주고 비밀번호·토큰·자격 증명은 주지 않는다. 표 결과는 `--max-rows`(기본 200, 상한 10,000) 행까지이고 `max_rows` 인자는 그보다 작게만 줄인다.
+  - 예: `{"name":"athena-prod","kind":"athena","env":"prod","region":"ap-northeast-2","profile":"team"}`.
+- R12.4 `query`는 PostgreSQL 말고도 `aws`를 뺀 저장소 접속(R60~R63·R68)을 받아 그 질의를 `Backend.Run`으로 보낸다. 쓰기로 보이는 질의는 보내기 전에 거절한다(R60.2). 비싼 질의(Athena `LIMIT`·`WHERE` 없는 `SELECT`, DynamoDB 전체 스캔 등)는 `force: true`가 없으면 보내지 않고 `expensive query needs confirmation: <까닭>; nothing was sent. Retry with force=true …` 오류다. 사람에게 y/N을 물을 수 없어 CLI `--force`와 같은 자리다.
+  - 예: `{"connection":"athena-stg","sql":"SELECT * FROM \"sales\".\"orders\""}` → 거절. 같은 인자에 `"force":true` → 보내고 Athena 스캔 요금이 든다.
+  - 예: `aws` 접속을 `query`로 부르면 `browse aws connections with aws_tree and aws_open`으로 거절한다(R67.1).
+- R12.5 `aws_tree {connection, path}`는 `aws` 접속 노드의 자식(`name`·`path`·`info`·`warn`·`has_children`·`openable`)을, `aws_open {connection, path}`는 그 노드의 표(R67.2~R67.6 `Enter` 표)를 `query`와 같은 꼴(`columns`·`rows`·`text`·`truncated`)로 준다. `path`는 `aws_tree`가 준 값이고 비면 맨 위 폴더다.
+  - 예: `aws_tree {"connection":"aws-stg","path":"sqs"}` → `{"nodes":[{"name":"orders","path":"sqs/orders","info":"대기 12 · DLQ orders-dlq 3","warn":true,"has_children":false,"openable":true}],"truncated":false}`.
 
 ### R13 화면 틀·마우스·탭
 
@@ -154,19 +163,26 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: `=1+1` → `'=1+1`. 단, `-1.5`·`+3`처럼 숫자로 읽히는 값은 그대로다.
   - 예: `db-Query-1-20261114-153000.csv`.
 
-- R14.3 정렬: `s`와 열 이름 클릭은 같은 동작이다. 오름차순 → 내림차순 → 정렬 없음으로 돈다. 일반 결과는 받은 행 안에서 정렬하고, 테이블 보기(R16)는 서버 `ORDER BY`로 다시 읽는다(shift+클릭은 정렬 열 더하기). 표 위 줄에 `정렬 name ↑`처럼 지금 정렬을 보인다.
+- R14.3 정렬: `s`와 열 이름 클릭은 같은 동작이다. 오름차순 → 내림차순 → 정렬 없음으로 돈다. 일반 결과는 받은 행 안에서 정렬하고(PostgreSQL은 R14.5, OpenSearch `_search`는 R61.3, Loki 로그 `time`은 R62.3, DynamoDB 정렬 키는 R63.3대로 서버에서 다시 읽고, 못 하면 R14.6), 테이블 보기(R16)는 서버 `ORDER BY`로 다시 읽는다(shift+클릭은 정렬 열 더하기). 표 위 줄에 `정렬 name ↑`처럼 지금 정렬을 보인다.
   - 예: 숫자 열은 숫자 크기로, 일반 결과에서 NULL은 오름·내림 모두 맨 뒤다. 일반 결과에서 열 이름을 누르면 그 열로 정렬한다(예전에는 테이블 보기에서만 됨).
   - 단, 테이블 보기는 인덱스를 쓰도록 PostgreSQL 기본 순서를 따른다(내림차순이면 NULL이 앞). 테이블 보기의 `s`는 커서 열 머리 클릭과 같고, 다시 읽어도 커서 열을 지켜 거듭 누르면 같은 열이 돈다. 아직 결과가 없어 커서 열이 없으면 다시 읽지 않고 `정렬할 열이 없음`이다. 지금 정렬은 R16.4의 `ORDER BY` 칸에 보인다.
-- R14.4 거르기: `/` 뒤에 아래 꼴을 쓴다. 일반 결과는 받은 행 안에서 거르고 표 위 줄에 `거르기 status=ACTIVE · 12/200행`을 보인다. 테이블 보기에서 `/`는 R16.4의 WHERE 입력을 열고, 아는 열의 짧은 꼴이면 서버 조건으로 바꿔 WHERE 자리에 넣고 다시 읽는다. `esc`는 거르기를 지운다(테이블 보기는 WHERE가 짧은 꼴로 건 조건 그대로일 때만).
+- R14.4 거르기: `/` 뒤에 아래 꼴을 쓴다. 일반 결과는 받은 행 안에서 거르고(PostgreSQL은 R14.5, OpenSearch `_search`는 R61.3대로 확정 때 서버에서 다시 읽고, 못 하면 R14.6) 표 위 줄에 `거르기 status=ACTIVE · 12/200행`을 보인다. 테이블 보기에서 `/`는 R16.4의 WHERE 입력을 열고, 아는 열의 짧은 꼴이면 서버 조건으로 바꿔 WHERE 자리에 넣고 다시 읽는다. `esc`는 거르기를 지운다(테이블 보기는 WHERE가 짧은 꼴로 건 조건 그대로일 때만).
   - 예: `abc` → 어느 열이든 `abc`가 든 행(대소문자 무시). `!abc` → 어느 열에도 없는 행. `status:act` → `status` 열에 `act`가 든 행.
   - 예: `status=ACTIVE`·`status!=ACTIVE` → 같음·다름(대소문자 구분, 서버는 `"status"::text = 'ACTIVE'`). `id>100`·`id>=100`·`id<5`·`id<=5`·`id=7` → 숫자 열에 십진수 값이면 숫자로(서버는 `"id" > 100`), 아니면 글자로 비교. `email=null`·`email!=null` → `IS NULL`·`IS NOT NULL`. 같음·크기 비교에서 NULL 칸은 맞지 않는다.
   - 예: 모르는 열 이름이면 전체 글자 거르기로 본다. 열 이름은 대소문자까지 같은 열을 먼저, 없으면 대소문자를 무시해 찾는다(`note`·`Note`가 다 있으면 `Note=x`는 `Note`). 값은 서버에 보낼 때 `QuoteLiteral`·`QuoteIdent`로 감싼다.
   - 예: `status:`(빈 값)는 서버 `ILIKE '%%'`처럼 NULL 칸을 뺀다. 열 없이 빈 거르기는 거르기 없음이다.
   - 단, 일반 결과 거르기는 서버와 근사다. 숫자 비교는 float64라 15자리를 넘는 값은 어긋날 수 있고, 글자 크기 비교는 데이터베이스 정렬 규칙이 아닌 바이트 순서다.
-- R14.5 PostgreSQL 읽기 문장 하나로 만든 일반 결과는 정렬(`s`·열 머리 클릭)과 거르기 확정(`/` 뒤 `Enter`, `esc` 해제) 때 `SELECT * FROM (\n<원래 문장>\n) AS _q [WHERE <R14.4 서버 꼴>] [ORDER BY "<열>" ASC|DESC NULLS LAST]`로 서버에서 다시 읽는다. 거르기 글을 치는 동안은 받은 행 안에서 바로 거른다. 원래 문장은 R33.1 F7과 같은 기준(문장 하나·읽기·파라미터 없음·PostgreSQL·결과 탭의 마지막 결과)이고 이름이 겹치는 열이 없어야 한다. 아니면 R14.3·R14.4대로 받은 행 안에서만 한다.
+- R14.5 PostgreSQL 읽기 문장 하나로 만든 일반 결과는 정렬(`s`·열 머리 클릭)과 거르기 확정(`/` 뒤 `Enter`, `esc` 해제) 때 `SELECT * FROM (\n<원래 문장>\n) AS _q [WHERE <R14.4 서버 꼴>] [ORDER BY "<열>" ASC|DESC NULLS LAST]`로 서버에서 다시 읽는다. 거르기 글을 치는 동안은 받은 행 안에서 바로 거른다. 원래 문장은 R33.1 F7과 같은 기준(문장 하나·읽기·파라미터 없음·PostgreSQL·결과 탭의 마지막 결과)이고 이름이 겹치는 열이 없어야 한다. 아니면 R14.3·R14.4대로 받은 행 안에서만 하고 까닭을 알린다(R14.6).
   - 예: 모든 열 찾기 `abc` → `_q::text ILIKE '%abc%'`, `!abc` → `NOT (_q::text ILIKE '%abc%')`. 정렬·거르기가 모두 없으면 원래 문장을 그대로 보낸다.
   - 예: 고친 칸이 있으면 버릴지 먼저 묻는다. 다시 읽기가 실패하면 보던 결과·정렬·거르기를 두고 `다시 읽지 못함: <오류>`를 보인다. 실행 기록과 F7은 감싼 SQL을 쓴다.
   - 단, 원래 문장의 `LIMIT`은 그대로라 그 안에서 정렬·거른다.
+- R14.6 일반 결과에서 정렬(`s`·열 머리 클릭)이나 거르기 확정(`/` 뒤 `Enter`, `esc` 해제)을 서버에서 다시 읽지 못하면 db는 받은 행 안에서 한 뒤 상태 줄에 `받은 행만 정렬: <이유>`·`받은 행만 거르기: <이유>`를 한 번 보여야 한다. 정렬이 바뀌었으면 정렬, 거르기만 바뀌었으면 거르기 글이다.
+  - 예: 이유는 `열 이름 겹침`·`문장이 둘 이상`·`쓰기 문장`·`파라미터 문장`·`편집기 실행 결과가 아님`(PostgreSQL, R14.5), `SELECT 결과`·`_search 결과가 아님`(OpenSearch, R61.3), `로그 결과가 아님`·`time 열만 서버 정렬`(Loki, R62.3), `파티션 키 = 조건 없음`·`정렬 키(sk)가 아님`·`정렬 키 없는 테이블`·`키 정보 없음`(DynamoDB, R63.3), `이 저장소는 서버 정렬 없음`·`이 저장소는 서버 거르기 없음`(Prometheus·Redis 등과 Loki·DynamoDB 거르기), `다른 실행 중`, `접속이 바뀜`, `고정·문장별 결과`다.
+  - 예: 지금 결과를 만든 정렬·거르기와 같아지거나(다시 풀었을 때) 거르기 글을 치는 동안은 보이지 않는다. 같은 정렬·거르기에서 커서를 옮기는 등 다른 키를 눌러도 다시 보이지 않는다.
+  - 단, Loki에서 방향이 지금 결과와 같은 정렬(원래 결과에서 `time` 내림차순·정렬 없음)은 받은 행이 이미 그 줄들이라 다시 읽지도 알리지도 않는다.
+- R14.7 R14.5 기준으로 다시 읽을 수 있는 PostgreSQL 일반 결과가 잘렸으면(1,000행) 결과 영역의 `]`는 다음 1,000행을 `SELECT * FROM (\n<원래 문장>\n) AS _q [WHERE …] [ORDER BY …] OFFSET <받은 행 수>`로 읽어 덧붙여야 한다. 요약은 `2,000행 · 더 있음`(끝이면 `2,500행`)이다. 정렬·거르기를 바꾸면 R14.5대로 첫 페이지부터 다시 읽는다. 다시 읽기가 실패·취소·거절돼 받은 행이 지금 정렬·거르기로 읽힌 것이 아니면 `더 읽지 않음: 정렬·거르기가 받은 행에만 걸림`을 알리고 덧붙이지 않는다. 테이블 보기의 `]`는 다음 페이지(R16.1) 그대로다.
+  - 예: 커서·정렬·거르기·열 폭은 그대로다. 고친 칸이 있으면 먼저 제출하거나 되돌리라고 알리고, 잘리지 않았으면 `더 읽지 않음: 더 읽을 행이 없음`, 다른 종류 결과면 `더 읽지 않음: PostgreSQL 결과만 더 읽음`이다.
+  - 단, 모으는 행은 10,000행까지다(`더 읽지 않음: 10,000행까지만 더 읽음 (F7 전체 내보내기)`). 칸을 모두 메모리에 들고 있어서다. `ORDER BY` 없는 문장은 서버가 페이지마다 같은 순서를 지킨다는 보장이 없어 행이 겹치거나 빠질 수 있다.
 
 ### R15 결과 표 편집
 
@@ -229,7 +245,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 - R23.1 TUI 가 대체 화면에 들어가면 kitty 키 프로토콜(`CSI > 1 u`)을 켜고 나올 때 끈다(`CSI < u`). stdin·stdout 이 터미널이 아니거나 `DB_KITTY_KEYS=0` 이면 켜지 않는다. `db mcp` 는 켜지 않는다.
 - R23.2 ⌘ 조합은 같은 동작의 Ctrl 키로 바꿔 받는다. 표에 없는 ⌘ 조합은 글자로 넣지 않고 버린다. 붙여넣기 본문은 바꾸지 않는다.
-  - 예: ⌘R·⌘↩ → Ctrl+R(실행), ⌥⌘E → Alt+E(EXPLAIN ANALYZE), ⌘K → Ctrl+K(복사), ⌘A → Ctrl+A(전체 선택), ⌘⇧Z → Ctrl+Y(다시 하기), ⌘⇧F → F8(정렬).
+  - 예: ⌘R·⌘↩ → Ctrl+R(실행), ⌥⌘E → Alt+E(EXPLAIN ANALYZE), ⌘K → Ctrl+K(복사, 결과 영역은 복사 꼴 고르기 R71), ⌘A → Ctrl+A(전체 선택), ⌘⇧Z → Ctrl+Y(다시 하기), ⌘⇧F → F8(정렬).
   - 예: 프로토콜을 모르는 터미널(Terminal.app)에서는 지금처럼 Ctrl 키로 쓴다.
 - R23.3 kitty 키 감싸기는 맥, 그리고 프로토콜을 아는 터미널(`TERM_PROGRAM`이 ghostty·WezTerm·iTerm.app·kitty, `TERM`이 xterm-kitty·xterm-ghostty)에서만 켠다. Windows Terminal(`WT_SESSION`)에서는 켜지 않는다. `DB_KITTY_KEYS=1`·`0`이 먼저다. 감싼 입력은 덜 온 `ESC [` 시퀀스를 끝까지 들고 있다가 넘긴다.
   - 예: ConPTY가 마우스 보고 `ESC[<64;84;23M`을 둘로 나눠 보내도 하나로 받는다. 글자로 새어 든 마우스 보고(`<64;84;23M`)는 붙여넣기가 아니면 버린다.
@@ -550,11 +566,11 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R60 읽기 전용 저장소 공통
 
-- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
+- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`athena`(R68)·`aws`(R67)를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB·Athena·aws), `workgroup`·`output`(Athena, R68)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
   - 예: `{"name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"}`.
   - 접속을 시험·저장할 때 `basic`·`token`(Grafana 포함)이 `http://` 주소면 `경고: 비밀번호가 평문 http 로 감`을, DynamoDB `url`이 `localhost`·`*.amazonaws.com`이 아니면 `경고: AWS 서명을 AWS 밖 주소로 보냄`을 보인다(막지는 않음). 인증 없음인데 주소에 `user:pass@`가 있으면 오류다.
   - HTTP 요청은 리다이렉트를 따라가지 않는다. 3xx는 `redirect not followed: 302 Found` 같은 오류다(인증 헤더를 다른 주소로 다시 보내거나 허용 경로를 우회하지 않게). 응답 본문은 16 MiB까지 받는다.
-- R60.2 이 저장소들은 읽기 전용이다. 쓰기로 보이는 질의는 보내기 전에 거절한다(`읽기 전용 저장소라 보내지 않음`). 비싼 질의(DynamoDB 전체 스캔, OpenSearch `size`·`from+size` 1만 초과, Loki·Prometheus 범위 7일 초과)는 까닭을 붙여 확인을 받는다(`비싼 질의: 전체 스캔: y/N`, CLI는 `비싼 질의: 범위 7일 초과 (--force)`로 3). prod 판정(R6.2)과 CLI `--prod`(R58.2)는 같다.
+- R60.2 이 저장소들은 읽기 전용이다. 쓰기로 보이는 질의는 보내기 전에 거절한다(`읽기 전용 저장소라 보내지 않음`). 비싼 질의(DynamoDB 전체 스캔, OpenSearch `size`·`from+size` 1만 초과, Loki·Prometheus 범위 7일 초과, Athena `LIMIT`·`WHERE` 없는 `SELECT`와 파티션 테이블 미리 보기)는 까닭을 붙여 확인을 받는다(`비싼 질의: 전체 스캔: y/N`, CLI는 `비싼 질의: 범위 7일 초과 (--force)`로 3). prod 판정(R6.2)과 CLI `--prod`(R58.2)는 같다.
   - OpenSearch `size`·`from`은 본문(문자열 `"20"`·실수·지수 꼴도)과 질의 문자열을 모두 읽는다. 읽을 수 없거나 같은 키가 두 번 나오면(본문과 질의 문자열에 함께 있어도) `size·from 을 읽을 수 없음`으로 확인을 받는다.
   - 단, 다른 비싼 꼴(집계 `terms.size`, `track_total_hits`, 큰 `_source`, 넓은 인덱스 패턴)은 보지 않는다. 응답 16 MiB 상한과 서버 설정이 막는다.
 - R60.3 트리·편집기·결과 표·CLI(`db query -c`)는 PostgreSQL과 같은 자리에서 쓴다. 결과는 표(`db.Result`)이고 중첩 값은 JSON 칸이라 값 보기(R32)로 연다. 실행 기록(R8)·알림(R30)은 같다. 표 편집(R15)·트랜잭션(R17)·테이블 보기(R16)는 없다.
@@ -568,6 +584,12 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - `SELECT`는 끝의 `;`·공백·주석을 뗀 뒤에도 문자열·주석 밖에 `;`가 남거나 `delete`·`update`·`insert`·`drop`·`create`·`alter`·`truncate`·`replace` 낱말이 있으면(하위 질의 안이어도) 거절한다. 백틱으로 감싼 같은 이름의 열도 걸린다(안전 쪽). 결과 열은 `_index`·`_id`·`_score`와 `_source` 최상위 필드(첫 1,000건의 필드 합집합)이고 집계(`aggregations`)는 JSON 칸 한 줄로 보인다.
   - 예: `GET logs-*/_search` + `{"query":{"match":{"status":500}},"size":20}` → 20행.
   - 단, `SELECT`는 `fetch_size`로 `--max-rows`(기본 1,000, 상한 1만)까지 첫 페이지를 받는다(플러그인 기본 200행 상한을 넘김). REST `_search`는 본문의 `size`를 그대로 따르고 없으면 OpenSearch 기본 10건이다.
+- R61.3 `_search` 결과(편집기 REST 실행, 트리 `Enter` 미리 보기)는 정렬(`s`·열 머리 클릭)을 바꾸면 원래 요청 본문의 `sort`를 `[{"<열>":{"order":"asc|desc","missing":"_last"}}]`로 바꾸고, 거르기를 확정(`/` 뒤 `Enter`, `esc` 해제)하면 본문 `query`를 `{"bool":{"must":[<원래 query 또는 match_all>],"filter":[<조건>]}}`(아니다 꼴은 `must_not`)로 감싸 서버에서 다시 읽는다. 본문의 다른 키는 그대로이고 둘 다 풀면 원래 요청을 보낸다. 다시 읽은 행은 PostgreSQL(R14.5)처럼 받은 행 거르기·정렬을 다시 하지 않는다.
+  - 예: 거르기 꼴(R14.4) → 조건. `status=500` → `{"term":{"status":"500"}}`, `status!=500` → `must_not` term, `n>5`·`n>=5`·`n<5`·`n<=5` → `{"range":{"n":{"gt":5}}}`(십진수면 숫자, 아니면 글자), `msg:err` → `{"wildcard":{"msg":{"value":"*err*","case_insensitive":true}}}`(`*`·`?`·`\`는 이스케이프), `msg=null` → `must_not` `exists`, `msg!=null`·`msg:`(빈 값) → `exists`, `abc` → `{"query_string":{"query":"\"abc\"","lenient":true}}`, `!abc` → `must_not` query_string.
+  - 예: 정렬·같음·크기·`:` 비교에서 매핑 타입이 `text`이고 `keyword` 타입 하위 필드가 있으면 그 하위 필드(`msg.keyword`, 이름이 `keyword`인 것을 먼저)로 보낸다. 매핑은 인덱스마다 접속이 열려 있는 동안 한 번 읽고(`GET <인덱스>/_mapping`), 실행 기록에는 바꾼 뒤 보낸 글이 남는다.
+  - 예: `GET logs/_search` + `{"size":20}`에서 `status` 내림 → `{"size":20,"sort":[{"status":{"missing":"_last","order":"desc"}}]}`. `_score`는 `missing` 없이 보낸다.
+  - 예: 트리 미리 보기는 `POST <인덱스>/_search` + `{"query":{"match_all":{}},"size":50}`을 원래 요청으로 남기고 실행 기록에도 싣는다. 다시 읽기 실패·비싼 질의 확인은 R14.5·R60.2와 같다.
+  - 단, `SELECT`(SQL 플러그인)·`_count`·`_cat`·`_mapping` 결과는 받은 행 안에서만 정렬·거른다(R14.6). `keyword` 하위 필드가 없는 `text` 필드처럼 정렬할 수 없는 필드는 서버 오류(`다시 읽지 못함: …`)를 보이고 받은 행 정렬을 둔다. 모든 필드 찾기는 낱말 검색(query_string 구절)이라 받은 행 거르기(부분 글자)와 맞는 행이 다를 수 있고, 매핑 타입이 글자(`text`·`keyword`·`wildcard`)가 아닌 필드의 `:`는 같음(term)으로 본다. 인덱스 없는 `_search`는 매핑을 읽지 않는다.
 
 ### R62 Loki·Prometheus·Grafana
 
@@ -576,6 +598,9 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: `{app="api"} |= "error"` → 최근 1시간 로그. `sum by (status) (rate(http_requests_total[5m]))` → 범위 질의 표.
   - Prometheus 실행은 늘 범위 질의다(step은 범위/250, 최소 15초). 즉시값은 트리 지표 `Enter`로 본다.
   - Grafana 접속은 편집기 첫 줄 `# datasource: <이름|uid>`로 데이터 소스를 고른다(LogQL·PromQL 주석이라 서버에 가도 무해, 보내기 전에 지움). 없으면 이름순 첫 Loki, 없으면 첫 Prometheus다.
+- R62.3 Loki 로그 결과(`time`·라벨·`line`, 편집기 실행과 트리 `Enter` 미리 보기, Grafana의 Loki 데이터 소스 포함)에서 `time` 열 정렬을 바꾸면 db는 같은 질의를 오름차순이면 `direction=forward`(범위의 오래된 줄부터), 내림차순·정렬 없음이면 원래 방향 `direction=backward`로 서버에서 다시 읽어야 한다. 범위(`since`)·한도는 원래 실행 그대로다(그 사이 `Ctrl+]`로 바꿔도). 다른 열 정렬과 거르기는 받은 행 안에서 하고 까닭을 알린다(R14.6).
+  - 예: `{app="api"}` 최근 6h 1,000줄 → `time` 오름차순은 6시간 전부터 1,000줄, 다시 내림차순은 최신 1,000줄. 미리 보기는 `{라벨="값"}` 100줄을 원래 질의로 남기고 Grafana는 `# datasource: <uid>` 줄을 붙인다.
+  - 단, 지표 결과(`value`)·Prometheus는 서버 정렬이 없다. 범위가 7일을 넘는 원래 질의는 다시 읽을 때도 R60.2 확인을 받는다.
 
 ### R63 DynamoDB
 
@@ -583,14 +608,17 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R63.2 편집기는 PartiQL `SELECT`만 받는다(`ExecuteStatement`, 페이지를 이어 `--max-rows`까지). `WHERE`에 파티션 키 조건(`=`·`IN`)이 없으면 전체 스캔이라 확인을 받는다. 맨 바깥이나 괄호 안 `OR`로 갈린 조건은 가지마다 키가 있어도 스캔으로 본다(AWS 문서가 `OR`를 Query로 바꾼다고 적지 않아 안전 쪽, 여러 값은 `IN`).
   - 페이지는 50개, 시간은 60초(호출부 기한이 있으면 그 기한)에서 멈추고 받은 데까지 잘림으로 보인다(`페이지 50개에서 멈춤 (키 조건으로 좁히세요)`). 거르기 조건만 있는 질의가 큰 테이블을 끝까지 읽지 않게 한다. 결과 열은 키 열 먼저, 나머지 속성 이름순이고 값은 DynamoDB JSON을 풀어 보인다(`M`·`L`은 JSON 칸, 숫자는 원문).
   - 예: `SELECT * FROM "orders" WHERE "pk" = 'u#42'` → 그 파티션 항목. `SELECT * FROM "orders"` → `비싼 질의: 전체 스캔: y/N`. `… WHERE pk = 'a' OR pk = 'b'` → 확인, `… WHERE pk IN ['a','b']` → 바로.
+- R63.3 PartiQL 결과의 `WHERE`가 파티션 키를 `=`로 고정하면(R63.2 판정에서 `IN` 뺌, `FROM "t"."idx"`면 인덱스 키) 그 테이블(인덱스)의 정렬 키 열 정렬은 맨 바깥 `ORDER BY`를 `ORDER BY "<정렬 키>" ASC|DESC`로 바꾸거나 끝에 붙여 서버에서 다시 읽어야 한다. 정렬을 풀면 원래 문장을 보낸다. 다른 열 정렬과 거르기는 받은 행 안에서 하고 까닭을 알린다(R14.6).
+  - 예: `SELECT * FROM "orders" WHERE pk = 'u#42' -- 메모`에서 `sk` 내림 → `SELECT * FROM "orders" WHERE pk = 'u#42' ORDER BY "sk" DESC`(끝의 `;`·주석은 뗌). 기존 `ORDER BY sk ASC`는 바꾼다.
+  - 단, 키 이름은 원래 실행 때 읽은 `DescribeTable`을 쓰고 화면은 네트워크를 기다리지 않는다(접속을 다시 열었으면 `키 정보 없음`, 다시 실행하면 된다). `IN`·`OR`·키 조건 없음은 파티션이 여럿이라 `파티션 키 = 조건 없음`, `LIMIT`이 있는 문장은 받은 행만 정렬한다.
 
 ### R64 대시보드
 
-- R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 아직 결과 없음)·지연(ms)·버전·주요 수치다. 다시 확인하는 동안에는 줄·수치·요약이 마지막 결과를 그대로 보이고 머리에 `확인 중 N`만 센다. 표가 다섯 줄을 못 얻을 만큼 낮으면 요약 카드를 한 줄 글로 접는다.
-  - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`.
+- R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). aws 접속이 있으면 `DLQ 쌓인 큐`(aws 줄 `DLQ 쌓임` 합), 흐름(R69)에 `retry` 열이 있는 아웃박스가 있으면 `아웃박스 재시도`(그 재시도 수 합) 카드를 더하고 0보다 크면 경고 색이다. 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 아직 결과 없음)·지연(ms)·버전·주요 수치다. 다시 확인하는 동안에는 줄·수치·요약이 마지막 결과를 그대로 보이고 머리에 `확인 중 N`만 센다. 표가 다섯 줄을 못 얻을 만큼 낮으면 요약 카드를 한 줄 글로 접는다.
+  - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`, Athena `ENABLED · 스캔 상한 10.0GB`(버전 열은 엔진 판), aws `큐 63 · DLQ 쌓임 2`(R67.1).
   - 예: PostgreSQL `활성`은 확인하는 연결 자신을 뺀다. Redis 메모리는 `maxmemory:0`이면 `1.1GB/제한 없음`, `maxmemory` 필드를 숨긴 서버는 사용량만 `1.1GB`다.
-  - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있으면 그 칸을 경고 색으로 그린다.
-- R64.2 확인은 모든 접속에 동시에, 접속마다 질의 5초 제한으로 보낸다. 아직 열지 않은 접속을 여는 데는 15초까지 따로 준다(Redis 는 평문 3초 뒤 TLS 로 다시 붙고, PostgreSQL `connect_timeout` 이 8초다). 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 다시 볼 때와 대시보드 탭을 닫을 때는 진행 중인 이전 확인을 취소한다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO server clients memory keyspace`(Redis 7 미만이 거절하면 `INFO`), OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
+  - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있거나, aws DLQ에 메시지가 쌓인 큐가 있으면 그 칸을 경고 색으로 그린다.
+- R64.2 확인은 모든 접속에 동시에, 접속마다 질의 5초 제한으로 보낸다. 아직 열지 않은 접속을 여는 데는 15초까지 따로 준다(Redis 는 평문 3초 뒤 TLS 로 다시 붙고, PostgreSQL `connect_timeout` 이 8초다). 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 다시 볼 때와 대시보드 탭을 닫을 때는 진행 중인 이전 확인을 취소한다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO server clients memory keyspace`(Redis 7 미만이 거절하면 `INFO`), OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수, Athena `GetWorkGroup` 상태·스캔 상한, aws `ListQueues`·큐마다 `GetQueueAttributes`). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
   - 단, 아직 열지 않은 접속도 확인 때문에 연결을 연다(풀 연결 하나). 확인 오류는 비밀값을 지워 한 줄로 보인다.
 - R64.3 CLI `db status [--format table|tsv|json] [--prod] [-c 이름…]`는 같은 확인을 한 번 돌려 표를 찍는다. prod 접속은 `--prod`가 없으면 확인하지 않고 `--prod 로 확인`으로 보인다(R58.2). 하나라도 실패하면 종료 코드 1이다.
   - 예: 열은 `group`·`name`·`env`·`kind`·`ok`·`latency_ms`·`version`·`metrics`다. json 은 접속마다 객체인 배열이고 `metrics`는 `{name,value,warn}` 배열, 확인하지 않은 prod 는 `"ok":null`·`"note":"--prod 로 확인"`이다. `-c`는 여러 번 줄 수 있고 없으면 모든 접속이다.
@@ -606,12 +634,104 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R66 트리 정렬
 
-- R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
+- R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB → Athena → aws, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
   - 예: `shop` 폴더 → `shop-local`, `shop-local-redis`, `shop-stg`, `shop-stg-read`, `shop-stg-redis`, `shop-stg-os`, `shop-prod`, `shop-prod-read-redis`, `shop-prod-os`.
 - R66.2 폴더는 보이는 묶음이고 접속의 `group`과 따로 둘 수 있다. 옮긴 폴더는 db 전용 파일 `.dbtui/folders.json`(`{"<접속 uuid>": "폴더"}`, uuid 가 없으면 `"name:<이름>"`)에 두고 DataGrip 접속도 같은 파일로 옮긴다. `.idea`·`connections.json`의 `group`은 고치지 않는다. 트리·정렬(R66.1)·대시보드(R64)·`db status`·`db conns`의 `folder` 열은 옮긴 폴더를, 암호화 키(`<GROUP>_AES_KEY`, R37)·접속 창의 그룹 칸·MCP는 `group`을 쓴다. 폴더가 원래 그룹과 같아지면 기록을 지운다.
   - 예: `dg-stg`(그룹 `grp`)를 `ops`로 옮기면 트리에선 `ops` 폴더에 보이고 `enc()`는 여전히 `GRP_AES_KEY`로 암호화한다.
 - R66.3 폴더 줄 `E`는 `폴더 이름: <지금 이름>` 한 줄 입력을 열고, Enter 면 그 폴더에 보이는 접속을 모두 새 폴더로 옮긴 뒤 `폴더 이름 바꿈: mon → monitoring (접속 3)`을 보인다. 이미 있는 폴더 이름이면 합쳐진다. 접속 줄 `M`은 `옮길 폴더: <지금 폴더>`를 열고 빈 값이면 원래 그룹으로 되돌린다. 펼침 상태는 새 이름으로 이어받고 옮긴 접속(또는 폴더)을 고른다. 폴더만 바뀐 접속은 연결·자동완성 목록을 닫지 않는다. `folders.json`이 깨졌으면 경고만 하고 그룹대로 보이며, 덮어쓰지 않고 `폴더를 옮기지 못함`을 보인다. 폴더 이름은 64자 이하, 제어 문자 없음.
 - R66.4 CLI `db conn folder <이름> <폴더>` · `db conn folder <이름> --reset` · `db conn folder --rename <옛 폴더> <새 폴더>`. 접속에 붙지 않아 `--prod`가 필요 없다. 없는 접속·폴더는 종료 코드 2다.
+
+### R67 AWS
+
+- R67.1 `kind: "aws"` 접속은 AWS 메시징·인프라를 트리로만 보는 읽기 전용 저장소다. 칸은 이름·그룹·종류·리전·프로필이고(`url`·`auth` 없음, `region` 필수) 자격 증명은 DynamoDB처럼 `profile` 또는 표준 체인으로 받는다(R60.1). 트리 맨 위는 폴더 `SNS 토픽`·`SQS 큐`·`Lambda`·`EventBridge`·`Scheduler`·`Step Functions`·`S3`이고 펼칠 때 `sts:GetCallerIdentity`로 자격 증명부터 확인한다(접속 시험이 자격 증명 없이 성공하지 않게). 편집기 질의 언어는 없어 `Ctrl+R`·`db query`는 보내지 않고 `aws 접속은 트리로 본다`를 보인다(CLI는 종료 코드 2). `db tables -c`는 맨 위 폴더다.
+  - 예: `{"name":"infra-stg","kind":"aws","region":"ap-northeast-2","profile":"stg"}`. `db conn add infra-stg --kind aws --region ap-northeast-2 --profile stg`.
+  - 예: 목록 API가 권한 거절(`AccessDenied`·`AccessDeniedException`·`AuthorizationError`)이면 그 폴더는 `권한 없음: sns:ListTopics` 한 줄이고 다른 폴더는 그대로 쓴다. 그 밖의 오류는 노드 오류다.
+  - 부르는 API는 `List*`·`Get*`·`Describe*`·`Head*`(S3 본문은 범위 `GetObject`, R67.6)뿐이다. 메시지를 받거나(`ReceiveMessage`) 보내거나 지우는 호출은 없고, 시험이 패키지 소스에서 쓰기 호출을 찾으면 실패한다.
+  - 대시보드(R64) 수치는 `큐 63 · DLQ 쌓임 2`다. DLQ 쌓임은 RedrivePolicy의 DLQ에 메시지(`ApproximateNumberOfMessages`)가 있는 큐 수이고 0보다 크면 경고다. 큐 속성은 8개씩 동시에 읽고, 큐가 200개를 넘으면 앞 200개만 세어 `DLQ 쌓임 0 (앞 200개)`로 알린다. 속성을 못 읽은 큐가 있으면 `읽기 실패 N`(경고)을 붙인다.
+  - 단, 대시보드는 목록에 없는 DLQ(다른 계정)를 세지 않는다. 트리는 따로 읽는다.
+- R67.2 `SNS 토픽`은 토픽 → 구독이다. 구독 줄은 대상(같은 계정 SQS 큐는 큐 이름으로 줄임)과 프로토콜이다. 토픽 `Enter`는 `protocol`·`endpoint`·`subscription_arn`·`raw`·`filter` 표다(`raw`·`filter`는 구독마다 `GetSubscriptionAttributes`의 `RawMessageDelivery`·`FilterPolicy`). `SQS 큐`는 큐마다 `대기 12 · 처리 중 3 · 지연 0`이고, RedrivePolicy가 있으면 ` · DLQ <이름> <대기 수>`를 붙이며 DLQ에 메시지가 있으면 경고 색이다. 큐 `Enter`는 `attribute`·`value` 표(첫 줄 `QueueUrl`, 나머지 속성 이름순, RedrivePolicy JSON은 원문)다. 경로가 큐 ARN(`sqs/<ARN>`, 흐름의 DLQ)이면 `GetQueueUrl`에 ARN 의 계정(`QueueOwnerAWSAccountId`)을 넘겨 그 계정의 큐를 열고, ARN 리전이 접속 리전과 다르면 부르지 않고 `QueueArn`·`note: 다른 리전 큐는 수만 보임` 두 줄만 보인다.
+  - 예: `orders` 큐의 DLQ `orders-dlq`에 2건 → `orders 대기 12 · 처리 중 3 · 지연 0 · DLQ orders-dlq 2`(경고 색).
+  - 예: 확인 전 구독(`PendingConfirmation`)은 속성을 묻지 않아 `raw`·`filter`가 빈 칸이다. 다른 계정 DLQ를 못 읽으면 수는 `?`다.
+  - 단, 큐 목록은 `GetQueueAttributes`(`All`)를 큐마다 8개씩 동시에 부른다. 큐 수백 개 계정은 펼치는 데 몇 초 걸린다.
+- R67.3 `Lambda`는 함수 목록이다(`런타임 · 마지막 수정 KST`, 컨테이너 이미지는 `Image`). 함수 `Enter`는 이벤트 소스 매핑 `source`·`state`·`batch`·`last_result` 표다.
+  - 예: `worker nodejs20.x · 2026-11-01 12:04` → `Enter` → `arn:aws:sqs:…:orders | Enabled | 10 | OK`.
+- R67.4 `EventBridge`는 이벤트 버스 → 규칙(`<일정 식 또는 pattern> · <상태>`)이고 규칙 `Enter`는 대상 `target_id`·`arn`·`input`·`dlq` 표다(`input`은 Input, 없으면 InputPath, 없으면 InputTransformer 템플릿). `Scheduler`는 일정 그룹 → 일정(`<식> · <상태>`)이고 일정 `Enter`는 `attribute`·`value` 표(식·시간대·상태·대상 ARN·input·역할·DLQ)다.
+  - 예: `nightly cron(0 18 * * ? *) · ENABLED`, `on-order pattern · DISABLED`. 파트너 버스(`aws.partner/…`) 이름의 `/`도 그대로 받는다.
+  - 단, Scheduler 목록에는 식이 없어 일정마다 `GetSchedule`을 8개씩 동시에 부른다. 못 읽은 일정은 `권한 없음: scheduler:GetSchedule`·`읽기 실패`다.
+- R67.5 `Step Functions`는 상태 기계(`STANDARD·EXPRESS · 만든 시각`)이고 `Enter`는 최근 실행 50개 `name`·`status`·`start`·`stop`(KST 초까지, 실행 중이면 `stop` 빈 칸) 표다. 더 있으면 잘림으로 보인다. 실행을 시작·멈추는 기능은 없다.
+- R67.6 `S3`는 버킷(리전) → `/`로 나눈 접두 → 객체(`크기 · 마지막 수정`)다. 한 단계는 `ListObjectsV2` 한 페이지(1,000개)이고 넘치면 끝에 `… 앞 1000개만 보임`이다. 버킷은 목록이 준 리전(없으면 `GetBucketLocation`)으로 묻는다(리다이렉트를 따라가지 않아서). 객체 `Enter`는 `HeadObject` 메타데이터(`key`·`size`·`last_modified`·`content_type`·`etag`·`storage_class`·`x-amz-meta-*` 등)를 `attribute`·`value` 표로 보이고, 텍스트로 보이는 64KiB 이하 객체만 `body` 줄에 본문을 붙인다.
+  - 본문은 `Range: bytes=0-65535` 범위 `GetObject`로만 받는다. 그 사이 객체가 커져도 64KiB 넘게 받지 않는다. 큰 객체는 내려받지 않는다.
+  - 예: `text/*`·JSON·XML·YAML·CSV Content-Type, 또는 형식이 없거나 `application/octet-stream`인 `.txt`·`.log`·`.csv`·`.json`·`.md`·`.yaml` 등 → 본문. 64KiB 초과 텍스트 → `body (64KiB 를 넘어 받지 않음)`. 이미지·`Content-Encoding: gzip` → `body` 줄 없음. UTF-8이 아니면 `(텍스트가 아님)`.
+  - 단, 콘솔이 만든 빈 "폴더" 객체(키가 접두와 같은 것)는 보이지 않는다. 버전·삭제 표시는 보지 않는다.
+
+### R68 Athena
+
+- R68.1 접속은 `{"name":"athena-prod","group":"data","kind":"athena","region":"ap-northeast-2","profile":"team","workgroup":"primary","output":"s3://bucket/prefix/"}`이다. `region`은 꼭 있어야 하고 `url`·`auth`·비밀값은 없다(자격 증명은 R60.1처럼 `profile`). `workgroup`이 비면 `primary`, `output`이 비면 작업 그룹의 결과 위치 설정을 따르고, 둘 다 없어 Athena가 거절하면 그 오류를 그대로 보인다. 접속 창 칸은 이름·그룹·종류·리전·프로필·작업 그룹·결과 위치, CLI는 `db conn add <이름> --kind athena --region R [--profile P] [--workgroup W] [--output s3://…]`이다.
+  - 트리는 데이터 카탈로그 `AwsDataCatalog`의 데이터베이스 → 테이블(오른쪽에 `EXTERNAL_TABLE`·`VIRTUAL_VIEW`) → 열(`이름 타입`, 파티션 키는 타입 뒤 `(파티션)`)이다. 테이블 `Enter`는 `SELECT * FROM "<db>"."<테이블>" LIMIT 50`이고, 파티션 테이블이면 `비싼 질의: 파티션 조건 없음: y/N`을 먼저 묻는다(Athena는 LIMIT이 있어도 연 파일만큼 요금을 매긴다).
+  - 예: `output`이 `s3://`로 시작하지 않으면 `athena output must be s3://bucket/prefix/`로 저장하지 않는다. `url`을 주면 `athena does not use url`이다.
+- R68.2 편집기는 `SELECT`·`WITH … SELECT`·`SHOW`·`DESCRIBE`·`EXPLAIN`으로 시작하는 문장 하나만 보낸다. 다른 첫 낱말(`INSERT`·`CREATE TABLE AS`·`UNLOAD`·`DROP`·`ALTER`·`MSCK` 등)이나 끝의 `;` 뒤 다른 문장은 R60.2로 거절하고, `SELECT`·`WITH`·`EXPLAIN` 문장 안 어디에(하위 질의 포함) `insert`·`update`·`delete`·`merge`·`create`·`drop`·`alter`·`truncate`·`msck`·`unload`·`vacuum`·`optimize`·`grant`·`revoke`·`call`·`prepare`·`execute`·`deallocate` 낱말이 있어도 거절한다(`EXPLAIN ANALYZE INSERT …`는 실제로 쓴다). 문자열·주석·`"따옴표 이름"` 안의 낱말은 보지 않는다. `SHOW CREATE TABLE`은 받는다.
+  - 저장소 탭에는 고른 데이터베이스가 없다. 이름을 `"db"."table"`로 다 적거나, 첫 줄에 `-- database: <이름>`을 쓰면 질의 맥락(`QueryExecutionContext`)으로 싣고 그 줄은 떼고 보낸다(Athena는 앞머리 주석이 있는 DDL을 읽지 못하는 일이 있다).
+  - `SELECT`·`WITH`·`EXPLAIN ANALYZE` 문장에 `LIMIT`도 `WHERE`도 없으면 `비싼 질의: 전체 스캔: y/N`(CLI `--force`)이다. 문장 어디든 두 낱말 가운데 하나가 있으면 넘긴다. 파티션 조건인지까지는 보지 않고 작업 그룹의 질의당 스캔 상한이 나머지를 막는다.
+  - 예: `SELECT * FROM "sales"."orders"` → 확인. `SELECT * FROM "sales"."orders" WHERE dt = '2026-11-01' LIMIT 100` → 바로. `CREATE TABLE t2 AS SELECT …` → `읽기 전용 저장소라 보내지 않음`.
+  - 단, `$태그$`는 문자열로 보고 넘긴다(Athena SQL에 없는 꼴이라 서버가 문법 오류로 거절한다).
+- R68.3 실행은 `StartQueryExecution`(작업 그룹, `output`이 있으면 결과 위치, 결과 재사용 60분) → `GetQueryExecution`을 0.2초에서 두 배씩 2초까지 늘려 묻기 → `GetQueryResults`를 이어 `--max-rows`(기본 1,000)까지다. `SELECT` 결과의 첫 줄은 열 이름 머리라 빼고, `SHOW`·`DESCRIBE` 결과는 그대로 둔다. 결과 표 위 한 줄(CLI tsv·csv는 stderr)에 `스캔 1.2GB · 엔진 0.6초`를, 재사용한 결과면 ` · 이전 결과 재사용`을 붙인다. 실패하면 `athena: query failed: <Athena 까닭>`이다.
+  - 결과 재사용은 같은 질의를 60분 안에 다시 보내면 이전 결과를 돌려줘 다시 스캔하지 않는다(요금 아낌). 작업 그룹이 재사용을 받지 않아(엔진 v2) `InvalidRequestException`으로 거절하면 재사용 없이 한 번 더 보낸다.
+  - 실행 중 취소(R3.4, CLI `--timeout`)하면 `StopQueryExecution`을 따로 5초 기한으로 보낸다. 읽기 전용 저장소에서 유일하게 읽기가 아닌 호출이고, 보내지 않으면 서버에서 질의가 끝까지 돌며 스캔 요금을 쌓는다. `StartQueryExecution` 응답 전에 취소하면 질의 id가 없어 멈추지 못한다.
+  - 필요한 IAM 권한: `athena:ListDatabases`·`ListTableMetadata`·`GetTableMetadata`·`StartQueryExecution`·`GetQueryExecution`·`GetQueryResults`·`StopQueryExecution`·`GetWorkGroup`, Glue 카탈로그 읽기(`glue:GetDatabases`·`GetTables`·`GetTable`·`GetPartitions`), 데이터 S3 읽기와 결과 위치 S3 쓰기(`s3:GetObject`·`ListBucket`·`PutObject`·`GetBucketLocation`).
+
+### R69 이벤트 흐름
+
+들일 시간: 반나절. 함정: 아웃박스 `where`는 사용자 SQL 조각이라 한 문장만 받고 READ ONLY 가 나머지를 막는다. SNS 토픽 이름은 ARN 이 아니라 `ListTopics`를 다 훑어 찾는다.
+
+- R69.1 `.dbtui/flows.json`은 흐름 배열이다. 항목은 `name`, 선택인 `outbox`(`conn`·`table`·`type`, 선택 `retry`·`due`·`where`), `aws`, `topic`(이름 또는 ARN)이다. `outbox.conn`은 PostgreSQL 접속, `aws`는 `aws` 종류(R67) 접속 이름이어야 한다. 파일이 없으면 흐름이 없고 db 는 그대로 켜진다. JSON 이 깨졌으면 흐름 탭 맨 위·CLI 오류에 `설정 오류: .dbtui/flows.json: …`을, 항목 하나가 틀리면 그 항목만 `설정 오류: <까닭>`으로 보이고 나머지는 푼다.
+  - 예: `{"name":"shop-hub-stg","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at","where":"event_type like 'DATA_%'"},"aws":"aws-stg","topic":"stg-shop-hub"}`.
+  - 예: `aws`에 PostgreSQL 접속을 주면 `설정 오류: aws shop-stg: want kind aws, got postgresql`, 없는 접속은 `aws nope: no such connection`, 이름이 겹치면 뒤 것이 `duplicate name …`, `table`이 `a.b.c`면 `outbox.table must be table or schema.table`이다.
+- R69.2 아웃박스 수는 `대기 N`(`where`에 맞는 행 수), `재시도 N`(`retry > 0`, `retry`가 있을 때), `오래됨 N`(`due < now() - interval '5 minutes'`, `due`가 있을 때)이다. 한 문장으로 묻고, `table`(`스키마.테이블`은 마디마다)·열 이름은 `db.QuoteIdent`로 감싼다. `where`는 사용자 개인 설정 파일의 SQL 이라 편집기 SQL 처럼 그대로 `AND`로 붙이되(줄을 바꿔 괄호로 감싸 끝의 `--` 주석이 뒤를 먹지 않게), 문장 경계로 나눠 하나이고 문자열·주석 밖에 `;`가 없어야 한다(아니면 `outbox.where must be a single condition without ';'` 설정 오류). 질의는 늘 READ ONLY 트랜잭션(`RunReadOnly`)으로, 여는 데 15초·질의 5초 제한(R64.2와 같음)이다. 상세(`Enter`)는 종류별 상위 10개 `type`·`count`·`retrying`·`oldest_due` 표다.
+  - 예: `select count(*), count(*) filter (where "retry_count" > 0), count(*) filter (where "check_needed_at" < now() - interval '5 minutes') from "public"."t_outbox" where (⏎event_type like 'DATA_%'⏎)`.
+  - 단, `where` 안에 쓰기를 숨겨도(CTE 안 `delete` 등) 서버 READ ONLY 가 막아 그 흐름의 아웃박스가 오류로 보인다.
+- R69.3 토픽은 `aws` 접속으로 푼다: 이름이면 `ListTopics`에서 끝 마디가 같은 ARN → `ListSubscriptionsByTopic` → 같은 계정 SQS 구독마다 `GetQueueUrl`·`GetQueueAttributes`(대기·처리 중·지연·RedrivePolicy) → DLQ 대기 수(R67.2와 같음, 못 읽으면 `?`) → `ListEventSourceMappings`(`EventSourceArn`=큐)의 함수 이름·상태·마지막 결과. 다른 프로토콜(lambda·https·email…)과 다른 계정 큐는 프로토콜·대상만 보이는 잎이고, email 받는 사람은 `a***@domain`으로 가린다. 큐 하나가 실패하면 그 상자만 오류다. 부르는 API 는 R67.1 규칙 그대로 읽기뿐이다.
+- R69.4 `Alt+F`(팔레트 `흐름`)는 흐름 탭을 하나만 열고, aws 트리의 SNS 토픽 줄 `F`는 그 토픽을 아웃박스 없는 흐름(`<토픽> · <접속>`)으로 목록 끝에 더해 고른다(다른 줄의 `F`는 데이터 검색 R33.2 그대로). 왼쪽은 흐름 목록(`●` 문제 없음, `!` 경고, `✕` 설정 오류·실패, `…` 아직 결과 없음), 오른쪽은 고른 흐름의 그림이다. 높이가 모자라면 목록은 고른 흐름이, 그림은 고른 상자가 든 줄이 보이도록 내려 그린다. 대시보드(R64.2)처럼 모든 흐름을 동시에 풀고, 탭이 활성인 동안 30초마다 다시, `r`은 바로 다시 푼다. 다시 풀 때와 탭을 닫을 때 진행 중인 이전 풀이를 취소하고, 그 사이 이전 결과를 그대로 보이며 머리에 `확인 중 N`을 센다. 대시보드처럼 prod 접속도 푼다. 세션 복원(R41)은 이 탭을 되살리지 않는다.
+  - 그림은 왼쪽 → 오른쪽 `[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 오래됨 1] ──▶ [SNS stg-shop-hub] ─┬─▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]`이고, 구독이 여럿이면 `├─▶`·`└─▶`로 갈라지며, DLQ 는 큐 아래 `└─ DLQ q1-dlq 4` 가지다. 가장 긴 줄이 폭을 넘으면 위 → 아래(`▼`, 큐 아래 `├─ DLQ`·`└─▶ [λ …]`)로 쌓는다.
+  - DLQ 대기 > 0, 재시도 > 0, 오래됨 > 0, Lambda 매핑 상태가 `Enabled`가 아니거나 마지막 결과가 `OK`가 아니면 그 상자를 경고 색(`dashWarnStyle`)으로 그린다. 단, 마지막 결과 `No records processed`는 메시지가 없던 매핑의 보통 값이라 경고하지 않는다. 오류 상자는 빨강이다.
+  - `↑↓`·`j k`는 흐름, `←→`·`h l`은 상자를 고르고(고른 상자는 뒤집어 그림), `Enter`는 상세를 새 결과 탭에 연다: 아웃박스는 R69.2 종류별 표, SNS 는 구독 표(R67.2), 큐·DLQ 는 속성 표(R67.2, DLQ 는 다른 계정일 수 있어 ARN 으로 연다), Lambda 는 매핑 표(R67.3). 잎 구독은 `열 상세가 없음`이다.
+- R69.5 CLI `db flows [-f 흐름…] [--format table|tsv|json] [--prod]`는 흐름(`-f`·위치 인자로 고르고, 없으면 모두)을 동시에 한 번 풀어 상자마다 한 줄 `flow`·`stage`(`outbox`·`sns`·`sqs`·`dlq`·`lambda`·`sub`·`config`)·`name`·`metrics`·`warn`을 찍는다. prod 접속은 `--prod`가 없으면 묻지 않고 `--prod 로 확인`이다(R58.2·R64.3). 설정 오류나 실패한 상자가 하나라도 있으면 종료 코드 1, 없는 흐름 이름·`--format csv`는 2다.
+  - 예: json 은 줄마다 `{"flow":"hub","stage":"dlq","name":"q1-dlq","metrics":"4","warn":true}`이고 실패는 `"error"`, 확인하지 않은 prod 는 `"note":"--prod 로 확인"`을 더한다. 표·tsv 의 `metrics` 칸은 오류·note 가 있으면 그것이다.
+
+### R70 쿼리 보드
+
+들일 시간: 하루. 함정: 같은 접속 패널을 동시에 보내면 Redis 는 편집기 세션 연결 하나를 같이 써 줄을 선다. 그래서 접속마다 차례로 돌린다. 저장소의 비싼 질의를 보드가 확인 없이 Force 로 보내면 30초마다 전체 스캔이 된다.
+
+- R70.1 `.dbtui/boards/<이름>.json`은 보드 하나다. 칸은 `title`(없으면 파일 이름), `refresh`(Go 기간 꼴, 기본 `60s`), `panels`이고 패널은 `title`, `view`(`number`·`table`·`chart`·`flow`), `conn`·`query`(질의 패널) 또는 `flow`(흐름 패널, R69 이름), 선택 `since`(Loki·Prometheus·Grafana, R62.2 `--since`와 같은 꼴), 선택 `warn`(`number`만)이다. 폴더가 없으면 보드가 없고 db 는 그대로 켜진다. JSON 이 깨졌으면 보드 맨 위·CLI stderr 에 `설정 오류: .dbtui/boards/<이름>.json: …`를, 패널 하나가 틀리면 그 패널만 `설정 오류: <까닭>`으로 보이고 돌리지 않는다.
+  - 예: `{"title":"shop 운영","refresh":"60s","panels":[{"title":"오늘 결제","conn":"shop-prod-read","query":"select count(*) from t_payments where created_at >= current_date","view":"number","warn":">0"},{"title":"에러 로그","conn":"loki-prod","query":"sum(count_over_time({app=\"shop-api\"} |= \"ERROR\" [5m]))","since":"6h","view":"chart"},{"title":"DLQ","flow":"shop-hub-stg","view":"flow"}]}`.
+  - 예: `"view":"pie"` → `view must be one of number|table|chart|flow: "pie"`. aws 접속(R67)에 질의 → `conn aws-stg: aws connections are not query panels (use view flow)`. 없는 흐름 → `flow nope: no such flow (.dbtui/flows.json)`, 설정 오류가 있는 흐름은 그 까닭을 붙인다.
+  - 예: `"refresh":"5s"` → `설정 오류: refresh must be at least 10s: 5s`이고 10초마다 돈다. 읽을 수 없는 `refresh`는 오류를 보이고 60초마다 돈다.
+- R70.2 질의 패널은 읽기만 보낸다. PostgreSQL 은 한 문장이고 R6.1 읽기 판정과 `CheckReadOnlySQL`(MCP·CLI 와 같은 함수 차단)을 지나야 하며 READ ONLY 트랜잭션(`RunReadOnlyRows`)으로 돈다. Redis 는 한 줄이고 R6.1 읽기 명령이어야 하며 `KEYS`는 CLI(R58.2)처럼 받지 않는다. 새로고침마다 컬렉션 전체가 오가지 않게 범위를 정한 읽기만 받는다: `GET`·`MGET`·`HGET`·`HMGET`·`LLEN`·`SCARD`·`ZCARD`·`HLEN`·`STRLEN`·`TTL`·`PTTL`·`TYPE`·`EXISTS`·`XLEN`·`INFO`·`DBSIZE`, 0 이상 `start ≤ stop`이고 `stop - start ≤ 49`인 `LRANGE`·`ZRANGE`·`ZREVRANGE`(ZRANGE 는 `WITHSCORES`만 덧붙임), `COUNT`가 50 이하(없으면 서버 기본)인 `SCAN`이다. 그 밖(`HGETALL`·`SMEMBERS`·`LRANGE k 0 -1`·`ZRANGE … BYSCORE` 등)은 `설정 오류: 보드에서는 범위를 정한 읽기만: <명령>`이다. Redis 결과도 패널 행 수(50행)에서 자른다. 저장소(OpenSearch·Loki·Prometheus·Grafana·DynamoDB·Athena)는 `Backend.Run`이 쓰기를 거절하고(R60.2), 비싼 질의(`ErrNeedsConfirm`)는 Force 로 다시 보내지 않고 `비싼 질의라 보드에서 돌리지 않음: <까닭>`을 보인다. 패널 하나는 여는 시간을 포함해 15초 제한이다(흐름 패널도 같은 15초 안에서 푼다). 숫자·표 패널은 50행, 차트 패널은 1,000행까지 받는다.
+  - 예: `delete from t` → `설정 오류: query is not read-only: …`. `DEL a` → `redis command is not a read command`. `select 1; select 2` → `query must be a single statement`.
+  - 단, 판정이 놓치는 CTE 안 쓰기는 서버(커서·READ ONLY)가 거절해 그 패널이 오류로 보인다. Redis 패널은 편집기와 같은 세션 연결(R4)로 보내므로 그 접속 편집기에서 `SELECT`로 DB 를 바꾸면 패널도 그 DB 를 읽고, `MULTI`를 열어 두면 패널 명령이 그 안에 쌓인다.
+- R70.3 보기는 넷이다. `number`는 첫 행 첫 칸(행 없이 글이면 첫 줄)을 굵게 보이고 `warn`(`>`·`>=`·`<`·`<=`·`=`·`==`·`!=` 뒤 숫자) 조건에 맞으면 경고 색(`dashWarnStyle`)이다. `table`은 머리 줄과 패널에 들어가는 만큼의 행(열 폭 20칸까지), `chart`는 R28 차트(첫 열이 날짜·시간이면 선, 아니면 막대), `flow`는 R69 흐름의 상자를 한 줄에 하나(`[SQS q1 | 대기 0 · 처리 중 2]`, `DLQ q1-dlq 4`) 경고·오류 색으로 보인다.
+  - 예: `warn ">0"`에 `3` → 경고 색, `0`·숫자가 아닌 칸 → 보통. `1,234`는 쉼표를 떼고 읽는다.
+- R70.4 `Alt+B`(맥 ⌘⇧B, 팔레트 `보드`)는 `.dbtui/boards/`의 보드를 골라 보드 탭을 연다(보드마다 탭 하나, 이미 있으면 그 탭으로 옮겨 바로 다시 돈다). 보드가 없으면 `보드 없음 · .dbtui/boards/<이름>.json 을 쓰세요`다. 패널 격자는 보드 영역 폭이 80칸 아래면 1열, 140칸 아래면 2열, 그 위는 3열이고 패널 높이는 `number` 4줄, `table`·`chart` 10줄, `flow`는 상자 수 + 2줄이다(머리 두 줄 포함, 한 줄의 패널은 가장 높은 패널에 맞춘다). 패널 머리는 `제목 · 접속`(흐름은 `흐름 <이름>`)이고 prod 접속(R6.2, 흐름은 아웃박스·aws 접속 하나라도)이면 `prod` 표시를 붙인다. 둘째 줄은 마지막으로 돈 시각 `12:04:05`(KST, 보드·흐름·대시보드의 `확인함` 시각도 같다)·걸린 시간 `120ms`이고 다시 도는 동안 `· 확인 중`을 붙인다. 실패하면 본문이 빨간 오류다.
+  - 대시보드(R64.2)처럼 탭이 활성인 동안 `refresh`마다, `r`은 바로 다시 돈다(`r`은 파일도 다시 읽는다). 다시 돌 때와 탭을 닫을 때 진행 중인 회차를 취소하고 그 사이 이전 결과를 그대로 보이며 머리에 `확인 중 N`을 센다. 세션 복원(R41)은 이 탭을 되살리지 않는다.
+  - 같은 접속 패널(흐름은 aws 접속)은 차례로, 다른 접속끼리는 동시에 최대 4개까지 돈다. 화면은 prod 패널도 돌린다(읽기 전용).
+  - 방향키·`h j k l`은 패널을 고르고(고른 패널은 테두리 강조), `Enter`는 질의 패널이면 새 쿼리 탭에 그 질의·접속(Loki·Prometheus·Grafana 는 `since` 범위도)을 채워 보통 실행(R6 확인 그대로)하고, 흐름 패널이면 흐름 탭(R69.4)에서 그 흐름을 고른다. 설정 오류 패널은 그 까닭만 상태 줄에 보인다.
+- R70.5 CLI `db board [이름] [--format table|tsv|json] [--prod]`는 보드의 패널을 R70.4 순서 규칙으로 한 번 돌려 패널마다 한 줄 `panel`·`conn`·`view`·`value`·`error`를 찍는다. 이름이 없으면 보드 목록(`name`·`title`·`panels`·`error`)이다. prod 패널은 `--prod`가 없으면 묻지 않고 `--prod 로 확인`이다(R58.2·R64.3, 흐름은 상자마다). 설정 오류나 실패한 패널(흐름은 실패한 상자)이 하나라도 있으면 종료 코드 1, 없는 보드·`--format csv`는 2다.
+  - 예: json 은 패널마다 `{"panel":"오늘 결제","conn":"shop-stg","view":"number","value":"3","warn":true}`, 표·차트는 `columns`·`rows`(50행까지, 넘으면 `"truncated":true`), 흐름은 `columns` `["stage","name","metrics","warn"]`·상자마다 `rows`다. prod 패널은 `"prod":true`, 건너뛰면 `"note":"--prod 로 확인"`, 실패는 `"error"`다.
+  - 예: 표·tsv 의 `value`는 숫자 패널 값(경고면 뒤에 ` !`), 표·차트는 `50행`(잘렸으면 `50행+`), 흐름은 상자를 ` · `로 이은 글, 건너뛴 prod 는 note 다.
+
+### R71 복사 꼴 고르기
+
+들일 시간: 하루. 함정: OSC 52 를 막은 터미널(설정에 따라 iTerm2·tmux·Windows Terminal 일부)에서는 복사가 조용히 사라진다. 그래서 시스템 클립보드 명령에도 같이 쓴다. `clip.exe`는 BOM 없는 입력을 콘솔 코드 페이지로 읽어 한글이 깨진다.
+
+- R71.1 결과 영역에서 `Ctrl+K`(맥 ⌘K, 팔레트 `복사 꼴 고르기`)는 복사 고르기 창을 연다. 항목은 `대상 · 꼴`이고 다른 고르기 창처럼 글자로 거른다. 대상은 `현재 행`·`선택`(`V` 중에만)·`보이는 행 전체`(거른 행, 보이는 순서)·`현재 열`(보이는 행의 커서 열 값, 줄마다 하나)이다. 꼴은 `TSV (헤더)`·`CSV (헤더)`·`JSON`·`Markdown 표`·`SQL INSERT`·`IN 목록`이다. 고르면 복사하고 상태 줄에 `복사함 (N줄) · <항목>`을 보인다(IN 목록은 뒤에 `C`의 상태 글을 붙인다). 칸 길이 합이 10MiB를 넘을 대상은 글을 만들기 전에 `너무 커서 복사하지 않음`으로 멈춘다. 행이 없거나 표 화면이 아니면 열지 않는다.
+  - 예: 커서는 기본 대상(선택 중이면 `선택`, 아니면 `현재 행`)에서 이 세션에 마지막으로 고른 꼴에 둔다(처음은 TSV). 그 대상에 없는 꼴이면 그 꼴이 있는 첫 대상이다. 기억은 끄면 사라진다.
+  - 예: `TSV (헤더)`는 첫 줄이 열 이름이고 칸은 `Y`와 같은 이스케이프다. `CSV (헤더)`·`JSON`은 R14.2 내보내기와 같은 함수다(CSV 수식 주입 막기, JSON 은 숫자·bool·json 타입은 JSON 값, NULL 은 null, 나머지는 문자열). `Markdown 표`는 칸 안 `|`를 `\|`, 줄바꿈을 `<br>`로 바꾸고 숫자 열은 `---:`로 오른쪽 정렬이다.
+  - 예: `SQL INSERT`는 원본 테이블을 아는 결과(Origin)에서 열 대상이 아닐 때만 있고 `i`와 같은 `InsertSQL`로 고른 행 전체를 한 문으로 만든다(선택도 열 범위는 보지 않는다). `IN 목록`은 `현재 열`에만 있고 `C`와 같다(R35).
+  - 단, TSV·CSV·JSON·Markdown 은 `y`·`Y`처럼 화면 값(보류 중인 바꿈·복호화 보기 반영)이고 INSERT·IN 은 `i`·`C`처럼 DB 값이다. 추가 행은 INSERT·IN 에서 빠진다.
+- R71.2 `y`·`Y`·`V` 뒤 `y`·`C`·`i`·`U`·값 보기 `y`·`Y`의 출력은 바꾸지 않는다. 헤더 붙은 꼴은 R71.1 창에서만 고른다. `Ctrl+K`는 결과 표에 쓰던 동작이 없어(편집기 복사만 있었다) 새 키를 늘리지 않고 ⌘K(복사) 짝을 그대로 쓴다.
+- R71.3 결과 칸을 마우스 오른쪽으로 누르면 커서를 그 칸으로 옮기고 결과 포커스로 바꾼 뒤 대상 `현재 행`으로 R71.1 창을 연다. 머리 줄·빈 자리·Redis 값 편집기·실행 계획 화면에서는 열지 않는다.
+- R71.4 모든 복사(결과 표·값 보기·편집기 `Ctrl+X`·`Ctrl+K`)는 같은 함수로 OSC 52 와 시스템 클립보드에 쓴다. 시스템 명령은 맥 `pbcopy`, WSL(`WSL_DISTRO_NAME` 또는 `/proc/sys/fs/binfmt_misc/WSLInterop`)·Windows `clip.exe`(BOM 붙은 UTF-16LE), 리눅스는 `WAYLAND_DISPLAY`가 있으면 `wl-copy` 먼저, 아니면 `xclip -selection clipboard` 먼저 PATH 에 있는 것이다. 명령은 2초 제한으로 명령 고루틴에서 돌려 화면을 막지 않는다. `DB_CLIPBOARD=osc52`는 OSC 52 만, `system`은 시스템 명령만, 기본 `both`는 둘 다다.
+  - 예: `both`에서 시스템 명령이 없거나 실패해도 OSC 52 를 썼으면 조용히 넘긴다. 둘 다 실패하면 `클립보드 복사 실패: …`다.
+- R71.5 10 MB(10 MiB)를 넘는 글은 어디에도 쓰지 않고 `너무 커서 복사하지 않음 (12.3 MB) — e/E 로 내보내기`를 보인다.
 
 ## 4. 화면과 키
 
@@ -642,12 +762,14 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Alt+C` (⌘⇧C) | 같은 쿼리를 다른 접속에서 실행해 비교(R53.1) |
 | `Ctrl+L` (⌘L) | 활성 탭 prod 접속의 쓰기 잠금 열기·닫기(R54) |
 | `Ctrl+G` (⌘G) | 대시보드: 모든 접속의 상태·지연·버전·수치(`r` 다시 확인, `Enter` 트리에서 고르기, `/` 거르기, R64) |
+| `Alt+F` | 흐름: 아웃박스 → SNS → SQS → DLQ·Lambda 그림(`r` 다시 풀기, `↑↓` 흐름, `←→` 상자, `Enter` 상세, R69) |
+| `Alt+B` (⌘⇧B) | 보드: `.dbtui/boards/`의 쿼리 패널 격자(`r` 다시 돌리기, 방향키·`hjkl` 패널, `Enter` 쿼리 탭에서 실행·흐름 탭, R70). `Ctrl+B`는 정의로 이동이라 Alt 를 쓴다 |
 | `Ctrl+]` | Loki·Prometheus·Grafana 탭의 범위 `15m·1h·6h·24h·7d` 돌리기(탭마다, 편집기 위 줄에 `최근 1h`, R62.2) |
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |
 | 트리 `Enter` `/` `r` `d` `D` `I` `A` `L` `S` | 펼치기·테이블 보기·값 편집·쿼리 파일 열기(접속은 최근 파일 자동 열기, R44) / 거르기 / 새로고침(쿼리 파일 목록도) / 구조 / DDL / CSV 가져오기 / 활동·잠금·크기(Redis 는 INFO·SLOWLOG·큰 키) |
-| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔) / 펼치기(R60~R63) |
-| 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄) |
+| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블·aws 노드 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔, Athena 파티션 테이블은 `비싼 질의: 파티션 조건 없음: y/N` 뒤 `LIMIT 50`) / 펼치기(R60~R63·R67·R68) |
+| 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄), aws SNS 토픽 줄은 그 토픽의 흐름(R69.3) |
 | 트리 `X` | Redis 패턴 키 일괄 삭제(접속·이름공간 줄, `esc` 멈춤, R42). db 전용 PostgreSQL 접속 줄은 접속 지우기(R59.3) |
 | 트리 `N` `E` `Alt+X` | 새 접속(URL 붙여넣기·`Ctrl+T` 시험) / db 전용 접속 고치기 / 지우기(Redis 포함, 팔레트 `접속 지우기`, R59) |
 | 트리 `=` | 다른 접속과 스키마 비교(PostgreSQL 접속·스키마 줄, R53.2) |
@@ -656,14 +778,15 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | 결과 `Enter`·`F2` `a` `Ctrl+D` `d` `u` `Ctrl+S` `i` `U` | 칸 고치기(enum 은 고르기 창, R49) / 행 추가·복제·삭제 표시·되돌리기 / 제출 / INSERT·UPDATE 복사 |
 | 결과 붙여넣기(⌘V) · `Ctrl+Z` (⌘Z) | 시트 칸(TSV)을 커서부터 덮어쓰기(R48) · 마지막 제출 되돌리기(R50) |
 | 칸 고치는 중 `space` · `now`·`today` · `Ctrl+O` | bool 순환 · 지금 시각 · 전체 화면 편집기(`Ctrl+S` 저장, `F8` JSON 정렬, `esc` 버림, R49) |
-| 결과 `w` `[` `]` `#` · `p` `P` `{` `}` · `K` `X` · `t` | 테이블 보기 WHERE·페이지·개수 · 결과 고정·풀기·이동 · 백엔드 취소·종료 · 계획 나무↔JSON |
+| 결과 `w` `[` `]` `#` · `p` `P` `{` `}` · `K` `X` · `t` | 테이블 보기 WHERE·페이지·개수(일반 결과 `]`는 다음 1,000행 더 읽기, R14.7) · 결과 고정·풀기·이동 · 백엔드 취소·종료 · 계획 나무↔JSON |
 | 결과 `c` · `V` · `=` | 차트(R28) · 사각형 선택 합계(R31.1) · 고정 결과와 비교(R31.2) |
+| 결과 `Ctrl+K` (⌘K) · 오른쪽 클릭 | 복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN(R71) |
 | 결과 `C` · `F` `R` · `D` · `+` `-` | IN 목록 복사(R35) · 외래 키 따라가기·참조하는 테이블(R36) · 복호화 보기(R37) · 칸 값으로 WHERE 거르기(R38) |
 | `Ctrl+P` (⌘P) | 명령 팔레트(R40, 자동완성 창이 열려 있으면 위로 이동) |
 | 값 보기 `t` `Enter` `y` `Y` | JSON 나무↔원문 / 접기·펴기 / 값·경로 복사(R32) |
 | `q` | 트리·결과에서 종료(실행 중이면 취소 후) |
 
-환경 변수: `DB_RESTORE=0` 탭 저장·복원 끄기(R41, 창 크기·최근 파일은 남김) · `DB_AUTO_SAVE=0` 자동 저장 끄기(R45) · `DB_AUTO_OPEN=0` 최근 파일 자동 열기 끄기(R44) · `DB_KEYS=cmd|ctrl` 키 안내 글자(R47) · `DB_KITTY_KEYS=0` kitty 키 프로토콜 끄기(R23) · `DB_NOTIFY_SECS` 긴 실행 알림 기준(R30) · `DB_PROD_UNLOCK_MIN` prod 쓰기 잠금을 여는 시간(분, 기본 10, R54).
+환경 변수: `DB_RESTORE=0` 탭 저장·복원 끄기(R41, 창 크기·최근 파일은 남김) · `DB_AUTO_SAVE=0` 자동 저장 끄기(R45) · `DB_AUTO_OPEN=0` 최근 파일 자동 열기 끄기(R44) · `DB_KEYS=cmd|ctrl` 키 안내 글자(R47) · `DB_KITTY_KEYS=0` kitty 키 프로토콜 끄기(R23) · `DB_NOTIFY_SECS` 긴 실행 알림 기준(R30) · `DB_PROD_UNLOCK_MIN` prod 쓰기 잠금을 여는 시간(분, 기본 10, R54) · `DB_CLIPBOARD=osc52|system|both` 복사할 곳(기본 both, R71.4).
 
 터미널이 60×14보다 작으면 화면 대신 크기 안내만 보여 준다. DB 값·키의 제어 문자는 보이는 글자로 바꿔 그린다.
 

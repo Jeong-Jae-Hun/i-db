@@ -23,14 +23,15 @@ import (
 // db 전용 접속을 화면 없이 더하고 고치고 지우고 시험한다. 비밀번호는 --url·--password-stdin 으로만 받고 찍지 않는다.
 
 const connUsage = `사용법:
-  db conn add <이름> --url URL [--group 그룹] [--kind 종류] [--user 사용자] [--auth A] [--region R] [--profile P] [--password-stdin] [--force]
-  db conn edit <이름> [--url URL] [--host 호스트] [--port 포트] [--db DB] [--user 사용자] [--group 그룹] [--auth A] [--region R] [--profile P] [--password-stdin] [--force]
+  db conn add <이름> --url URL [--group 그룹] [--kind 종류] [--user 사용자] [--auth A] [--region R] [--profile P] [--workgroup W] [--output S3] [--password-stdin] [--force]
+  db conn edit <이름> [--url URL] [--host 호스트] [--port 포트] [--db DB] [--user 사용자] [--group 그룹] [--auth A] [--region R] [--profile P] [--workgroup W] [--output S3] [--password-stdin] [--force]
   db conn rm <이름> [--yes]
   db conn test <이름> | --url URL
   db conn folder <이름> <폴더> | <이름> --reset | --rename <옛 폴더> <새 폴더>
 
   접속은 .dbtui/connections.json, 비밀번호는 .env 의 PG_<이름>_PASSWORD·REDIS_<이름>_PASSWORD(URL 인코딩)에 둔다.
-  읽기 전용 저장소(R60)는 --kind opensearch|loki|prometheus|grafana|dynamodb 와 http(s) --url 로 더한다(DynamoDB 의 --url 은 선택 엔드포인트).
+  읽기 전용 저장소(R60)는 --kind opensearch|loki|prometheus|grafana|dynamodb|athena 와 http(s) --url 로 더한다(DynamoDB 의 --url 은 선택 엔드포인트, Athena 는 --url 없음).
+  Athena(R68)는 --region 이 필요하고 --workgroup(비우면 primary)·--output s3://bucket/prefix/(비우면 작업 그룹 설정)를 받는다.
   --auth 는 basic·sigv4(OpenSearch)·token(Grafana), sigv4·DynamoDB 는 --region 이 필요하다. 비밀값 키는 OS_·LOKI_·PROM_·GRAFANA_<이름>_TOKEN 이다.
   비밀번호는 --url 또는 --password-stdin 으로만 받고 찍지 않는다. edit 에서 주지 않으면 그대로 둔다.
   add·edit 는 저장 전에 접속을 시험하고, 실패하면 --force 없이는 저장하지 않는다(종료 코드 1).
@@ -47,7 +48,7 @@ const connMaxPassword = 64 << 10
 
 type connCLIOpts struct {
 	dir, url, group, kind, host, port, db, user string
-	auth, region, profile                       string
+	auth, region, profile, workgroup, output    string
 	pwStdin, force, yes, prod, reset, rename    bool
 	timeout                                     time.Duration
 	given                                       map[string]bool // 명령줄에 준 플래그
@@ -85,10 +86,12 @@ func runConnCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bo
 		fs.BoolVar(&o.prod, "prod", false, "prod 접속 허용")
 		fs.StringVar(&o.user, "user", "", "사용자")
 		fs.StringVar(&o.auth, "auth", "", "저장소 인증 basic|sigv4|token (없으면 비움)")
-		fs.StringVar(&o.region, "region", "", "AWS 리전 (sigv4·DynamoDB)")
+		fs.StringVar(&o.region, "region", "", "AWS 리전 (sigv4·DynamoDB·aws)")
 		fs.StringVar(&o.profile, "profile", "", "AWS 프로필 (비우면 표준 체인)")
+		fs.StringVar(&o.workgroup, "workgroup", "", "Athena 작업 그룹 (비우면 primary)")
+		fs.StringVar(&o.output, "output", "", "Athena 결과 위치 s3://bucket/prefix/ (비우면 작업 그룹 설정)")
 		if sub == "add" {
-			fs.StringVar(&o.kind, "kind", "", "postgresql|redis (URL 과 같아야 함)|opensearch|loki|prometheus|grafana|dynamodb")
+			fs.StringVar(&o.kind, "kind", "", "postgresql|redis (URL 과 같아야 함)|opensearch|loki|prometheus|grafana|dynamodb|athena|aws")
 		} else {
 			fs.StringVar(&o.host, "host", "", "호스트")
 			fs.StringVar(&o.port, "port", "", "포트")
@@ -203,15 +206,15 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 		c, keep = proj.Conns[i], proj.Conns[i].Password
 		c.Password = "" // 비우면 UpdateConn 이 .env 값을 그대로 둔다
 		changed := false
-		for _, f := range []string{"url", "host", "port", "db", "user", "group", "password-stdin", "auth", "region", "profile"} {
+		for _, f := range []string{"url", "host", "port", "db", "user", "group", "password-stdin", "auth", "region", "profile", "workgroup", "output"} {
 			changed = changed || o.given[f]
 		}
 		if !changed {
-			return usageErr("고칠 값이 없음 (--url --host --port --db --user --group --auth --region --profile --password-stdin)")
+			return usageErr("고칠 값이 없음 (--url --host --port --db --user --group --auth --region --profile --workgroup --output --password-stdin)")
 		}
 	} else {
 		c.Kind = db.Kind(o.kind)
-		if o.url == "" && c.Kind != db.KindDynamoDB {
+		if o.url == "" && !c.Kind.UsesRegion() {
 			return usageErr("--url 이 필요함")
 		}
 	}
@@ -233,9 +236,9 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 				c.Auth = "basic"
 			}
 		}
-		for f, dst := range map[string]*string{"auth": &c.Auth, "region": &c.Region, "profile": &c.Profile} {
+		for f, dst := range map[string]*string{"auth": &c.Auth, "region": &c.Region, "profile": &c.Profile, "workgroup": &c.Workgroup, "output": &c.Output} {
 			if o.given[f] {
-				*dst = map[string]string{"auth": o.auth, "region": o.region, "profile": o.profile}[f]
+				*dst = map[string]string{"auth": o.auth, "region": o.region, "profile": o.profile, "workgroup": o.workgroup, "output": o.output}[f]
 			}
 		}
 	} else if o.url != "" {
@@ -331,7 +334,7 @@ func connTest(ctx context.Context, o connCLIOpts, c db.Conn, stdout, stderr io.W
 // connSummary 는 비밀번호 없는 접속 요약이다(PostgreSQL ro@host:5432/app, OpenSearch https://h sigv4 ap-northeast-2).
 func connSummary(c db.Conn) string {
 	if c.Kind.IsSource() {
-		return strings.Join(slices.DeleteFunc([]string{connKinds[c.Kind], c.URL, c.Auth, c.Region, c.Profile},
+		return strings.Join(slices.DeleteFunc([]string{connKinds[c.Kind], c.URL, c.Auth, c.Region, c.Profile, c.Workgroup, c.Output},
 			func(s string) bool { return s == "" }), " ")
 	}
 	user := ""

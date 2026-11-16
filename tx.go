@@ -132,6 +132,12 @@ func (m *model) dropTab(t *queryTab, note string) {
 	if t.dash != nil {
 		t.dash.stop()
 	}
+	if t.flow != nil {
+		t.flow.stop()
+	}
+	if t.board != nil {
+		t.board.stop()
+	}
 	if note != "" {
 		m.status = note
 	}

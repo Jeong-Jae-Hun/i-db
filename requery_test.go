@@ -91,7 +91,83 @@ func TestRequery_여러_문장_결과는_받은_행_안에서만_정렬한다(t 
 	if _, cmd := m.Update(key("s")); cmd != nil || tab.running != nil {
 		t.Fatal("문장이 둘이면 서버로 다시 읽지 않는다")
 	}
-	if tab.grid.Summary() != "정렬 id ↑" {
-		t.Fatalf("받은 행 정렬: %q", tab.grid.Summary())
+	if tab.grid.Summary() != "정렬 id ↑" || m.status != "받은 행만 정렬: 문장이 둘 이상" {
+		t.Fatalf("받은 행 정렬과 까닭: %q %q", tab.grid.Summary(), m.status)
+	}
+}
+
+func TestRequery_열_이름이_겹치면_까닭을_알린다(t *testing.T) {
+	m := pgModel(t, "it-local")
+	m.cur().conn = 0
+	drive(m, m.run("select 1 as a, 2 as a"))
+	m.setFocus(fResult)
+	m.Update(key("/"))
+	m.Update(key("1"))
+	_, cmd := m.Update(key("enter"))
+	if cmd != nil {
+		drive(m, cmd)
+	}
+	if m.status != "받은 행만 거르기: 열 이름 겹침" {
+		t.Fatalf("까닭: %q", m.status)
+	}
+}
+
+// ─── R14.7 더 읽기 ───
+
+func TestRequery_더_읽기는_같은_정렬로_다음_1000행을_덧붙인다(t *testing.T) {
+	m := pgModel(t, "it-local")
+	it := pgTest{t, m}
+	it.sql("drop table if exists public.rq_more; create table public.rq_more (id int primary key)")
+	it.sql("insert into public.rq_more select g from generate_series(1, 2500) g")
+	t.Cleanup(func() { it.sql("drop table if exists public.rq_more") })
+	m.cur().conn = 0
+	drive(m, m.run("select id from public.rq_more order by id"))
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("id")
+	for range 2 { // 내림
+		_, cmd := m.Update(key("s"))
+		drive(m, cmd)
+	}
+	_, cmd := m.Update(key("]"))
+	drive(m, cmd)
+	if len(tab.res.Rows) != 2000 || tab.res.Rows[1000][0] != "1500" || tab.summary != "2,000행 · 더 있음" || tab.grid.Summary() != "정렬 id ↓" {
+		t.Fatalf("다음 1,000행: rows=%d %q %q %q", len(tab.res.Rows), tab.res.Rows[len(tab.res.Rows)-1][0], tab.summary, m.status)
+	}
+	_, cmd = m.Update(key("]"))
+	drive(m, cmd)
+	if len(tab.res.Rows) != 2500 || tab.res.Truncated || m.status != "2,500행" {
+		t.Fatalf("끝까지: rows=%d %q", len(tab.res.Rows), m.status)
+	}
+	if _, cmd = m.Update(key("]")); cmd != nil || m.status != "더 읽지 않음: 더 읽을 행이 없음" {
+		t.Fatalf("더 없음: %q", m.status)
+	}
+	_, cmd = m.Update(key("s")) // 정렬을 바꾸면 첫 페이지부터
+	drive(m, cmd)
+	if len(tab.res.Rows) != 1000 || !tab.res.Truncated || tab.res.Rows[0][0] != "1" {
+		t.Fatalf("첫 페이지부터: rows=%d %q", len(tab.res.Rows), tab.res.Rows[0][0])
+	}
+}
+
+func TestRequery_다시_읽기가_실패하면_더_읽기는_다른_정렬의_행을_덧붙이지_않는다(t *testing.T) {
+	m := pgModel(t, "it-local")
+	it := pgTest{t, m}
+	it.sql("drop table if exists public.rq_fail; create table public.rq_fail (id int primary key)")
+	it.sql("insert into public.rq_fail select g from generate_series(1, 2500) g")
+	t.Cleanup(func() { it.sql("drop table if exists public.rq_fail") })
+	m.cur().conn = 0
+	drive(m, m.run("select id from public.rq_fail"))
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("id")
+	it.sql("alter table public.rq_fail rename to rq_fail_x")
+	_, cmd := m.Update(key("s"))
+	drive(m, cmd)
+	it.sql("alter table public.rq_fail_x rename to rq_fail")
+	if !strings.HasPrefix(m.status, "다시 읽지 못함") || len(tab.res.Rows) != 1000 {
+		t.Fatalf("다시 읽기 실패: %q rows=%d", m.status, len(tab.res.Rows))
+	}
+	if _, cmd = m.Update(key("]")); cmd != nil || m.status != "더 읽지 않음: 정렬·거르기가 받은 행에만 걸림" {
+		t.Fatalf("받은 행이 그 정렬로 읽힌 것이 아니므로 더 읽지 않는다: %q", m.status)
 	}
 }

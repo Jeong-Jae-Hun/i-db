@@ -149,8 +149,9 @@ var bindings = []binding{
 	{superKey{'c', modShift}, "\x1bc", []string{"Alt+C"}, "⌘⇧C"},
 	{superKey{'r', modShift}, "\x1br", []string{"Alt+R"}, "⌘⇧R"},
 	{superKey{'p', modShift}, "\x1bp", []string{"Alt+P"}, "⌘⇧P"},
-	// R64 대시보드
+	// R64 대시보드, R70 보드
 	{superKey{'g', 0}, "\x07", []string{"Ctrl+G"}, "⌘G"},
+	{superKey{'b', modShift}, "\x1bb", []string{"Alt+B"}, "⌘⇧B"},
 }
 
 func buildTables() (map[superKey]string, map[string]string) {

@@ -1,6 +1,10 @@
 package dynamo
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+)
 
 // ─── PartiQL 낱말 ───
 //
@@ -18,8 +22,9 @@ const (
 )
 
 type token struct {
-	kind tokKind
-	text string // tokIdent·tokString 은 따옴표를 벗기고 겹따옴표('' "")를 푼 값
+	kind     tokKind
+	text     string // tokIdent·tokString 은 따옴표를 벗기고 겹따옴표('' "")를 푼 값
+	pos, end int    // 원문에서의 자리 [pos, end). 문장을 고쳐 쓸 때(ORDER BY 바꾸기) 쓴다
 }
 
 func tokenize(s string) []token {
@@ -60,7 +65,7 @@ func tokenize(s string) []token {
 			if c == '"' {
 				kind = tokIdent
 			}
-			out = append(out, token{kind, b.String()})
+			out = append(out, token{kind, b.String(), i, j})
 			i = j
 		case isWordByte(c):
 			j := i
@@ -71,10 +76,10 @@ func tokenize(s string) []token {
 			if c >= '0' && c <= '9' {
 				kind = tokNumber
 			}
-			out = append(out, token{kind, s[i:j]})
+			out = append(out, token{kind, s[i:j], i, j})
 			i = j
 		default:
-			out = append(out, token{tokPunct, s[i : i+1]})
+			out = append(out, token{tokPunct, s[i : i+1], i, i + 1})
 			i++
 		}
 	}
@@ -124,7 +129,10 @@ func target(toks []token) (table, index string, ok bool) {
 //
 // OR 로 갈린 조건은 가지마다 키가 있어도(`pk = 'a' OR pk = 'b'`) 스캔으로 본다. AWS 문서는 스캔을 피하려면
 // 파티션 키를 = 또는 IN 으로 지정하라고만 하고 OR 가 Query 로 바뀌는지는 적지 않는다. 여러 값은 IN 으로 쓴다.
-func hasKeyCondition(toks []token, pk string) bool {
+func hasKeyCondition(toks []token, pk string) bool { return keyCondition(toks, pk, true) }
+
+// keyCondition 은 hasKeyCondition 이고 allowIn 이 false 면 = 만 본다(ORDER BY 는 파티션 하나여야 한다, R63.3).
+func keyCondition(toks []token, pk string, allowIn bool) bool {
 	w := topLevel(toks, 0, "WHERE")
 	if w < 0 {
 		return false
@@ -138,19 +146,19 @@ func hasKeyCondition(toks []token, pk string) bool {
 	if end > 0 && toks[end-1].kind == tokPunct && toks[end-1].text == ";" {
 		end--
 	}
-	return branchHasKey(toks[w+1:end], pk)
+	return branchHasKey(toks[w+1:end], pk, allowIn)
 }
 
-func branchHasKey(toks []token, pk string) bool {
+func branchHasKey(toks []token, pk string, allowIn bool) bool {
 	if len(splitTopLevel(toks, "OR")) > 1 {
 		return false
 	}
 	if wrapped(toks) {
-		return branchHasKey(toks[1:len(toks)-1], pk)
+		return branchHasKey(toks[1:len(toks)-1], pk, allowIn)
 	}
 	// AND 로 묶인 조각 가운데 하나라도 키를 고정하면 된다. (pk = 'a') AND … 처럼 괄호 친 조각은 벗겨 본다
 	for _, part := range splitTopLevel(toks, "AND") {
-		if wrapped(part) && branchHasKey(part[1:len(part)-1], pk) || conjunctionHasKey(part, pk) {
+		if wrapped(part) && branchHasKey(part[1:len(part)-1], pk, allowIn) || conjunctionHasKey(part, pk, allowIn) {
 			return true
 		}
 	}
@@ -158,7 +166,7 @@ func branchHasKey(toks []token, pk string) bool {
 }
 
 // conjunctionHasKey 는 AND·OR 가 없는 조각에서 맨 바깥의 `pk = 값`·`값 = pk`·`pk IN …` 을 찾는다.
-func conjunctionHasKey(toks []token, pk string) bool {
+func conjunctionHasKey(toks []token, pk string, allowIn bool) bool {
 	depth := 0
 	for i, t := range toks {
 		if t.kind == tokPunct {
@@ -177,7 +185,7 @@ func conjunctionHasKey(toks []token, pk string) bool {
 			continue
 		}
 		if i+1 < len(toks) && (toks[i+1].kind == tokPunct && toks[i+1].text == "=" && !punctAt(toks, i+2, "=") ||
-			toks[i+1].is("IN")) {
+			allowIn && toks[i+1].is("IN")) {
 			return true
 		}
 		if i >= 2 && toks[i-1].kind == tokPunct && toks[i-1].text == "=" &&
@@ -256,4 +264,29 @@ func isKeyword(w string) bool {
 		return true
 	}
 	return false
+}
+
+// ─── 서버 정렬 (R63.3) ───
+
+// sortedStatement 는 SELECT 의 맨 바깥 ORDER BY 를 `ORDER BY "<sk>" ASC|DESC` 로 바꾸거나 끝에 붙인 글이다.
+// 끝의 ; 와 마지막 낱말 뒤 주석은 뗀다(줄 주석 뒤에 붙이면 ORDER BY 가 주석이 된다). LIMIT 이 있으면 자리를 가리지 않고 false 다.
+func sortedStatement(toks []token, text, sk string, desc bool) (string, bool) {
+	if !isSelect(toks) || sk == "" || topLevel(toks, 0, "LIMIT") >= 0 {
+		return "", false
+	}
+	last := len(toks) - 1
+	if punctAt(toks, last, ";") {
+		last--
+	}
+	if o := topLevel(toks, 0, "ORDER"); o > 0 {
+		last = o - 1
+	}
+	if last < 0 {
+		return "", false
+	}
+	dir := "ASC"
+	if desc {
+		dir = "DESC"
+	}
+	return text[:toks[last].end] + " ORDER BY " + db.QuoteIdent(sk) + " " + dir, true
 }

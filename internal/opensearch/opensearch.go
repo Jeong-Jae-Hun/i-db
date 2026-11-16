@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -42,6 +43,10 @@ type backend struct {
 	creds  aws.CredentialsProvider
 	region string
 	signer *v4.Signer
+
+	// fields 는 정렬·거르기 다시 읽기(Requery)가 읽은 인덱스 매핑이다. 접속이 살아 있는 동안 둔다
+	mu     sync.Mutex
+	fields map[string][]field
 }
 
 // New 는 접속 하나를 만든다. c.Password 는 호출부가 .env 에서 고른 basic 비밀번호다.
@@ -235,7 +240,8 @@ func (b *backend) indices(ctx context.Context) ([]source.Node, error) {
 	return nodes, nil
 }
 
-type field struct{ name, typ string }
+// field 는 매핑 필드 하나다. keyword 는 text 필드의 keyword 하위 필드 이름(`name.keyword` 꼴)이고 없으면 비었다.
+type field struct{ name, typ, keyword string }
 
 // mapping 은 인덱스(별칭·패턴이면 대상 전부)의 매핑 필드를 `a.b` 로 펴서 이름순으로 돌려준다.
 // 같은 필드가 인덱스마다 타입이 다르면 이름순 첫 인덱스의 타입을 쓴다.
@@ -250,13 +256,14 @@ func (b *backend) mapping(ctx context.Context, index string) ([]field, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("opensearch: decode _mapping: %w", err)
 	}
-	seen := map[string]string{}
+	seen, kws := map[string]string{}, map[string]string{}
 	for _, index := range slices.Sorted(maps.Keys(m)) {
 		flatten(seen, "", m[index].Mappings.Properties)
+		keywords(kws, "", m[index].Mappings.Properties)
 	}
 	fields := make([]field, 0, len(seen))
 	for name, typ := range seen {
-		fields = append(fields, field{name, typ})
+		fields = append(fields, field{name, typ, kws[name]})
 	}
 	slices.SortFunc(fields, func(a, b field) int { return strings.Compare(a.name, b.name) })
 	return fields, nil
@@ -265,6 +272,7 @@ func (b *backend) mapping(ctx context.Context, index string) ([]field, error) {
 type mappingProps struct {
 	Type       string                  `json:"type"`
 	Properties map[string]mappingProps `json:"properties"`
+	Fields     map[string]mappingProps `json:"fields"` // 다중 필드(text 의 keyword 등)
 }
 
 // flatten 은 properties 를 `a.b` 이름 → 타입으로 편다. 타입이 없는 object 는 줄을 만들지 않고 아래만 편다.
@@ -278,6 +286,21 @@ func flatten(out map[string]string, prefix string, props map[string]mappingProps
 	}
 }
 
+// keywords 는 text 필드마다 keyword 타입 하위 필드 `이름.<하위>` 를 적는다. 여럿이면 이름이 "keyword" 인 것, 없으면 이름순 첫 것이다.
+func keywords(out map[string]string, prefix string, props map[string]mappingProps) {
+	for name, p := range props {
+		full := prefix + name
+		if _, ok := out[full]; !ok && p.Type == "text" {
+			for _, sub := range slices.Sorted(maps.Keys(p.Fields)) {
+				if p.Fields[sub].Type == "keyword" && (out[full] == "" || sub == "keyword") {
+					out[full] = full + "." + sub
+				}
+			}
+		}
+		keywords(out, full+".", p.Properties)
+	}
+}
+
 // ─── 실행 ───
 
 func (b *backend) Open(ctx context.Context, path string, limit int) (*db.Result, error) {
@@ -286,7 +309,7 @@ func (b *backend) Open(ctx context.Context, path string, limit int) (*db.Result,
 	}
 	index, _, _ := strings.Cut(path, "/")
 	start := time.Now()
-	body := fmt.Appendf(nil, `{"query":{"match_all":{}},"size":%d}`, limit)
+	body := fmt.Appendf(nil, openBody, limit)
 	data, err := b.do(ctx, http.MethodPost, url.PathEscape(index)+"/_search", body)
 	if err != nil {
 		return nil, err
@@ -297,6 +320,205 @@ func (b *backend) Open(ctx context.Context, path string, limit int) (*db.Result,
 	}
 	res.Elapsed = time.Since(start)
 	return res, nil
+}
+
+// openBody 는 트리 Enter 미리 보기(Open)의 본문이다.
+const openBody = `{"query":{"match_all":{}},"size":%d}`
+
+// OpenText 는 Open(path, limit) 과 같은 요청을 편집기 꼴(`POST <인덱스>/_search` + 본문)로 쓴 글이다.
+// 미리 보기 결과도 정렬을 서버로 다시 읽을 수 있게 결과의 원래 요청으로 남긴다(R61.3).
+func OpenText(path string, limit int) string {
+	if limit <= 0 {
+		limit = source.OpenLimit
+	}
+	index, _, _ := strings.Cut(path, "/")
+	return "POST " + index + "/_search\n" + fmt.Sprintf(openBody, limit)
+}
+
+// ─── 정렬·거르기 서버로 다시 읽기 (R61.3) ───
+
+// Filter 는 _search 다시 읽기의 거르기 하나다(R14.4 꼴). Field 가 비면 모든 필드 찾기다.
+// Op 는 "=" "!=" ">" ">=" "<" "<=" ":" "null" "notnull" 이고 모든 필드 찾기는 ":" 또는 "!:" 다.
+type Filter struct {
+	Field, Op, Value string
+}
+
+// Rewrite 는 _search 요청에 바꿔 넣을 정렬·거르기다. Sort 가 비면 본문 sort 를, Filter 가 nil 이면 본문 query 를 그대로 둔다.
+type Rewrite struct {
+	Sort   string
+	Desc   bool
+	Filter *Filter
+}
+
+// fieldInfo 는 필드의 매핑 타입과 keyword 하위 필드 이름이다. 모르면 둘 다 빈 글이다.
+type fieldInfo func(field string) (typ, keyword string)
+
+func noFieldInfo(string) (string, string) { return "", "" }
+
+// IsSearch 는 text 가 허용한 `_search` 요청 글인지다. SELECT·_count·_cat·_mapping 은 아니다.
+func IsSearch(text string) bool {
+	method, path, _, ok := parseRequest(text)
+	if !ok {
+		return false
+	}
+	p, _, _ := strings.Cut(strings.TrimLeft(path, "/"), "?")
+	endpoint, allowed := allowedPath(method, p)
+	return allowed && endpoint == "_search"
+}
+
+// Requery 는 _search 요청 q.Text 의 sort·query 를 r 로 바꿔 b 로 보내고, 보낸 글을 같이 돌려준다(R61.3).
+// b 가 이 패키지의 접속이면 인덱스 매핑을 읽어(인덱스마다 접속이 살아 있는 동안 한 번) keyword 하위 필드가 있는
+// text 필드는 그 하위 필드로 정렬·비교한다. 매핑을 못 읽으면 필드 이름 그대로 보낸다.
+func Requery(ctx context.Context, b source.Backend, q source.Query, r Rewrite) (string, *db.Result, error) {
+	info := fieldInfo(noFieldInfo)
+	if ob, ok := b.(*backend); ok {
+		info = ob.fieldInfo(ctx, q.Text)
+	}
+	text, ok := rewrite(q.Text, r, info)
+	if !ok {
+		return "", nil, errors.New("opensearch: not a _search request with a JSON object body")
+	}
+	q.Text = text
+	res, err := b.Run(ctx, q)
+	return text, res, err
+}
+
+// fieldInfo 는 요청 경로의 인덱스 매핑에서 필드 정보를 찾는 함수다. 인덱스 없는 `_search` 는 모든 인덱스라 읽지 않는다.
+func (b *backend) fieldInfo(ctx context.Context, text string) fieldInfo {
+	_, path, _, _ := parseRequest(text)
+	p, _, _ := strings.Cut(strings.TrimLeft(path, "/"), "?")
+	index, _, ok := strings.Cut(p, "/")
+	if !ok || index == "" {
+		return noFieldInfo
+	}
+	b.mu.Lock()
+	fields, cached := b.fields[index]
+	b.mu.Unlock()
+	if !cached {
+		var err error
+		if fields, err = b.mapping(ctx, index); err != nil {
+			return noFieldInfo
+		}
+		b.mu.Lock()
+		if b.fields == nil {
+			b.fields = map[string][]field{}
+		}
+		b.fields[index] = fields
+		b.mu.Unlock()
+	}
+	return func(name string) (string, string) {
+		i, found := slices.BinarySearchFunc(fields, name, func(f field, n string) int { return strings.Compare(f.name, n) })
+		if !found {
+			return "", ""
+		}
+		return fields[i].typ, fields[i].keyword
+	}
+}
+
+// rewrite 는 Requery 의 글 바꾸기다. 값이 없는 문서는 오름·내림 모두 뒤로 보내고, 거르기는 원래 query 를
+// bool.must 에 두고 조건을 bool.filter(아니다 꼴은 must_not)에 더한다. _search 가 아니거나 본문이 JSON 객체가 아니면 false 다.
+//   - 예: `GET logs/_search` + `{"size":20}`, Sort "status" Desc → `{"size":20,"sort":[{"status":{"missing":"_last","order":"desc"}}]}`
+//   - 예: Filter status=500 → `{"query":{"bool":{"filter":[{"term":{"status":"500"}}],"must":[{"match_all":{}}]}}}`
+func rewrite(text string, r Rewrite, info fieldInfo) (string, bool) {
+	method, path, body, ok := parseRequest(text)
+	if !ok || !IsSearch(text) {
+		return "", false
+	}
+	var obj map[string]json.RawMessage
+	if body != "" {
+		if err := json.Unmarshal([]byte(body), &obj); err != nil {
+			return "", false
+		}
+	}
+	if obj == nil {
+		obj = map[string]json.RawMessage{}
+	}
+	if r.Sort != "" {
+		key := map[string]string{"order": "asc", "missing": "_last"}
+		if r.Desc {
+			key["order"] = "desc"
+		}
+		// _score 정렬은 missing 을 받지 않는다(모든 문서에 점수가 있다)
+		if r.Sort == "_score" {
+			delete(key, "missing")
+		}
+		sort, err := json.Marshal([]map[string]map[string]string{{exactField(r.Sort, info): key}})
+		if err != nil {
+			return "", false
+		}
+		obj["sort"] = sort
+	}
+	if r.Filter != nil {
+		if clause, not := filterClause(*r.Filter, info); clause != nil {
+			orig := obj["query"]
+			if len(orig) == 0 {
+				orig = json.RawMessage(`{"match_all":{}}`)
+			}
+			where := "filter"
+			if not {
+				where = "must_not"
+			}
+			q, err := json.Marshal(map[string]any{"bool": map[string]any{"must": []json.RawMessage{orig}, where: []any{clause}}})
+			if err != nil {
+				return "", false
+			}
+			obj["query"] = q
+		}
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return "", false
+	}
+	return method + " " + path + "\n" + string(out), true
+}
+
+// exactField 는 text 필드에 keyword 하위 필드가 있으면 그 이름이다. text 는 낱말로 쪼개 저장해 정렬·같음 비교가 안 된다.
+func exactField(name string, info fieldInfo) string {
+	if typ, kw := info(name); typ == "text" && kw != "" {
+		return kw
+	}
+	return name
+}
+
+var wildcardEscaper = strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`)
+
+// filterClause 는 거르기를 query 절 하나로 바꾼다. not 이면 must_not 자리다. 모든 필드 찾기의 빈 값은 nil(거르기 없음)이다.
+//   - 예: status=A → term, n>5 → range(십진수면 숫자), msg:err → wildcard *err*(대소문자 무시), msg=null → must_not exists.
+//   - 예: 모든 필드 abc → query_string "abc"(따옴표로 감싸 연산자 글자를 막고 lenient 로 타입이 안 맞는 필드는 건너뜀).
+func filterClause(f Filter, info fieldInfo) (any, bool) {
+	if f.Field == "" {
+		if f.Value == "" {
+			return nil, false
+		}
+		phrase := `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(f.Value) + `"`
+		return map[string]any{"query_string": map[string]any{"query": phrase, "lenient": true}}, f.Op == "!:"
+	}
+	exists := map[string]any{"exists": map[string]string{"field": f.Field}}
+	field := exactField(f.Field, info)
+	switch f.Op {
+	case "null":
+		return exists, true
+	case "notnull":
+		return exists, false
+	case "=", "!=":
+		return map[string]any{"term": map[string]string{field: f.Value}}, f.Op == "!="
+	case ":":
+		if f.Value == "" {
+			return exists, false
+		}
+		// wildcard 는 글자 필드에만 된다. 숫자·날짜 같은 필드는 같음으로 본다
+		if typ, _ := info(f.Field); typ != "" && typ != "text" && typ != "keyword" && typ != "wildcard" {
+			return map[string]any{"term": map[string]string{field: f.Value}}, false
+		}
+		return map[string]any{"wildcard": map[string]any{field: map[string]any{
+			"value": "*" + wildcardEscaper.Replace(f.Value) + "*", "case_insensitive": true}}}, false
+	}
+	ops := map[string]string{">": "gt", ">=": "gte", "<": "lt", "<=": "lte"}
+	var v any = f.Value
+	if strings.Trim(f.Value, "0123456789+-.eE") == "" && json.Valid([]byte(f.Value)) {
+		v = json.Number(f.Value)
+	}
+	return map[string]any{"range": map[string]any{field: map[string]any{ops[f.Op]: v}}}, false
 }
 
 // Run 은 SELECT 면 SQL 플러그인으로, `GET|POST <경로>` 첫 줄이면 허용한 REST 읽기 경로로 보낸다(R61.2).
@@ -373,23 +595,18 @@ func (b *backend) runSQL(ctx context.Context, text string, limit int) (*db.Resul
 // 백틱 이름(`delete`)도 걸리지만 안전 쪽이다.
 var sqlWriteWords = []string{"delete", "update", "insert", "drop", "create", "alter", "truncate", "replace"}
 
-// sqlStatement 는 SELECT 한 문장을 보낼 글로 다듬는다. 끝의 ;·공백·주석은 떼고, 그 뒤에도 문자열·주석 밖에 ; 가 남거나
-// 쓰기 낱말이 있으면 source.ErrWrite 다(R61.2). 어휘는 db.MaskSQL(따옴표·주석 가리기)로 읽는다.
-// 단, MaskSQL 은 PostgreSQL 의 $태그$ 도 문자열로 본다. OpenSearch SQL 에는 없는 꼴이라 그 안에 숨긴 글은 플러그인이 문법 오류로 거절한다.
+// sqlStatement 는 SELECT 한 문장을 보낼 글로 다듬는다. 여러 문장(source.SQLWords)이거나 쓰기 낱말이 있으면 source.ErrWrite 다(R61.2).
 func sqlStatement(text string) (string, error) {
-	masked := db.MaskSQL(text)
-	n := len(strings.TrimRight(masked, "; \t\r\n\f\v"))
-	masked = masked[:n]
-	if strings.Contains(masked, ";") {
-		return "", fmt.Errorf("%w: multiple statements", source.ErrWrite)
+	stmt, words, err := source.SQLWords(text)
+	if err != nil {
+		return "", err
 	}
-	words := strings.FieldsFunc(strings.ToLower(masked), func(r rune) bool { return r > 0x7f || !db.IsIdentByte(byte(r)) })
 	for _, w := range words {
 		if slices.Contains(sqlWriteWords, w) {
 			return "", fmt.Errorf("%w: %s", source.ErrWrite, w)
 		}
 	}
-	return strings.TrimSpace(text[:n]), nil
+	return stmt, nil
 }
 
 // searchEndpoints 는 `<인덱스>/<끝>` 꼴로 GET 할 수 있는 읽기 끝점이다. POST 는 _search 만 받는다.

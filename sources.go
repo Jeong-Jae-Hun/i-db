@@ -11,6 +11,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/athena"
+	"github.com/Jeong-Jae-Hun/i-db/internal/awsres"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/dynamo"
 	"github.com/Jeong-Jae-Hun/i-db/internal/obs"
@@ -28,6 +30,8 @@ var sourceOpeners = map[db.Kind]func(context.Context, db.Conn) (source.Backend, 
 	db.KindPrometheus: func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewPrometheus(c) },
 	db.KindGrafana:    func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewGrafana(c) },
 	db.KindDynamoDB:   dynamo.New,
+	db.KindAWS:        awsres.New,
+	db.KindAthena:     athena.New,
 }
 
 const (
@@ -37,6 +41,7 @@ const (
 	msgPlainHTTP      = "비밀번호가 평문 http 로 감"
 	msgPlainPG        = "TLS 없이 붙으면 비밀번호가 평문으로 감"
 	msgForeignSigV4   = "AWS 서명을 AWS 밖 주소로 보냄"
+	msgTreeOnly       = "aws 접속은 트리로 본다" // R67.1: 편집기 질의 언어가 없다
 )
 
 // sourceRanges 는 Ctrl+] 가 도는 Loki·Prometheus 범위다(R62.2).
@@ -195,6 +200,16 @@ func (p *sourcePool) get(ctx context.Context, c db.Conn) (source.Backend, error)
 	return nb, nil
 }
 
+// peek 은 c 의 값으로 열려 있는 Backend 다. 없으면 nil 이고 열지 않는다(화면 고루틴이 설정·네트워크를 기다리지 않게).
+func (p *sourcePool) peek(c db.Conn) source.Backend {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ps, ok := p.m[c.UUID]; ok && ps.conn == c {
+		return ps.b
+	}
+	return nil
+}
+
 // forget 은 고치거나 지운 접속의 Backend 를 닫는다(R59.3).
 func (p *sourcePool) forget(uuid string) error {
 	p.mu.Lock()
@@ -234,6 +249,10 @@ func (m *model) sourceExec(c db.Conn, do func(ctx context.Context, b source.Back
 // 비싼 질의(ErrNeedsConfirm)는 확인 뒤 Force 로 다시 보낸다. 기록에는 질의 글이 남는다.
 func (m *model) runSource(t *queryTab, text string) tea.Cmd {
 	c := m.conn(t.conn)
+	if c.Kind == db.KindAWS {
+		m.status = msgTreeOnly
+		return nil
+	}
 	q := source.Query{Text: strings.TrimSpace(text)}
 	if q.Text == "" {
 		m.status = "실행할 문장이 없음"
@@ -242,11 +261,11 @@ func (m *model) runSource(t *queryTab, text string) tea.Cmd {
 	if usesRange(c.Kind) {
 		q.Since = cmpRange(t.since)
 	}
-	p := pendingRun{tab: t.id, conn: t.conn, readOnly: true, sql: q.Text, stmts: 1, exec: m.sourceExec(c, sourceRun(q))}
+	p := pendingRun{tab: t.id, conn: t.conn, readOnly: true, sql: q.Text, stmts: 1, src: &q, exec: m.sourceExec(c, sourceRun(q))}
 	forced := q
 	forced.Force = true
 	retry := p
-	retry.exec = m.sourceExec(c, sourceRun(forced))
+	retry.exec, retry.src = m.sourceExec(c, sourceRun(forced)), &forced
 	p.retry = &retry
 	return m.guard(p)
 }
@@ -273,10 +292,23 @@ func (m *model) openSourceNode(t *queryTab, n *node) tea.Cmd {
 	c, path, limit := m.conn(n.conn), n.key, openLimit(m.conn(n.conn).Kind)
 	p := pendingRun{tab: t.id, conn: n.conn, readOnly: true, retarget: true,
 		exec: m.sourceExec(c, func(ctx context.Context, b source.Backend) (*db.Result, error) { return b.Open(ctx, path, limit) })}
-	if c.Kind == db.KindDynamoDB {
+	// 미리 보기도 보낸 요청을 Run 꼴 질의로 남겨 정렬·거르기를 서버로 다시 읽을 수 있게 한다(R61.3·R62.3). OpenSearch 는 기록에도 싣는다
+	switch c.Kind {
+	case db.KindOpenSearch:
+		p.sql = opensearch.OpenText(path, limit)
+		p.src = &source.Query{Text: p.sql}
+	case db.KindLoki, db.KindGrafana:
+		if q, ok := obs.OpenQuery(c.Kind, path, limit); ok {
+			p.src = &q
+		}
+	// Athena 파티션 테이블은 확인 뒤 `SELECT * FROM "db"."테이블" LIMIT 50` 을 Force 로 보낸다(R68.1)
+	case db.KindDynamoDB, db.KindAthena:
 		q := source.Query{Text: dynamoScanSQL(path), Limit: limit, Force: true}
+		if c.Kind == db.KindAthena {
+			q.Text = athena.OpenSQL(path, limit)
+		}
 		retry := p
-		retry.sql = q.Text
+		retry.sql, retry.src = q.Text, &q
 		retry.exec = m.sourceExec(c, sourceRun(q))
 		p.retry = &retry
 	}

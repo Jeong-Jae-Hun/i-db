@@ -12,14 +12,13 @@ import (
 	"time"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
 
 // timeLayout 은 결과 time 열 형식이다. chart(R28)의 "2006-01-02 15:04:05.999999999" 로 읽힌다
 const timeLayout = "2006-01-02 15:04:05.000"
 
-var kst = time.FixedZone("KST", 9*3600)
-
-func kstTime(t time.Time) string { return t.In(kst).Format(timeLayout) }
+func kstTime(t time.Time) string { return t.In(textutil.KST).Format(timeLayout) }
 
 // queryData 는 Loki·Prometheus query·query_range 의 data 다.
 type queryData struct {
@@ -35,7 +34,8 @@ type labeledRow struct {
 
 // toResult 는 resultType 에 맞춰 표로 바꾼다. 로그는 time·라벨·line(최신 먼저),
 // 지표는 time·라벨·value(시계열끼리 묶고 그 안은 시간 순)이다. limit 을 넘는 행은 자르고 Truncated 를 켠다.
-func toResult(d queryData, limit int) (*db.Result, error) {
+// asc 면 로그 줄을 오래된 것부터 둔다(Loki forward, R62.3). 지표는 늘 시계열별 서버 순서다.
+func toResult(d queryData, limit int, asc bool) (*db.Result, error) {
 	var (
 		rows []labeledRow
 		last = "value"
@@ -44,7 +44,7 @@ func toResult(d queryData, limit int) (*db.Result, error) {
 	switch d.ResultType {
 	case "streams":
 		last = "line"
-		rows, err = streamRows(d.Result)
+		rows, err = streamRows(d.Result, asc)
 	case "matrix", "vector":
 		rows, err = seriesRows(d.Result)
 	case "scalar", "string":
@@ -84,7 +84,7 @@ func table(rows []labeledRow, last string, limit int) *db.Result {
 	return res
 }
 
-func streamRows(raw json.RawMessage) ([]labeledRow, error) {
+func streamRows(raw json.RawMessage, asc bool) ([]labeledRow, error) {
 	var streams []struct {
 		Stream map[string]string   `json:"stream"`
 		Values [][]json.RawMessage `json:"values"` // [ns 문자열, 줄, (구조화 메타데이터)]
@@ -112,8 +112,13 @@ func streamRows(raw json.RawMessage) ([]labeledRow, error) {
 			rows = append(rows, labeledRow{at: time.Unix(0, n), labels: s.Stream, last: line})
 		}
 	}
-	// 스트림마다 따로 오므로 합친 뒤 최신 먼저로 다시 줄 세운다
-	slices.SortStableFunc(rows, func(a, b labeledRow) int { return b.at.Compare(a.at) })
+	// 스트림마다 따로 오므로 합친 뒤 최신 먼저(asc 면 오래된 것 먼저)로 다시 줄 세운다
+	slices.SortStableFunc(rows, func(a, b labeledRow) int {
+		if asc {
+			return a.at.Compare(b.at)
+		}
+		return b.at.Compare(a.at)
+	})
 	return rows, nil
 }
 

@@ -17,13 +17,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/clipboard"
 	"github.com/Jeong-Jae-Hun/i-db/internal/complete"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/editor"
@@ -38,6 +38,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/plantree"
 	"github.com/Jeong-Jae-Hun/i-db/internal/redisview"
 	"github.com/Jeong-Jae-Hun/i-db/internal/session"
+	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 	"github.com/Jeong-Jae-Hun/i-db/internal/sqlfmt"
 	"github.com/Jeong-Jae-Hun/i-db/internal/statcrypt"
 	"github.com/Jeong-Jae-Hun/i-db/internal/tableview"
@@ -132,6 +133,7 @@ const (
 	rkSignal                    // 백엔드 취소·종료
 	rkImport                    // CSV 가져오기
 	rkRedisWrite                // 값 편집기가 만든 Redis 명령
+	rkMore                      // 일반 결과 더 읽기(R14.7). 결과에 행을 덧붙인다
 )
 
 // 확인 창이 묻는 것. 한 실행이 차례로 여러 단계를 거칠 수 있다(편집 버리기 → ANALYZE → prod·제출)
@@ -179,7 +181,7 @@ var (
 )
 
 var focusHints = map[focus]string{
-	fTree:   "Enter 열기 · d 구조 · D DDL · I CSV · A/L/S 운영 · B DB · F 검색 · X 키 삭제 · N 새 접속 · / 거르기 · ? 도움말",
+	fTree:   "Enter 열기 · d 구조 · D DDL · I CSV · A/L/S 운영 · B DB · F 검색·흐름 · X 키 삭제 · N 새 접속 · / 거르기 · ? 도움말",
 	fEditor: "Ctrl+R 실행 · Ctrl+E 계획 · Ctrl+B 정의 · F8 정렬 · F9 Auto/Manual · F3/F4 즐겨찾기 · Ctrl+P 팔레트",
 	fResult: "F2 고치기 · Ctrl+S 제출 · p 고정 · C IN · F/R 외래 키 · D 복호화 · +/- 거르기 · o 값 · F1 도움말",
 }
@@ -207,6 +209,8 @@ var helpSections = []struct {
 		{"F7", "마지막 표 결과 전체 내보내기 CSV (esc 취소)", "f7"},
 		{"Ctrl+U", "사용자 한눈에 보기 (이메일·uid·id·닉네임으로 여러 DB 조회)", "ctrl+u"},
 		{"Ctrl+G", "대시보드 (모든 접속 상태·지연·버전·수치, 30초마다 다시 확인)", "ctrl+g"},
+		{"Alt+F", "흐름 (아웃박스 → SNS → SQS → DLQ·Lambda, .dbtui/flows.json, 30초마다 다시 확인)", "alt+f"},
+		{"Alt+B", "보드 (.dbtui/boards/ 의 쿼리 패널 묶음, refresh 마다 다시 돌림)", "alt+b"},
 		{"Alt+C", "같은 쿼리 다른 접속에서 비교 (기본 stg↔prod)", "alt+c"},
 		{"Ctrl+L", "prod 쓰기 잠금 열기·닫기 (탭 접속, DB_PROD_UNLOCK_MIN 분)", "ctrl+l"},
 		{"Ctrl+]", "Loki·Prometheus 범위 15m·1h·6h·24h·7d (탭마다)", "ctrl+]"},
@@ -217,20 +221,21 @@ var helpSections = []struct {
 		{"DB_RESTORE=0", "끝낼 때 탭 저장·다음에 되살리기 끄기 (창 크기는 남김)", ""},
 		{"DB_AUTO_SAVE·OPEN=0", "자동 저장 / 접속 고를 때 최근 파일 열기 끄기", ""},
 		{"DB_KEYS=cmd / ctrl", "키 안내를 ⌘ / Ctrl 로 (기본은 맥·kitty 키면 ⌘)", ""},
+		{"DB_CLIPBOARD=osc52 / system", "복사를 OSC 52 만 / 시스템 클립보드만 (기본은 둘 다)", ""},
 		{"enc('글')", "실행 전에 그룹 키·IV 로 staticEncrypt 암호문으로 바꿈", ""},
 	}},
 	{"맥 ⌘ (Ghostty·kitty·WezTerm·iTerm2)", fKeep, [][3]string{
 		{"⌘R / ⌘↩", "실행 (= Ctrl+R)", ""},
 		{"⌘E / ⌥⌘E", "EXPLAIN / EXPLAIN ANALYZE", ""},
 		{"⌘S / ⌘O", "저장·제출 / 열기", ""},
-		{"⌘/ · ⌘D · ⌘K · ⌘A", "주석 · 줄 복제 · 복사 · 전체 선택", ""},
+		{"⌘/ · ⌘D · ⌘K · ⌘A", "주석 · 줄 복제 · 복사 (결과는 복사 꼴 고르기) · 전체 선택", ""},
 		{"⌘Z / ⌘⇧Z", "되돌리기 / 다시 하기", ""},
 		{"⌘B", "정의로 이동 (= Ctrl+B)", ""},
 		{"⌘P", "명령 팔레트 (= Ctrl+P)", ""},
 		{"⌘T ⌘W ⌘1..9 ⌘N ⌘H ⌘?", "= Ctrl+T Ctrl+W Alt+1..9 Ctrl+N Ctrl+H F1", ""},
 		{"⌘⇧O ⌘⇧S ⌘⇧D ⌘⇧E", "= F3 F4 F6 F7", ""},
 		{"⌥⌘L ⌘⇧M ⌘⇧↩ ⌘⇧⌫", "= F8(⌘⇧F 도) F9 F10 F11", ""},
-		{"⌘U ⌘L ⌘G ⌘⇧C ⌘⇧R ⌘⇧P", "= Ctrl+U Ctrl+L Ctrl+G Alt+C Alt+R Alt+P", ""},
+		{"⌘U ⌘L ⌘G ⌘⇧C ⌘⇧R ⌘⇧P ⌘⇧B", "= Ctrl+U Ctrl+L Ctrl+G Alt+C Alt+R Alt+P Alt+B", ""},
 		{"⌘V", "결과 표에 시트 칸 붙여넣기", ""},
 		{"⌘←→ / ⌘↑↓", "줄 처음·끝 / 문서 처음·끝", ""},
 	}},
@@ -265,13 +270,13 @@ var helpSections = []struct {
 		{"Enter (테이블)", "테이블 보기 (서버 페이지·거르기·정렬)", "enter"},
 		{"Enter (접속)", "펼치기 · 그 접속을 쓰는 탭이 없으면 최근 파일 열기", "enter"},
 		{"Enter (쿼리 파일)", "파일 열기 (이미 열린 탭이면 그 탭으로)", "enter"},
-		{"Enter (저장소)", "인덱스·라벨 값·지표·테이블 미리 보기 (OpenSearch·Loki·Prometheus·Grafana·DynamoDB, 펼치기는 l)", "enter"},
+		{"Enter (저장소)", "인덱스·라벨 값·지표·테이블 미리 보기 (OpenSearch·Loki·Prometheus·Grafana·DynamoDB·Athena, 펼치기는 l)", "enter"},
 		{"d / D", "테이블 구조 / DDL 을 새 탭에", "d"},
 		{"I", "CSV 가져오기 (테이블)", "I"},
 		{"A / L / S", "활동 / 잠금 / 테이블 크기 (PostgreSQL 접속)", "A"},
 		{"A / L / S", "INFO / SLOWLOG / 큰 키 (Redis 접속)", "A"},
 		{"B", "데이터베이스 바꾸기 (PostgreSQL 접속)", "B"},
-		{"F", "데이터 검색 (PostgreSQL 접속·스키마)", "F"},
+		{"F", "데이터 검색 (PostgreSQL 접속·스키마) · aws SNS 토픽은 흐름", "F"},
 		{"X", "패턴 맞는 키 일괄 삭제 (Redis 접속·이름공간, esc 멈춤)", "X"},
 		{"N", "새 접속 (URL 붙여넣기 · Ctrl+T 시험, .dbtui/connections.json)", "N"},
 		{"E", "접속 고치기 (db 전용 접속) · 폴더 줄은 폴더 이름 바꾸기", "E"},
@@ -292,6 +297,7 @@ var helpSections = []struct {
 		{"Enter / v", "셀 전체 값 / 레코드 세로 보기", "enter"},
 		{"s · /", "정렬(오름→내림→없음) · 거르기 abc !abc col:abc col=v col>v col=null", "s"},
 		{"y / Y", "셀 / 행 복사", "y"},
+		{"Ctrl+K · 오른쪽 클릭", "복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN (마지막 꼴 기억)", "ctrl+k"},
 		{"e / E", "CSV / JSON 내보내기", "e"},
 		{"< / >", "열 폭", ">"},
 		{"w", "텍스트 줄바꿈 (테이블 보기는 WHERE, / 도 같음)", "w"},
@@ -304,7 +310,7 @@ var helpSections = []struct {
 		{"칸 고치는 중", "space bool 순환 · now/today · Ctrl+O 큰 편집기 · enum 은 고르기 창", ""},
 		{"i / U", "행을 INSERT / UPDATE 문으로 복사", "i"},
 		{"o", "셀 전체 값", "o"},
-		{"[ / ] · #", "테이블 보기 이전·다음 페이지 · 정확한 개수", "]"},
+		{"[ / ] · #", "테이블 보기 이전·다음 페이지 · 정확한 개수 (일반 결과 ] 는 다음 1,000행 더 읽기)", "]"},
 		{"p / P · { / }", "결과 고정 / 풀기 · 결과 탭 이동", "p"},
 		{"K / X", "pid 행의 쿼리 취소 / 연결 종료", "K"},
 		{"t · esc", "실행 계획 나무 ↔ JSON · 닫기", "t"},
@@ -322,6 +328,11 @@ var helpSections = []struct {
 		{"Enter", "트리에서 그 접속 고르기", ""},
 		{"/ · esc", "그룹·이름·환경으로 거르기 · 해제", ""},
 		{"j k / ↑ ↓", "이동", ""},
+	}},
+	{"보드 (Alt+B)", fKeep, [][3]string{
+		{"r", "바로 다시 돌리기 (파일도 다시 읽음)", ""},
+		{"방향키 / h j k l", "패널 고르기", ""},
+		{"Enter", "패널 질의를 새 쿼리 탭에서 실행 · 흐름 패널은 흐름 탭", ""},
 	}},
 	{"JSON 값 보기 (o)", fResult, [][3]string{
 		{"t", "나무 ↔ 원문", "t"},
@@ -369,8 +380,9 @@ type node struct {
 	gen      int // 자식 읽기 요청 세대. 늦게 온 이전 응답을 버린다
 	children []*node
 	parent   *node
-	// nSource 만 쓴다(R60): 오른쪽 흐린 글, Enter 로 Open 할 수 있는지, 펼칠 자식이 있는지
+	// nSource 만 쓴다(R60): 오른쪽 흐린 글(warn 이면 경고 색, R67.2), Enter 로 Open 할 수 있는지, 펼칠 자식이 있는지
 	info     string
+	warn     bool
 	openable bool
 	hasKids  bool
 }
@@ -408,6 +420,7 @@ type resultMsg struct {
 	params  map[string]string // 파라미터 실행의 이름 → 값. 성공하면 기억한다(R55)
 	retry   *pendingRun       // 읽기 전용 저장소의 비싼 질의를 확인 뒤 다시 보낼 실행(R60.2)
 	keep    *grid.Query       // pendingRun.keep
+	src     *source.Query     // pendingRun.src
 }
 
 // redisValueMsg 는 값 편집기에 넣을 키 하나를 읽은 결과다.
@@ -602,6 +615,8 @@ type pendingRun struct {
 	note     string            // 시작할 때 상태 줄 앞에 붙일 글(enc() 확장, R52)
 	changes  *db.ChangeSet     // rkSubmit 이 낸 묶음(R50)
 	keep     *grid.Query       // 정렬·거르기 다시 읽기(R14.5). 결과에 다시 붙이고 실패하면 보던 결과를 둔다
+	src      *source.Query     // 저장소 실행의 질의. 정렬·거르기를 서버로 다시 읽을 때 바꿔 보낸다(R61.3·R62.3·R63.3)
+	sent     *string           // exec 가 실제로 보낸 글을 적는 자리. 비지 않았으면 sql 대신 기록한다(OpenSearch keyword 바꿈)
 	undo     *undoEntry        // rkSubmit 이 되돌리기 묶음을 낸다(R50)
 	params   map[string]string // 파라미터 실행의 이름 → 값(R55)
 	// 읽기 전용 저장소가 ErrNeedsConfirm 을 돌려주면 확인 뒤 대신 시작할 실행(Force, R60.2)
@@ -689,10 +704,15 @@ type queryTab struct {
 	// baseSQL 은 사용자가 실행한 원래 문장이다. 정렬·거르기를 서버로 다시 읽을 때 감싼다(R14.5). fetched 는 지금 결과를 만든 정렬·거르기다
 	baseSQL string
 	fetched grid.Query
+	// asked 는 마지막으로 서버에 보내려 한 정렬·거르기다. 확인을 거절하거나 실패한 것을 거듭 묻지 않는 데만 쓴다
+	asked grid.Query
 	// requerying 은 돌고 있는 실행이 정렬·거르기 다시 읽기라는 뜻이다. 그 사이 또 바꾸면 이전 것을 취소하고 새로 보낸다.
 	// requeryLast 는 그 실행이 성공하면 t.last(제출 뒤 새로고침)로 올릴 실행이다. 실패한 감싼 문장을 다시 보내지 않게 한다
 	requerying  bool
 	requeryLast *pendingRun
+	// baseSrc 는 저장소 결과를 만든 질의다(baseSQL 의 저장소 판). noted 는 받은 행만 정렬·거르기 까닭을 이미 알린 정렬·거르기다(R14.6)
+	baseSrc *source.Query
+	noted   grid.Query
 	// 연 파일을 마지막으로 읽거나 쓴 내용과 편집 판(R45.2). 디스크가 이 내용과 달라지면 autoStop 으로 자동 저장을 멈춘다
 	diskText string
 	editRev  int
@@ -706,6 +726,8 @@ type queryTab struct {
 	undo       []*undoEntry  // 제출 되돌리기 묶음, 마지막이 가장 최근(R50)
 	since      time.Duration // Loki·Prometheus 범위(R62.2). 0 이면 1h
 	dash       *dashState    // 대시보드 탭이면 그 상태(R64). 편집기·결과 대신 대시보드를 그린다
+	flow       *flowState    // 흐름 탭이면 그 상태(R69). 대시보드처럼 편집기·결과 자리 전체에 그린다
+	board      *boardState   // 보드 탭이면 그 상태(R70). 대시보드처럼 편집기·결과 자리 전체에 그린다
 }
 
 // completer 는 편집기 자동완성 함수다. 탭의 접속이 바뀌어도 부를 때 다시 읽도록 탭을 가리킨다.
@@ -775,6 +797,7 @@ type model struct {
 	pickDo       func(string) tea.Cmd // nil 이면 queries 파일 열기(Ctrl+O)
 	pickDel      func(string) tea.Cmd // 즐겨찾기 고르기의 지우기(d)
 	promptDo     func(string) tea.Cmd // oPrompt 의 Enter
+	copyFormat   grid.CopyFormat      // 복사 고르기 창에서 마지막으로 고른 꼴(R71.1). 세션 동안만 기억한다
 	yes          *yesNo
 	histCursor   int
 	pending      *pendingRun
@@ -1186,7 +1209,7 @@ func (m *model) expand(n *node) tea.Cmd {
 				return childrenMsg{n: n, gen: gen, err: err}
 			}
 			for _, sn := range ns {
-				out = append(out, &node{kind: nSource, label: sn.Name, key: sn.Path, info: sn.Info, openable: sn.Openable,
+				out = append(out, &node{kind: nSource, label: sn.Name, key: sn.Path, info: sn.Info, warn: sn.Warn, openable: sn.Openable,
 					hasKids: sn.HasChildren, loaded: !sn.HasChildren, conn: idx, parent: n})
 			}
 		case kind == nConn && c.Kind == db.KindRedis:
@@ -1585,7 +1608,10 @@ func (m *model) start(p pendingRun) tea.Cmd {
 		defer cancel()
 		res, err := exec(ctx)
 		msg := resultMsg{tab: id, seq: seq, conn: p.conn, sql: p.sql, stmts: p.stmts, res: res, err: err, kind: p.kind, key: p.key, old: p.old,
-			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params, retry: p.retry, keep: p.keep}
+			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params, retry: p.retry, keep: p.keep, src: p.src}
+		if p.sent != nil && *p.sent != "" {
+			msg.sql = *p.sent
+		}
 		if p.all != nil {
 			msg.all = *p.all
 		}
@@ -1701,6 +1727,13 @@ func (m *model) gridKey(k tea.KeyMsg) tea.Cmd {
 	case a.EditLong != nil:
 		m.openLong(t, *a.EditLong)
 		return nil
+	case a.CopyMenu:
+		target := grid.TargetRow
+		if t.grid.Selecting() {
+			target = grid.TargetSelection
+		}
+		m.openCopyMenu(t, target)
+		return nil
 	case a.Copy != nil:
 		return copyCmd(*a.Copy)
 	case a.CopyAs != nil:
@@ -1757,14 +1790,49 @@ func (m *model) gridKey(k tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// copyCmd 는 글을 OSC 52 로 터미널 클립보드에 보낸다. 렌더러와 섞이지 않게 명령 고루틴에서 쓴다.
+// copyCmd 는 글을 OSC 52 와 시스템 클립보드(R71.4)에 보낸다. 렌더러와 섞이지 않고 시스템 명령(최대 2초)이
+// 화면을 막지 않게 명령 고루틴에서 쓴다.
 func copyCmd(s string) tea.Cmd {
 	return func() tea.Msg {
-		if _, err := osc52.New(s).WriteTo(clipboardOut); err != nil {
+		if err := clipboard.Write(clipboardOut, s); err != nil {
 			return editor.ClipboardErrMsg{Err: err}
 		}
 		return nil
 	}
+}
+
+// openCopyMenu 는 복사 고르기 창(R71)을 연다. 커서는 target 에서 마지막으로 고른 꼴에 둔다.
+// 그 대상에 없는 꼴(IN 목록은 열만)이면 그 꼴이 있는 첫 대상, 그것도 없으면 target 의 첫 꼴이다.
+func (m *model) openCopyMenu(t *queryTab, target grid.CopyTarget) {
+	choices := t.grid.CopyChoices()
+	if len(choices) == 0 {
+		m.status = "복사할 행 없음"
+		return
+	}
+	labels := make([]string, len(choices))
+	byLabel := make(map[string]grid.CopyChoice, len(choices))
+	for i, c := range choices {
+		labels[i] = c.String()
+		byLabel[labels[i]] = c
+	}
+	cursor := slices.Index(choices, grid.CopyChoice{Target: target, Format: m.copyFormat})
+	if cursor < 0 {
+		cursor = slices.IndexFunc(choices, func(c grid.CopyChoice) bool { return c.Format == m.copyFormat })
+	}
+	if cursor < 0 {
+		cursor = max(0, slices.IndexFunc(choices, func(c grid.CopyChoice) bool { return c.Target == target }))
+	}
+	m.openPicker("복사 ", labels, nil, func(label string) tea.Cmd {
+		c := byLabel[label]
+		m.copyFormat = c.Format
+		a := t.grid.CopyWith(c)
+		m.status = a.Status
+		if a.Copy == nil {
+			return nil
+		}
+		return copyCmd(*a.Copy)
+	}, nil)
+	m.pickerCursor = cursor
 }
 
 // openPicker 는 고르기 창(파일·데이터베이스·스키마·즐겨찾기)을 연다. do 가 nil 이면 queries 파일 열기다.
@@ -2090,6 +2158,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, notifyCmd(c.Name, time.Since(msg.job.start), int(msg.rows), msg.err != nil, canceled)
 	case editor.ClipboardErrMsg:
+		var big clipboard.TooBigError
+		if errors.As(msg.Err, &big) {
+			m.status = big.Status()
+			return m, nil
+		}
 		m.status = "클립보드 복사 실패: " + msg.Err.Error()
 		return m, nil
 	case fkMsg:
@@ -2362,7 +2435,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				t.exportSQL = msg.sql
 			}
 			if msg.keep == nil {
-				t.baseSQL = t.exportSQL
+				t.baseSQL, t.baseSrc, t.noted = t.exportSQL, nil, grid.Query{}
+				// 저장소 결과는 정렬·거르기를 서버로 다시 읽을 때 원래 질의를 바꿔 보낸다(R61.3·R62.3·R63.3)
+				if msg.kind == rkGrid && msg.err == nil && !t.cancelled && c.Kind.IsSource() {
+					t.baseSQL, t.baseSrc = msg.sql, msg.src
+				}
 			}
 			if msg.kind != rkTable {
 				t.tv = nil
@@ -2391,20 +2468,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if requeryLast != nil {
 					t.last = requeryLast
 				}
-				t.grid.SetQuery(*msg.keep, true)
-				t.fetched = *msg.keep
+				// Loki·DynamoDB 는 정렬만 서버로 읽어 거르기는 받은 행 안에서 다시 건다(R62.3·R63.3)
+				keep, server := *msg.keep, c.Kind == db.KindPG || c.Kind == db.KindOpenSearch
+				if !server {
+					keep.Filter = now.Filter
+				}
+				t.grid.SetQuery(keep, server)
+				t.fetched, t.asked = keep, keep
 				// 오는 사이 정렬·거르기를 또 바꿨으면 그것을 받은 행에 다시 걸고, 치던 거르기는 이어 간다. 확정되면 다시 읽는다
-				if now != *msg.keep {
+				if now != keep {
 					t.grid.SetQuery(now, false)
-					if typing {
-						t.grid.ResumeTyping()
-					} else {
+					if !typing {
 						tick = tea.Batch(tick, m.requery(t))
 					}
+				}
+				if typing {
+					t.grid.ResumeTyping()
 				}
 				t.grid.FocusCol(keepCol)
 			} else {
 				t.fetched = t.grid.Query()
+				t.asked = t.fetched
 			}
 			// 테이블 보기는 정렬·페이지를 바꿔 다시 읽어도 커서 열을 지켜 s 를 거듭 누르면 같은 열이 돈다
 			if msg.kind == rkTable {
@@ -2517,6 +2601,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if status == "" {
 				status, cmd = m.afterRedisWrite(t, msg)
 			}
+		case rkMore:
+			if status == "" {
+				status, cmd = m.appendMore(t, msg.res)
+			} else {
+				status = "더 읽기 " + status
+			}
 		default:
 			if status == "" {
 				status = oneLine(msg.res.Text)
@@ -2598,6 +2688,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case dashTickMsg:
 		return m, m.dashTicked(msg)
+	case dashOutboxMsg:
+		m.dashOutboxed(msg)
+		return m, nil
+	case flowSnapMsg:
+		m.flowSnapped(msg)
+		return m, nil
+	case flowTickMsg:
+		return m, m.flowTicked(msg)
+	case boardPanelMsg:
+		return m, m.boardDone(msg)
+	case boardTickMsg:
+		return m, m.boardTicked(msg)
 	case autoSaveMsg:
 		if t := m.findTab(msg.tab); t != nil && t.editRev == msg.rev {
 			m.autoSaveStatus(t)
@@ -2674,7 +2776,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		wheel := tea.MouseEvent(msg).IsWheel()
-		if !wheel && msg.Button != tea.MouseButtonLeft {
+		// 오른쪽 클릭은 결과 칸의 복사 고르기 창(R71.3)만 쓴다
+		right := msg.Button == tea.MouseButtonRight && msg.X > rightX && msg.Y >= l.edH+4 && msg.Y <= l.bodyH
+		if !wheel && msg.Button != tea.MouseButtonLeft && !right {
 			return m, nil
 		}
 		switch {
@@ -2735,6 +2839,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			gm.X, gm.Y = msg.X-rightX-1, msg.Y-l.edH-5-len(m.resultLines(t, l.rightW))
 			t.grid.HandleMouse(gm)
 			if t.redis != nil || t.planOn || wheel {
+				return m, nil
+			}
+			// 오른쪽 클릭은 그 칸으로 옮긴 뒤 현재 행 대상의 복사 고르기 창을 연다(R71.3)
+			if msg.Button == tea.MouseButtonRight {
+				if t.grid.CellAt(gm.X, gm.Y) {
+					m.openCopyMenu(t, grid.TargetRow)
+				}
 				return m, nil
 			}
 			// 테이블 보기 바로 위 줄은 WHERE·ORDER BY 칸이다. 누른 칸의 입력을 연다(R16.4)
@@ -3175,6 +3286,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.userLookup()
 	case "ctrl+g":
 		return m, m.openDash()
+	case "alt+f":
+		return m, m.openFlows(nil)
+	case "alt+b":
+		return m, m.pickBoard()
 	case "ctrl+l":
 		return m, m.toggleLock()
 	case "alt+c":
@@ -3720,6 +3835,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if t.dash != nil && m.focus != fTree {
 		return m, m.dashKey(k)
 	}
+	if t.flow != nil && m.focus != fTree {
+		return m, m.flowKey(k)
+	}
+	if t.board != nil && m.focus != fTree {
+		return m, m.boardKey(k)
+	}
 	switch m.focus {
 	case fEditor:
 		var cmd tea.Cmd
@@ -3815,6 +3936,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t.view = (t.view+1+d+n)%n - 1
 			t.grid.SetResult(t.shown())
 			return m, nil
+		case "]":
+			// 테이블 보기는 다음 페이지(R16.1)이고 일반 결과는 더 읽기다(R14.7)
+			if t.tv == nil {
+				return m, m.loadMore(t)
+			}
 		case "K", "X":
 			// ─── 백엔드 신호 ───
 			// pid 열이 있는 결과(Activity·Locks 등)에서 고른 행의 백엔드에 K 취소·X 종료를 보낸다. 늘 묻는다.
@@ -4020,6 +4146,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return pickListMsg{conn: conn, prompt: "데이터베이스 ", items: names, err: err, do: do}
 		})
 	case "F":
+		// aws 트리의 SNS 토픽 줄은 그 토픽의 흐름(R69)이다
+		if cmd, ok := m.treeFlow(n); ok {
+			return m, cmd
+		}
 		// ─── 데이터 검색 (R33.2) ───
 		// 찾을 글을 받아 스키마(접속 줄이면 search_path 첫 스키마)의 글자 열을 찾는다. prod 는 테이블 수를 세어 먼저 묻는다.
 		if n == nil || (n.kind != nConn && n.kind != nSchema) || m.conn(n.conn).Kind != db.KindPG {
@@ -4298,6 +4428,10 @@ func (m *model) View() string {
 		}
 	} else if t.dash != nil {
 		header += barStyle.Bold(true).Render("대시보드") + hintStyle.Render(fmt.Sprintf(" · 접속 %d", len(connOrder(m.proj.Conns))))
+	} else if t.flow != nil {
+		header += barStyle.Bold(true).Render("흐름") + hintStyle.Render(fmt.Sprintf(" · %d", len(t.flow.list)))
+	} else if t.board != nil {
+		header += barStyle.Bold(true).Render("보드") + hintStyle.Render(fmt.Sprintf(" · 패널 %d · %s마다", len(t.board.b.panels), t.board.b.every))
 	} else {
 		header += hintStyle.Render("접속 없음 · 트리에서 고르세요")
 	}
@@ -4344,7 +4478,11 @@ func (m *model) View() string {
 			style = dimStyle
 		case nSource:
 			if n.info != "" {
-				label += " " + dimStyle.Render(textutil.Printable(n.info, false))
+				st := dimStyle
+				if n.warn {
+					st = dashWarnStyle
+				}
+				label += " " + st.Render(textutil.Printable(n.info, false))
 			}
 		}
 		if i == m.cursor {
@@ -4450,6 +4588,24 @@ func (m *model) View() string {
 		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
 			pane(paneSpec{title: "대시보드", info: info, body: m.dashView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
 	}
+	if t.flow != nil {
+		h := l.edH + l.resH + 2
+		info := m.label("r 새로고침 · ←→ 상자 · Enter 상세")
+		if n := len(t.flow.pending); n > 0 {
+			info = fmt.Sprintf("확인 중 %d · ", n) + info
+		}
+		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
+			pane(paneSpec{title: "흐름", info: info, body: m.flowView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
+	}
+	if t.board != nil {
+		h := l.edH + l.resH + 2
+		info := m.label("r 새로고침 · Enter 쿼리 탭")
+		if n := len(t.board.pending); n > 0 {
+			info = fmt.Sprintf("확인 중 %d · ", n) + info
+		}
+		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
+			pane(paneSpec{title: textutil.Printable(t.board.b.title, false), info: info, body: m.boardView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
+	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		pane(paneSpec{title: "Explorer", info: treeInfo, body: strings.TrimRight(tb.String(), "\n"), w: l.treeW, h: l.treeH, focused: m.focus == fTree,
 			hot: m.drag == bTree}),
@@ -4509,6 +4665,12 @@ func (m *model) View() string {
 	hint := focusHints[m.focus]
 	if t.dash != nil && m.focus != fTree {
 		hint = dashHint
+	}
+	if t.flow != nil && m.focus != fTree {
+		hint = flowHint
+	}
+	if t.board != nil && m.focus != fTree {
+		hint = boardHint
 	}
 	return header + "\n" + body + "\n" + m.bar(status, hintStyle.Render(m.label(hint)+" "))
 }
