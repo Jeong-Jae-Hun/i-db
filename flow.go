@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,6 +41,8 @@ const (
 	flowAWSTimeout = 15 * time.Second
 	flowHint       = "r 새로고침 · ↑↓ 흐름 · ←→ 상자 · Enter 상세 · Ctrl+W 닫기 · F1 도움말"
 	flowNoFile     = "흐름 없음 · .dbtui/flows.json 을 쓰거나 aws 트리의 SNS 토픽에서 F"
+	// stageType 은 아웃박스 종류 한 줄(R69.6)이다. 그림에서는 아웃박스 아래 줄로, `db flows` 에서는 한 줄로 보인다
+	stageType = "outbox-type"
 )
 
 var flowSelStyle = lipgloss.NewStyle().Reverse(true)
@@ -113,6 +117,7 @@ func resolveFlow(ctx context.Context, clients *db.Clients, sources *sourcePool, 
 		}
 	}
 	switch i := connByName(proj, f.AWS); {
+	case f.Topic == "":
 	case i < 0:
 		s.topicErr = "no such connection: " + f.AWS
 	case proj.Conns[i].Env() == "prod" && !prod:
@@ -130,14 +135,16 @@ func resolveFlow(ctx context.Context, clients *db.Clients, sources *sourcePool, 
 
 // ─── 상자 ───
 
-// flowBox 는 그림의 상자 하나이자 `db flows` 의 한 줄이다. sub 는 구독 줄 자리(-1 이면 아웃박스·SNS)다.
-// conn·path 는 Enter 로 열 상세다(아웃박스는 path 가 비고 conn 이 PostgreSQL 접속이다).
+// flowBox 는 그림의 상자 하나이자 `db flows` 의 한 줄이다. sub 는 구독 줄 자리(-1 이면 아웃박스·SNS·아웃박스 종류)다.
+// conn·path 는 Enter 로 열 상세다(아웃박스·종류는 path 가 비고 conn 이 PostgreSQL 접속이다).
+// 종류 줄은 pad 만큼 이름 뒤를 띄워 수치 열을 맞추고, idle 은 설정에만 있고 행이 없는 종류다(흐리게, 자리가 있을 때만).
+// nullType 은 종류 열이 NULL 인 줄이다(이름은 `(NULL)`, 상세는 is null).
 type flowBox struct {
 	stage, name, metrics string
 	short                string // 그림에 보일 짧은 수치. 비면 metrics 다
-	warn                 bool
+	warn, idle, nullType bool
 	err, note            string
-	sub                  int
+	sub, pad             int
 	conn, path           string
 }
 
@@ -172,13 +179,18 @@ func flowBoxes(f flows.Flow, s flowSnap, done bool) []flowBox {
 	if i := strings.LastIndex(topic, ":"); strings.HasPrefix(topic, "arn:") && i >= 0 {
 		topic = topic[i+1:]
 	}
-	sns := flowBox{stage: "sns", name: topic, metrics: pending, err: s.topicErr, note: s.topicNote, sub: -1, conn: f.AWS}
-	if s.topic == nil {
-		return append(out, sns)
+	if f.Topic != "" {
+		sns := flowBox{stage: "sns", name: topic, metrics: pending, err: s.topicErr, note: s.topicNote, sub: -1, conn: f.AWS}
+		if s.topic != nil {
+			sns.name, sns.metrics, sns.path = s.topic.Name, fmt.Sprintf("구독 %d", len(s.topic.Subs)), "sns/"+s.topic.Arn
+		}
+		out = append(out, sns)
 	}
-	sns.name, sns.metrics, sns.path = s.topic.Name, fmt.Sprintf("구독 %d", len(s.topic.Subs)), "sns/"+s.topic.Arn
-	out = append(out, sns)
-	for i, sub := range s.topic.Subs {
+	var subs []awsres.Sub
+	if s.topic != nil {
+		subs = s.topic.Subs
+	}
+	for i, sub := range subs {
 		q := sub.Queue
 		if q == nil {
 			out = append(out, flowBox{stage: "sub", name: sub.Endpoint, metrics: sub.Protocol, sub: i})
@@ -206,7 +218,49 @@ func flowBoxes(f flows.Flow, s flowSnap, done bool) []flowBox {
 			out = append(out, b)
 		}
 	}
-	return out
+	if f.Outbox == nil || s.outbox == nil {
+		return out
+	}
+	// 종류 줄(R69.6)은 설정의 종류 ∪ 테이블에 있는 종류다. 한도 소진 많은 순 → 대기 많은 순 → 이름 순이고 행 없는 설정 종류는 맨 뒤다
+	o, types := f.Outbox, slices.Clone(s.outbox.Types)
+	// 종류가 잘렸으면 빠진 설정 종류에도 행이 있을 수 있어 0건으로 그리지 않는다
+	for _, k := range slices.Sorted(maps.Keys(o.Types)) {
+		if s.outbox.Truncated {
+			break
+		}
+		if !slices.ContainsFunc(types, func(t flows.TypeStat) bool { return !t.Null && t.Name == k }) {
+			types = append(types, flows.TypeStat{Name: k, Retrying: min(s.outbox.Retry, 0), Exhausted: min(s.outbox.Exhausted, 0)})
+		}
+	}
+	slices.SortFunc(types, func(a, b flows.TypeStat) int {
+		return cmp.Or(cmp.Compare(min(b.Rows, 1), min(a.Rows, 1)), cmp.Compare(b.Exhausted, a.Exhausted), cmp.Compare(b.Waiting, a.Waiting), strings.Compare(a.Label(), b.Label()))
+	})
+	for _, t := range types {
+		m, warn := t.Metrics()
+		consumer := "?"
+		if !t.Null {
+			consumer = cmp.Or(o.Types[t.Name].Consumer, consumer)
+		}
+		out = append(out, flowBox{stage: stageType, name: t.Label(), metrics: m + " · → " + consumer, short: m + "  → " + consumer, warn: warn, idle: t.Rows == 0,
+			nullType: t.Null, sub: -1, conn: o.Conn})
+	}
+	return alignTypes(out)
+}
+
+// alignTypes 는 종류 줄 이름 뒤 빈칸(pad)을 가장 긴 이름에 맞춘다. 종류 줄을 거른 뒤(흐름 탭 높이, 보드 상한)에도 다시 부른다.
+func alignTypes(boxes []flowBox) []flowBox {
+	w := 0
+	for _, b := range boxes {
+		if b.stage == stageType {
+			w = max(w, ansi.StringWidth(textutil.Printable(b.name, false)))
+		}
+	}
+	for i, b := range boxes {
+		if b.stage == stageType {
+			boxes[i].pad = w - ansi.StringWidth(textutil.Printable(b.name, false))
+		}
+	}
+	return boxes
 }
 
 // ─── 그림 ───
@@ -244,6 +298,8 @@ func boxLabel(b flowBox) string {
 	name := textutil.Printable(b.name, false)
 	m = textutil.Printable(m, false)
 	switch b.stage {
+	case stageType:
+		return name + strings.Repeat(" ", max(0, b.pad)) + "  " + m
 	case "dlq":
 		return strings.TrimSpace("DLQ " + name + " " + m)
 	case "lambda":
@@ -263,11 +319,29 @@ func boxLabel(b flowBox) string {
 }
 
 // flowLayout 은 상자를 왼쪽 → 오른쪽으로 잇고, 가장 긴 줄이 w 를 넘으면 위 → 아래로 쌓는다.
+// 아웃박스 종류 줄(R69.6)은 어느 쪽이든 아래에 붙고, 길어도 가로·세로 고르기에는 넣지 않는다(잘려 보인다):
+//
+//	├─ CREATE_PAYOUT  대기 3 · 재시도 1 · 한도 소진 2  → consume-outbox-create-payout
+//	└─ CLIP                대기 0 · 재시도 0 · 한도 소진 0  → consume-outbox-clip
 func flowLayout(boxes []flowBox, w int) []flowLine {
-	if h := flowWide(boxes); maxWidth(h) <= w {
-		return h
+	lines := flowWide(boxes)
+	if maxWidth(lines) > w {
+		lines = flowTall(boxes)
 	}
-	return flowTall(boxes)
+	var at []int
+	for i, b := range boxes {
+		if b.stage == stageType {
+			at = append(at, i)
+		}
+	}
+	for k, i := range at {
+		branch := "  ├─ "
+		if k == len(at)-1 {
+			branch = "  └─ "
+		}
+		lines = append(lines, flowLine{{branch, -1}, seg(boxes, i)})
+	}
+	return lines
 }
 
 func maxWidth(ls []flowLine) int {
@@ -281,6 +355,9 @@ func maxWidth(ls []flowLine) int {
 // subGroups 는 구독 줄마다의 상자 자리(첫째가 큐·잎)다.
 func subGroups(boxes []flowBox) (head []int, subs [][]int) {
 	for i, b := range boxes {
+		if b.stage == stageType {
+			continue
+		}
 		if b.sub < 0 {
 			head = append(head, i)
 			continue
@@ -411,7 +488,7 @@ func renderFlow(lines []flowLine, boxes []flowBox, sel, w int) []string {
 				st = errStyle
 			case bx.warn:
 				st = dashWarnStyle
-			case bx.note != "" || bx.metrics == "…":
+			case bx.note != "" || bx.metrics == "…" || bx.idle:
 				st = dimStyle
 			}
 			if s.box == sel {
@@ -437,6 +514,8 @@ type flowState struct {
 	cancel  context.CancelFunc
 	cursor  int
 	box     int
+	// viewH·diagW 는 마지막으로 그린 그림 자리다. 행 없는 설정 종류를 자리가 있을 때만 보이는 데 쓴다(0 이면 다 보인다)
+	viewH, diagW int
 }
 
 type flowSnapMsg struct {
@@ -544,7 +623,12 @@ func (s *flowState) curBoxes() (flows.Flow, []flowBox, bool) {
 	}
 	f := s.list[clamp(s.cursor, len(s.list))]
 	snap, done := s.snaps[f.Name]
-	return f, flowBoxes(f, snap, done), true
+	boxes := flowBoxes(f, snap, done)
+	// 행 없는 설정 종류는 맨 뒤라 빼도 앞 상자 자리가 그대로다. 이름·빈 줄 두 줄을 더해 높이를 넘으면 뺀다
+	if s.viewH > 0 && slices.ContainsFunc(boxes, func(b flowBox) bool { return b.idle }) && len(flowLayout(boxes, s.diagW))+2 > s.viewH {
+		boxes = alignTypes(slices.DeleteFunc(boxes, func(b flowBox) bool { return b.idle }))
+	}
+	return f, boxes, true
 }
 
 func (m *model) flowKey(k tea.KeyMsg) tea.Cmd {
@@ -578,19 +662,24 @@ func (m *model) flowKey(k tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// openFlowBox 는 상자의 상세를 새 결과 탭에 연다. 아웃박스는 종류별 수, 큐·DLQ 는 속성, 토픽은 구독, Lambda 는 매핑 표다.
+// openFlowBox 는 상자의 상세를 새 결과 탭에 연다. 아웃박스는 종류별 수, 종류 줄은 그 종류의 재시도 중·한도 소진 행,
+// 큐·DLQ 는 속성, 토픽은 구독, Lambda 는 매핑 표다.
 func (m *model) openFlowBox(f flows.Flow, b flowBox) tea.Cmd {
 	ci := connByName(m.proj, b.conn)
-	if ci < 0 || (b.path == "" && b.stage != "outbox") {
+	outbox := b.stage == "outbox" || b.stage == stageType
+	if ci < 0 || (b.path == "" && !outbox) {
 		m.status = "열 상세가 없음: " + textutil.Printable(b.name, false)
 		return nil
 	}
 	c := m.conn(ci)
 	t := m.newTab()
 	p := pendingRun{tab: t.id, conn: ci, readOnly: true, retarget: true}
-	if b.stage == "outbox" {
-		o, clients := *f.Outbox, m.clients
-		p.sql = flows.TypeSQL(o)
+	if outbox {
+		sql, clients := flows.CountSQL(*f.Outbox), m.clients
+		if b.stage == stageType {
+			sql = flows.RetrySQL(*f.Outbox, flows.TypeStat{Name: b.name, Null: b.nullType})
+		}
+		p.sql = sql
 		p.exec = func(ctx context.Context) (*db.Result, error) {
 			pg, err := clients.PG(ctx, c)
 			if err != nil {
@@ -598,7 +687,7 @@ func (m *model) openFlowBox(f flows.Flow, b flowBox) tea.Cmd {
 			}
 			ctx, cancel := context.WithTimeout(ctx, db.ProbeTimeout)
 			defer cancel()
-			return flows.Types(ctx, pg, o)
+			return pg.RunReadOnly(ctx, sql)
 		}
 	} else {
 		path, limit := b.path, openLimit(c.Kind)
@@ -634,6 +723,7 @@ func (m *model) flowView(t *queryTab, w, h int) string {
 		left = append(left, mark+st.Render(icon)+" "+truncate(textutil.Printable(f.Name, false), listW-4))
 	}
 	diagW := max(10, w-listW-3)
+	s.viewH, s.diagW = h, diagW
 	var right []string
 	if f, boxes, ok := s.curBoxes(); ok {
 		right = append(right, lipgloss.NewStyle().Bold(true).Render(truncate(textutil.Printable(f.Name, false), diagW)), "")

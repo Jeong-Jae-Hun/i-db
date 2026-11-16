@@ -38,7 +38,9 @@ const (
 	// boardParallel 은 동시에 도는 패널 수다. 접속이 다른 패널만 함께 돈다
 	boardParallel = 4
 	// boardRows 는 숫자·표 패널이 받는 행 수이자 CLI json 상한이다. 차트는 시계열이라 저장소 기본(1,000)을 받는다
-	boardRows         = 50
+	boardRows = 50
+	// boardFlowTypes 는 흐름 패널에 보일 아웃박스 종류 줄 최대 수다(R70.3)
+	boardFlowTypes    = 10
 	boardHint         = "r 새로고침 · 방향키·hjkl 패널 · Enter 쿼리 탭에 열기 · Ctrl+W 닫기 · F1 도움말"
 	boardNoFile       = "보드 없음 · .dbtui/boards/<이름>.json 을 쓰세요"
 	msgBoardExpensive = "비싼 질의라 보드에서 돌리지 않음"
@@ -216,7 +218,11 @@ func checkPanel(p *boardPanel, proj *db.Project, fs []flows.Flow, ferr error) er
 		case fs[i].Err != "":
 			return fmt.Errorf("flow %s: %s", p.Flow, fs[i].Err)
 		default:
+			// 토픽 없는 흐름은 aws 접속이 없어 아웃박스 접속으로 묶는다
 			p.flow, p.key = fs[i], fs[i].AWS
+			if p.key == "" && fs[i].Outbox != nil {
+				p.key = fs[i].Outbox.Conn
+			}
 		}
 		return nil
 	}
@@ -309,7 +315,10 @@ func panelConns(p boardPanel) []string {
 	if p.flow.Outbox != nil {
 		out = append(out, p.flow.Outbox.Conn)
 	}
-	return append(out, p.flow.AWS)
+	if p.flow.Topic != "" {
+		out = append(out, p.flow.AWS)
+	}
+	return out
 }
 
 // panelProd 는 패널이 prod 접속(R6.2)을 묻는지다.
@@ -345,7 +354,15 @@ func runPanel(ctx context.Context, clients *db.Clients, sources *sourcePool, pro
 	ctx, cancel := context.WithTimeout(ctx, boardTimeout)
 	defer cancel()
 	if p.View == "flow" {
-		r.boxes = flowBoxes(p.flow, resolveFlow(ctx, clients, sources, proj, p.flow, prod), true)
+		// 종류 줄(R69.6)은 행이 있는 것만 boardFlowTypes 개까지다. 행 없는 설정 종류는 맨 뒤라 앞에서 센 수에 끼지 않는다
+		n := 0
+		r.boxes = alignTypes(slices.DeleteFunc(flowBoxes(p.flow, resolveFlow(ctx, clients, sources, proj, p.flow, prod), true), func(b flowBox) bool {
+			if b.stage != stageType {
+				return false
+			}
+			n++
+			return b.idle || n > boardFlowTypes
+		}))
 		r.elapsed = time.Since(r.at)
 		return r
 	}
