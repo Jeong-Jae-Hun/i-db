@@ -154,10 +154,8 @@ func (b *Backend) table(ctx context.Context, dbName, table string) (*types.Table
 // OpenSQL 은 테이블 Enter 가 보내는 미리 보기 질의다(R68.1). path 는 "<db>/<테이블>" 이다.
 func OpenSQL(path string, limit int) string {
 	dbName, table, _ := strings.Cut(path, "/")
-	return fmt.Sprintf("SELECT * FROM %s.%s LIMIT %d", quoteIdent(dbName), quoteIdent(table), limit)
+	return fmt.Sprintf("SELECT * FROM %s.%s LIMIT %d", db.QuoteIdent(dbName), db.QuoteIdent(table), limit)
 }
-
-func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 // Open 은 테이블 미리 보기다. LIMIT 이 있어도 Athena 는 읽은 파일만큼 요금을 매기고, 파티션 테이블은 파티션 조건 없이
 // 여러 파티션을 열 수 있어 확인을 받는다(R68.1). 확인받은 통합은 OpenSQL 을 Force 로 Run 한다.

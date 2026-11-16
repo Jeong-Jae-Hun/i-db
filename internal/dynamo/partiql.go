@@ -1,6 +1,10 @@
 package dynamo
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+)
 
 // ─── PartiQL 낱말 ───
 //
@@ -284,5 +288,5 @@ func sortedStatement(toks []token, text, sk string, desc bool) (string, bool) {
 	if desc {
 		dir = "DESC"
 	}
-	return text[:toks[last].end] + ` ORDER BY "` + strings.ReplaceAll(sk, `"`, `""`) + `" ` + dir, true
+	return text[:toks[last].end] + " ORDER BY " + db.QuoteIdent(sk) + " " + dir, true
 }
