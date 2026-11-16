@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -57,26 +59,115 @@ func (m *model) loadRecent() {
 	}
 }
 
-// saveRecent 는 기억을 쓴다. 실패하면 이번 실행에서 기록을 끄고 한 번 알린다.
+// saveRecent 는 지금 기억의 사본을 떠 저장 고루틴에 넘긴다. 화면은 파일 잠금·쓰기를 기다리지 않는다.
+// 실패는 recentSavedMsg 로 와서 이번 실행에서 기록을 끄고 한 번 알린다.
 func (m *model) saveRecent() {
 	if m.recent == nil {
 		return
 	}
-	if err := m.recent.Save(); err != nil {
+	snap, err := m.recent.Snapshot()
+	if err != nil {
 		m.recent = nil
 		m.status = "최근 기록 저장 실패, 이번 실행에서 끔: " + err.Error()
+		return
+	}
+	if cmd := m.recentSaver.submit(snap); cmd != nil {
+		m.recentCmd = cmd
 	}
 }
 
-// saveRecentOnQuit 는 끝낼 때 트리 펼침을 남기고 기억을 쓴다. 화면을 닫은 뒤라 실패는 터미널에 알린다.
+// saveRecentOnQuit 는 끝낼 때 트리 펼침을 남기고 기억을 쓴다. recentFlushWait 까지만 기다린다.
+// 화면을 닫은 뒤라 실패는 터미널에 알린다.
 func (m *model) saveRecentOnQuit() {
 	if m.recent == nil {
 		return
 	}
 	m.snapshotTree()
-	if err := m.recent.Save(); err != nil {
+	m.saveRecent()
+	m.recentCmd = nil
+	if err := m.recentSaver.flush(recentFlushWait); err != nil {
 		m.quitNotes = append(m.quitNotes, "recent save failed: "+err.Error())
 	}
+}
+
+// recentSavedMsg 는 저장 고루틴이 할 일을 다 했다는 알림이다. err 는 그동안 난 첫 실패다.
+type recentSavedMsg struct{ err error }
+
+var (
+	// writeRecent 는 기억 쓰기다. 시험이 막히는 쓰기로 바꿔 화면이 쓰기를 기다리지 않는지 본다
+	writeRecent = (*recent.Snapshot).Write
+	// recentFlushWait 는 끝낼 때 남은 쓰기를 기다리는 시간이다. 잠금 기다림(recent.LockWait)과 쓰기 몫을 더했다
+	recentFlushWait = recent.LockWait + time.Second
+	errRecentFlush  = errors.New("recent save still running at quit")
+)
+
+// recentSaver 는 기억 쓰기를 한 번에 하나씩 화면 밖에서 한다. 쓰는 동안 들어온 사본은 가장 새 것 하나만 남겨 다음에 쓴다.
+type recentSaver struct {
+	mu   sync.Mutex
+	next *recent.Snapshot
+	idle chan struct{} // 돌고 있는 고루틴이 끝나면 닫힌다. 돌지 않으면 nil
+	err  error
+}
+
+// submit 은 snap 을 다음에 쓸 사본으로 둔다. 쓰는 고루틴이 없으면 띄우고, 그 끝을 recentSavedMsg 로 알릴 명령을 돌려준다.
+func (s *recentSaver) submit(snap *recent.Snapshot) tea.Cmd {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.next = snap
+	if s.idle != nil {
+		return nil
+	}
+	idle := make(chan struct{})
+	s.idle = idle
+	go s.run(idle)
+	return func() tea.Msg {
+		<-idle
+		return recentSavedMsg{err: s.takeErr()}
+	}
+}
+
+func (s *recentSaver) run(idle chan struct{}) {
+	defer close(idle)
+	for {
+		s.mu.Lock()
+		snap := s.next
+		s.next = nil
+		if snap == nil {
+			s.idle = nil
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		if err := writeRecent(snap); err != nil {
+			s.mu.Lock()
+			s.err, s.next, s.idle = err, nil, nil
+			s.mu.Unlock()
+			return
+		}
+	}
+}
+
+func (s *recentSaver) takeErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.err
+	s.err = nil
+	return err
+}
+
+// flush 는 돌고 있는 쓰기가 끝나기를 wait 까지 기다리고 그동안 난 실패를 돌려준다.
+func (s *recentSaver) flush(wait time.Duration) error {
+	s.mu.Lock()
+	idle := s.idle
+	s.mu.Unlock()
+	if idle != nil {
+		select {
+		case <-idle:
+		case <-time.After(wait):
+			return errRecentFlush
+		}
+	}
+	return s.takeErr()
 }
 
 // ─── 팔레트·찾기 ───

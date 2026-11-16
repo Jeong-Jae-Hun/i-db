@@ -57,7 +57,8 @@ type Snapshot struct {
 }
 
 // Cap 은 SQL 을 기록 줄처럼 앞 64KiB 로 자르고, 앞 SnapshotRows 행만 남기고, JSON 이 SnapshotBytes 를 넘지 않게 뒤 행과 글을 버린다.
-// 행·글을 버렸으면 Truncated 다. 행마다 크기를 더해 가며 자르므로 큰 결과도 한 번만 직렬화한다.
+// 행·글을 버렸으면 Truncated 다. 다 들어가면 그대로 두고, 버려야 하면 `"truncated":true` 를 먼저 달고 그 크기까지 넣어 잰다.
+// 행마다 크기를 더해 가며 자르므로 큰 결과도 한 번만 직렬화한다. JSON 크기는 json.Marshal 결과와 바이트까지 같게 센다.
 // 단, 열 이름 같은 머리만으로 상한을 넘으면 여기서는 줄이지 못하고 Write 가 ErrTooLarge 로 거절한다.
 func (s *Snapshot) Cap() {
 	s.SQL = capSQL(s.SQL)
@@ -66,22 +67,31 @@ func (s *Snapshot) Cap() {
 	}
 	rows := s.Rows
 	s.Rows = nil
-	head, _ := json.Marshal(s)
-	if budget := SnapshotBytes - len(head); len(s.Text) > budget/2 {
-		// 글은 JSON 이스케이프로 늘 수 있어 남은 몫의 반만 둔다
-		s.Text, s.Truncated = strings.ToValidUTF8(s.Text[:max(budget/2, 0)], ""), true
-		head, _ = json.Marshal(s)
-	}
-	size := len(head) + len(`,"rows":[]`)
+	// "rows" 필드는 `,"rows":[` + 행들(쉼표로 이음) + `]` 이라 행마다 (크기+1) 를 더하고 쉼표 하나를 뺀다. 행이 없으면 omitempty 로 빠진다
+	sizes, all := make([]int, len(rows)), len(`,"rows":[]`)-1
 	for i, r := range rows {
 		b, _ := json.Marshal(r)
-		if size+len(b)+1 > SnapshotBytes {
-			rows, s.Truncated = rows[:i], true
-			break
-		}
-		size += len(b) + 1
+		sizes[i] = len(b)
+		all += len(b) + 1
 	}
-	s.Rows = rows
+	head, _ := json.Marshal(s)
+	if !s.Truncated && (len(rows) == 0 && len(head) <= SnapshotBytes || len(head)+all <= SnapshotBytes) {
+		s.Rows = rows
+		return
+	}
+	s.Truncated = true
+	head, _ = json.Marshal(s)
+	if budget := SnapshotBytes - len(head); len(s.Text) > budget/2 {
+		// 글은 JSON 이스케이프로 늘 수 있어 남은 몫의 반만 둔다
+		s.Text = strings.ToValidUTF8(s.Text[:max(budget/2, 0)], "")
+		head, _ = json.Marshal(s)
+	}
+	size, n := len(head)+len(`,"rows":[]`)-1, 0
+	for n < len(sizes) && size+sizes[n]+1 <= SnapshotBytes {
+		size += sizes[n] + 1
+		n++
+	}
+	s.Rows = rows[:n]
 }
 
 // Results 는 사본 폴더다. 메서드는 동시에 불러도 된다. have 는 폴더에 있는 사본의 이름과 크기라

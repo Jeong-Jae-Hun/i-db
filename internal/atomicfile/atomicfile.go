@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // Write 는 data 를 path 에 바꿔 끼워 쓴다. pattern 은 os.CreateTemp 의 임시 파일 이름 꼴, perm 은 새 파일 권한이다.
@@ -40,4 +41,31 @@ func Lock(path string) (*os.File, error) {
 		return nil, errors.Join(fmt.Errorf("lock %s: %w", filepath.Base(path), err), f.Close())
 	}
 	return f, nil
+}
+
+// ErrLockTimeout 은 TryLock 이 기다린 시간 안에 잠금을 얻지 못했다는 뜻이다.
+var ErrLockTimeout = errors.New("lock wait timed out")
+
+// lockPoll 은 TryLock 이 잠금을 다시 시도하는 간격이다
+const lockPoll = 10 * time.Millisecond
+
+// TryLock 은 Lock 과 같되 wait 동안만 기다린다. 잠금을 쥔 프로세스가 멈춰도 부른 쪽이 끝없이 서지 않게 한다.
+func TryLock(path string, wait time.Duration) (*os.File, error) {
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		switch {
+		case err == nil:
+			return f, nil
+		case !errors.Is(err, syscall.EWOULDBLOCK):
+			return nil, errors.Join(fmt.Errorf("lock %s: %w", filepath.Base(path), err), f.Close())
+		case time.Now().After(deadline):
+			return nil, errors.Join(fmt.Errorf("lock %s: %w", filepath.Base(path), ErrLockTimeout), f.Close())
+		}
+		time.Sleep(lockPoll)
+	}
 }

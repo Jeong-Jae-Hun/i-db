@@ -883,9 +883,12 @@ type model struct {
 
 	// 최근 기록(R75). nil 이면 끈 것이다(DB_RECENT=0·쓰기 실패·main 이 읽기 전). recall 은 ↑↓ 로 고른 입력 기록 자리,
 	// treeDone 은 이번 실행에서 기억한 펼침을 되살린 접속 uuid 다
-	recent   *recent.Store
-	recall   recallState
-	treeDone map[string]bool
+	recent *recent.Store
+	recall recallState
+	// recentSaver 는 기억 쓰기를 화면 밖에서 줄 세운다. recentCmd 는 이번 Update 에서 띄운 쓰기의 끝을 알릴 명령이다
+	recentSaver recentSaver
+	recentCmd   tea.Cmd
+	treeDone    map[string]bool
 
 	w, h int
 }
@@ -2046,6 +2049,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	_, cmd := m.update(msg)
 	m.endRecall()
+	if m.recentCmd != nil {
+		cmd = tea.Batch(cmd, m.recentCmd)
+		m.recentCmd = nil
+	}
 	m.noteTip()
 	return m, cmd
 }
@@ -2313,6 +2320,12 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if t.viewConn == msg.conn {
 				t.grid.SetEnumTypes(set)
 			}
+		}
+		return m, nil
+	case recentSavedMsg:
+		if msg.err != nil && m.recent != nil {
+			m.recent = nil
+			m.status = "최근 기록 저장 실패, 이번 실행에서 끔: " + msg.err.Error()
 		}
 		return m, nil
 	case multiMsg:

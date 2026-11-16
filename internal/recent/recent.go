@@ -141,33 +141,70 @@ func readFile(path string) (file, error) {
 	return f, nil
 }
 
-// Save 는 파일을 다시 읽어 이 프로젝트 항목을 지금 것으로 바꾸고 동작·거르기 기록은 지금 것으로 덮어 쓴다.
-// 다른 프로젝트 항목은 지킨다. 같은 폴더 임시 파일(0600)에 다 쓴 뒤 바꿔 끼운다. 폴더는 0700 으로 만든다.
-// 다시 읽기부터 바꿔 끼우기까지는 옆 .lock 파일의 flock 으로 프로세스끼리 줄 세워 다른 프로젝트 항목을 덮지 않는다.
-// 단, 동시에 켠 다른 db 가 그사이 남긴 동작·거르기 기록은 나중에 쓴 쪽이 이긴다.
-func (s *Store) Save() (err error) {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+// LockWait 은 Write 가 recent.json.lock 을 기다리는 시간이다. 다른 db 가 잠금을 쥔 채 멈춰도 저장이 끝없이 서지 않게 한다.
+var LockWait = 2 * time.Second
+
+// Snapshot 은 Write 할 기억의 사본이다. 화면 고루틴에서 만들고 다른 고루틴에서 써도 Store 와 나누는 것이 없다.
+type Snapshot struct {
+	path, key string
+	data      []byte // snapData JSON
+}
+
+type snapData struct {
+	Actions map[string]Use `json:"actions"`
+	Filters []string       `json:"filters"`
+	Project *project       `json:"project"`
+}
+
+// Snapshot 은 지금 기억을 JSON 으로 떠 둔다.
+func (s *Store) Snapshot() (*Snapshot, error) {
+	data, err := json.Marshal(snapData{Actions: s.f.Actions, Filters: s.f.Filters, Project: s.p})
+	if err != nil {
+		return nil, err
+	}
+	return &Snapshot{path: s.path, key: s.key, data: data}, nil
+}
+
+// Save 는 Snapshot 을 바로 쓴다(시험·CLI 처럼 화면이 없을 때).
+func (s *Store) Save() error {
+	snap, err := s.Snapshot()
+	if err != nil {
 		return err
 	}
-	lock, err := atomicfile.Lock(s.path)
+	return snap.Write()
+}
+
+// Write 는 파일을 다시 읽어 이 프로젝트 항목을 사본 것으로 바꾸고 동작·거르기 기록은 사본 것으로 덮어 쓴다.
+// 다른 프로젝트 항목은 지킨다. 같은 폴더 임시 파일(0600)에 다 쓴 뒤 바꿔 끼운다. 폴더는 0700 으로 만든다.
+// 다시 읽기부터 바꿔 끼우기까지는 옆 .lock 파일의 flock(LockWait 까지 기다림)으로 프로세스끼리 줄 세워 다른 프로젝트 항목을 덮지 않는다.
+// 단, 동시에 켠 다른 db 가 그사이 남긴 동작·거르기 기록은 나중에 쓴 쪽이 이긴다.
+func (sn *Snapshot) Write() (err error) {
+	var d snapData
+	if err := json.Unmarshal(sn.data, &d); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(sn.path), 0o700); err != nil {
+		return err
+	}
+	lock, err := atomicfile.TryLock(sn.path, LockWait)
 	if err != nil {
 		return err
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
-	disk, err := readFile(s.path)
+	disk, err := readFile(sn.path)
 	if err != nil {
 		disk = file{} // 깨진 파일은 새로 쓴다
 	}
 	if disk.Projects == nil {
 		disk.Projects = map[string]*project{}
 	}
-	disk.Actions, disk.Filters = s.f.Actions, s.f.Filters
-	disk.Projects[s.key] = s.p
+	disk.Actions, disk.Filters = d.Actions, d.Filters
+	disk.Projects[sn.key] = d.Project
 	data, err := json.Marshal(disk)
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.path, ".recent-*.json", data, 0o600)
+	return atomicfile.Write(sn.path, ".recent-*.json", data, 0o600)
 }
 
 // ─── 동작·접속 (frecency) ───

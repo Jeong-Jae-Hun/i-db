@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/atomicfile"
 	"github.com/Jeong-Jae-Hun/i-db/internal/complete"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/recent"
@@ -38,9 +40,18 @@ func recentPath(t *testing.T) string {
 	return p
 }
 
-// reopen 은 같은 프로젝트를 다시 켠 모델이다(최근 기록은 프로젝트 경로로 가른다).
-func reopen(m *model) *model {
+// flushRecent 는 m 의 화면 밖 기억 쓰기가 끝나기를 기다린다.
+func flushRecent(t *testing.T, m *model) {
+	t.Helper()
+	must(t, m.recentSaver.flush(5*time.Second))
+}
+
+// reopen 은 같은 프로젝트를 다시 켠 모델이다(최근 기록은 프로젝트 경로로 가른다). 앞 모델의 쓰기를 기다린 뒤 읽는다.
+func reopen(t *testing.T, m *model) *model {
+	t.Helper()
+	flushRecent(t, m)
 	r := newModel(m.proj)
+	t.Cleanup(func() { _ = r.recentSaver.flush(5 * time.Second) })
 	r.prodLock = false
 	r.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	for i, c := range m.catalogs {
@@ -106,7 +117,7 @@ func TestRecentPalette_기록이_없으면_R40_순서_그대로이고_고른_동
 		t.Fatalf("팔레트 동작은 그대로 실행된다: tabs=%d", len(m.tabs))
 	}
 	// 다시 켜도 남는다
-	again := reopen(m)
+	again := reopen(t, m)
 	if list := emptyPalette(again); !strings.Contains(list[0], "Alt+P") {
 		t.Fatalf("파일에 남는다: %v", list[:2])
 	}
@@ -191,7 +202,7 @@ func TestRecentTable_열_폭_정렬_WHERE_를_기억하고_다시_열면_되살�
 		t.Fatalf("열 폭: %d", tab.grid.Width("status"))
 	}
 
-	r := reopen(m)
+	r := reopen(t, m)
 	rt := r.cur()
 	r.openTable(rt, 1, db.TableRef{Schema: "public", Table: "users"}, "", tableview.Options{})
 	sql := rt.tv.SQL()
@@ -236,6 +247,7 @@ func TestRecentTable_조건을_주고_연_보기는_사용자가_WHERE_를_적�
 	m.openTable(ft, 1, db.TableRef{Schema: "public", Table: "users"}, `"email" = 'fk@x.com'`, tableview.Options{})
 	tablePage(m, ft)
 	apply(m, ft, "O", "id desc")
+	flushRecent(t, m)
 	data, err := os.ReadFile(recentPath(t))
 	must(t, err)
 	if strings.Contains(string(data), "fk@x.com") {
@@ -257,6 +269,7 @@ func TestRecentTable_prod_는_정렬_WHERE_를_남기지_않고_열_폭만_되�
 	apply(m, tab, "w", "status = 'secret@x.com'")
 	apply(m, tab, "O", "email = 'order@x.com' desc")
 	m.Update(key(">"))
+	flushRecent(t, m)
 	data, err := os.ReadFile(recentPath(t))
 	must(t, err)
 	if strings.Contains(string(data), "secret@x.com") || strings.Contains(string(data), "order@x.com") {
@@ -272,7 +285,7 @@ func TestRecentTable_prod_는_정렬_WHERE_를_남기지_않고_열_폭만_되�
 		t.Fatalf("prod WHERE 입력은 기록이 없다: %q", tab.tv.Input())
 	}
 
-	r := reopen(m)
+	r := reopen(t, m)
 	rt := r.cur()
 	r.recent.SetView("p", "public", "users", "id DESC", "", false, time.Now()) // 예전 판이 남긴 prod 정렬도 쓰지 않는다
 	r.openTable(rt, 0, db.TableRef{Schema: "public", Table: "users"}, "", tableview.Options{})
@@ -489,7 +502,7 @@ func TestRecentTree_그룹은_켤_때_접고_접속_아래는_처음_펼칠_때_
 	m.recent.SetTree([]string{"s:p:public", "s:s:public", "s:gone:x"}, []string{"g:" + group})
 	must(t, m.recent.Save())
 
-	r := reopen(m)
+	r := reopen(t, m)
 	if r.roots[0].expanded {
 		t.Fatal("접은 그룹은 켤 때 접는다")
 	}
@@ -539,6 +552,7 @@ func TestRecentTree_저장소_노드는_기억하지_않아_다시_펼쳐도_요
 	registerFake(t, f)
 	m := sourceModel(t) // 접속 3 은 DynamoDB(R72 요금 대상)
 	m.loadRecent()
+	t.Cleanup(func() { _ = m.recentSaver.flush(5 * time.Second) })
 	cn := expandConn(t, m, 3)
 	drive(m, m.activate(childNamed(cn, "logs-2026"), true))
 	m.saveRecentOnQuit()
@@ -547,7 +561,7 @@ func TestRecentTree_저장소_노드는_기억하지_않아_다시_펼쳐도_요
 	}
 
 	// 예전·손으로 고친 파일에 저장소 아래 id 가 있어도 되살리며 목록을 부르지 않는다
-	r := reopen(m)
+	r := reopen(t, m)
 	t.Cleanup(func() { r.stop(); r.sources.close() })
 	r.recent.SetTree([]string{"f:s4:logs-2026", "s:s4:logs-2026", "q:s4"}, nil)
 	f.mu.Lock()
@@ -581,7 +595,7 @@ func TestRecent_DB_RECENT_0_이면_읽지도_쓰지도_않는다(t *testing.T) {
 	s, _ := recent.Load(recentPath(t), m.proj.Dir)
 	s.UseAction(actionKey("쿼리 탭", "ctrl+t"), time.Now())
 	must(t, s.Save())
-	r := reopen(m)
+	r := reopen(t, m)
 	if r.recent != nil || strings.Contains(emptyPalette(r)[0], "Ctrl+T") {
 		t.Fatal("기록이 있어도 쓰지 않는다")
 	}
@@ -598,6 +612,7 @@ func TestRecent_깨진_파일은_빈_기록으로_시작하고_0600_으로_다�
 		t.Fatalf("빈 기록으로 시작하고 알린다: %q", m.status)
 	}
 	palette(m, "Ctrl+T · 쿼리 탭")
+	flushRecent(t, m)
 	st, err := os.Stat(path)
 	must(t, err)
 	if st.Mode().Perm() != 0o600 {
@@ -611,13 +626,93 @@ func TestRecent_깨진_파일은_빈_기록으로_시작하고_0600_으로_다�
 func TestRecent_쓰기에_실패하면_이번_실행에서_끄고_한_번_알린다(t *testing.T) {
 	m := recentModel(t)
 	must(t, os.MkdirAll(recentPath(t), 0o700)) // 파일 자리에 폴더가 있어 바꿔 끼우기가 실패한다
-	palette(m, "Ctrl+T · 쿼리 탭")
+	drive(m, palette(m, "Ctrl+T · 쿼리 탭"))      // 실패는 쓰기 고루틴이 끝난 뒤 recentSavedMsg 로 온다
 	if m.recent != nil || !strings.Contains(m.status, "최근 기록 저장 실패, 이번 실행에서 끔") {
 		t.Fatalf("끄고 알린다: %q", m.status)
 	}
 	palette(m, "Ctrl+T · 쿼리 탭")
 	if len(m.tabs) != 3 {
 		t.Fatalf("동작은 계속된다: tabs=%d", len(m.tabs))
+	}
+}
+
+func TestRecentSave_다른_db_가_잠금을_쥐고_있어도_화면은_기다리지_않고_정해진_시간_뒤_끄고_알린다(t *testing.T) {
+	m := recentModel(t)
+	must(t, os.MkdirAll(filepath.Dir(recentPath(t)), 0o700))
+	lock, err := atomicfile.Lock(recentPath(t)) // 멈춘 다른 db 가 쥔 잠금
+	must(t, err)
+	defer lock.Close()
+	old := recent.LockWait
+	recent.LockWait = 200 * time.Millisecond
+	t.Cleanup(func() { recent.LockWait = old })
+
+	start := time.Now()
+	cmd := palette(m, "Ctrl+T · 쿼리 탭")
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("화면이 잠금을 기다렸다: %v", d)
+	}
+	if m.recent == nil || len(m.tabs) != 2 {
+		t.Fatal("동작은 바로 끝난다")
+	}
+	drive(m, cmd)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("잠금 기다림은 LockWait 까지다: %v", d)
+	}
+	if m.recent != nil || !strings.Contains(m.status, "최근 기록 저장 실패, 이번 실행에서 끔") || !strings.Contains(m.status, "timed out") {
+		t.Fatalf("끄고 알린다: %q", m.status)
+	}
+}
+
+// blockingWrites 는 writeRecent 를 release 가 닫힐 때까지 막고 실제로 쓰는 것으로 바꾼다. 쓰기를 시작하면 started 에 알리고 쓴 횟수를 센다.
+func blockingWrites(t *testing.T) (release, started chan struct{}, writes *atomic.Int32) {
+	t.Helper()
+	release, started, writes = make(chan struct{}), make(chan struct{}, 10), &atomic.Int32{}
+	old := writeRecent
+	writeRecent = func(s *recent.Snapshot) error {
+		started <- struct{}{}
+		<-release
+		writes.Add(1)
+		return s.Write()
+	}
+	t.Cleanup(func() { writeRecent = old })
+	return release, started, writes
+}
+
+func TestRecentSave_쓰는_동안_들어온_저장은_가장_새_것_하나로_합쳐_차례로_쓴다(t *testing.T) {
+	m := recentModel(t)
+	release, started, writes := blockingWrites(t)
+	m.noteAction("a")
+	<-started // 첫 쓰기가 막힌 동안 셋이 더 온다
+	m.noteAction("b")
+	m.noteAction("c")
+	m.noteAction("d")
+	close(release)
+	flushRecent(t, m)
+	if n := writes.Load(); n != 2 {
+		t.Fatalf("첫 쓰기와 그 사이 모인 마지막 사본만 쓴다: %d", n)
+	}
+	again, err := recent.Load(recentPath(t), m.proj.Dir)
+	must(t, err)
+	if got := again.TopActions(time.Now(), 10); len(got) != 4 {
+		t.Fatalf("마지막 사본이 다 들어 있다: %v", got)
+	}
+}
+
+func TestRecentSave_끝낼_때_쓰기가_멈춰_있으면_정해진_시간만_기다리고_알린다(t *testing.T) {
+	m := recentModel(t)
+	release, _, _ := blockingWrites(t)
+	t.Cleanup(func() { close(release); _ = m.recentSaver.flush(5 * time.Second) }) // writeRecent 를 되돌리기 전에 쓰기를 끝낸다
+	old := recentFlushWait
+	recentFlushWait = 100 * time.Millisecond
+	t.Cleanup(func() { recentFlushWait = old })
+	m.noteAction("a")
+	start := time.Now()
+	m.saveRecentOnQuit()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("끝내기가 멈춘 쓰기를 끝없이 기다렸다: %v", d)
+	}
+	if !slices.ContainsFunc(m.quitNotes, func(n string) bool { return strings.Contains(n, "recent save failed") }) {
+		t.Fatalf("터미널에 알린다: %v", m.quitNotes)
 	}
 }
 

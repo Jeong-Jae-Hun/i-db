@@ -265,3 +265,36 @@ func TestResults_큰_SQL_은_기록처럼_잘라_상한에_맞추고_머리만�
 		t.Fatalf("파일도 없다: %v", err)
 	}
 }
+
+// exactSnapshot 는 JSON 이 정확히 size 바이트인 사본이다. 마지막 행 칸 길이로 맞춘다.
+func exactSnapshot(t *testing.T, size int) Snapshot {
+	t.Helper()
+	s := Snapshot{ID: "20261116-101530-a3f9c1", SQL: "select 1", Rows: rowsOf(260, 4000), RowCount: 260}
+	b, _ := json.Marshal(s)
+	last := &s.Rows[len(s.Rows)-1][0]
+	*last = strings.Repeat("x", len(*last)+size-len(b))
+	if b, _ := json.Marshal(s); len(b) != size {
+		t.Fatalf("맞춘 크기: %d", len(b))
+	}
+	return s
+}
+
+func TestResults_상한에_꼭_맞는_사본은_그대로_두고_넘으면_잘림_표시까지_재어_상한_안에_남긴다(t *testing.T) {
+	s := exactSnapshot(t, SnapshotBytes)
+	s.Cap()
+	if s.Truncated || len(s.Rows) != 260 {
+		t.Fatalf("꼭 맞으면 그대로: %v %d", s.Truncated, len(s.Rows))
+	}
+	r := openResults(t)
+	for d := range 40 {
+		s := exactSnapshot(t, SnapshotBytes+d)
+		s.ID = NewID(time.Now().Add(time.Duration(d) * time.Second))
+		if err := r.Write(s); err != nil {
+			t.Fatalf("+%d바이트: %v", d, err)
+		}
+		got, err := r.Read(s.ID)
+		if err != nil || (d > 0) != got.Truncated || (d == 0) != (len(got.Rows) == 260) {
+			t.Fatalf("+%d바이트: truncated=%v rows=%d err=%v", d, got.Truncated, len(got.Rows), err)
+		}
+	}
+}

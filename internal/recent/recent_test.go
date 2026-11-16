@@ -179,6 +179,9 @@ func must(t *testing.T, err error) {
 
 func TestSave_여러_프로세스가_동시에_써도_다른_프로젝트_항목을_잃지_않는다(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db", "recent.json")
+	old := LockWait
+	LockWait = time.Minute // 시험 기계가 느려도 줄을 서다 포기하지 않게
+	t.Cleanup(func() { LockWait = old })
 	const n = 8
 	stores := make([]*Store, n)
 	for i := range stores {
