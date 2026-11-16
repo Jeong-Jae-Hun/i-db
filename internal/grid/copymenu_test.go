@@ -2,6 +2,7 @@ package grid
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -169,5 +170,18 @@ func TestCopyMenu_10MiB_를_넘을_결과는_만들기_전에_멈춘다(t *testi
 	}
 	if a := m.CopyWith(CopyChoice{TargetRow, FormatTSV}); a.Copy == nil {
 		t.Fatal("한 행은 그대로 복사한다")
+	}
+}
+
+func TestCopyMenu_INSERT_크기는_선택한_열이_아니라_행_전체로_잰다(t *testing.T) {
+	big := strings.Repeat("x", 1<<20)
+	r := &db.Result{Cols: []string{"id", "body"}, Origin: &db.Origin{Table: peopleTable, PK: []string{"id"}, Cols: []string{"id", "body"}}}
+	for i := range 11 {
+		r.Rows = append(r.Rows, []string{strconv.Itoa(i), big})
+	}
+	m := newGrid(r, [2]int{80, 10})
+	m, _ = press(m, "V", "G")
+	if a := m.CopyWith(CopyChoice{TargetSelection, FormatInsert}); a.Copy != nil || !strings.HasPrefix(a.Status, "너무 커서") {
+		t.Fatalf("id 열만 골라도 INSERT 는 body 까지 넣는다: copy=%v %q", a.Copy != nil, a.Status)
 	}
 }

@@ -93,10 +93,18 @@ func (m Model) CopyWith(c CopyChoice) Action {
 		r0, r1, c0, c1 = 0, len(m.view)-1, m.col, m.col
 	}
 	// 다 만든 뒤 clipboard.Write 가 거절하면 그 사이 화면이 멈추고 큰 버퍼를 잡는다. 칸 길이로 먼저 어림해 만들기 전에 멈춘다
-	size := 0
+	// INSERT 는 행 전체, INSERT·IN 은 DB 값으로 만들므로 같은 범위·값으로 잰다
+	size, sc0, sc1 := 0, c0, c1
+	if c.Format == FormatInsert {
+		sc0, sc1 = 0, len(m.res.Cols)-1
+	}
 	for vi := r0; vi <= r1 && size <= clipboard.MaxBytes; vi++ {
-		row := m.shown(m.view[vi])
-		for col := c0; col <= c1; col++ {
+		i := m.view[vi]
+		row := m.shown(i)
+		if (c.Format == FormatInsert || c.Format == FormatIN) && i < len(m.res.Rows) {
+			row = m.res.Rows[i]
+		}
+		for col := sc0; col <= sc1; col++ {
 			size += len(cellOf(row, col)) + 1
 		}
 	}
