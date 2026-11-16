@@ -106,13 +106,13 @@ pub fn parses_float(s: &str) -> bool {
     lower.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
-/// `0x` 뒤 16진 가수와 반드시 있는 `p` 지수를 읽는다.
+/// `0x` 뒤 16진 가수와 반드시 있는 `p` 지수를 읽는다. 지수 부호는 하나만 받는다.
 fn parse_hex_float(s: &str) -> Option<f64> {
     let (mant, exp) = s.split_once('p')?;
-    let exp = exp.strip_prefix('+').unwrap_or(exp);
-    let (neg_exp, exp_digits) = match exp.strip_prefix('-') {
-        Some(d) => (true, d),
-        None => (false, exp),
+    let (neg_exp, exp_digits) = match exp.as_bytes().first() {
+        Some(b'-') => (true, &exp[1..]),
+        Some(b'+') => (false, &exp[1..]),
+        _ => (false, exp),
     };
     if exp_digits.is_empty() || !exp_digits.bytes().all(|c| c.is_ascii_digit()) || mant.matches('.').count() > 1 {
         return None;
@@ -125,9 +125,22 @@ fn parse_hex_float(s: &str) -> Option<f64> {
     for c in int.chars().chain(frac.chars()) {
         v = v * 16.0 + c.to_digit(16)? as f64;
     }
-    let e: i64 = exp_digits.parse().unwrap_or(i64::MAX).min(100_000);
-    let e = if neg_exp { -e } else { e } - 4 * frac.len() as i64;
-    Some(v * 2f64.powi(e.clamp(-100_000, 100_000) as i32))
+    // 가수가 0 이면 지수와 상관없이 0 이다(0 × 2^큰수 를 계산하면 NaN 이 된다)
+    if v == 0.0 {
+        return Some(0.0);
+    }
+    let e: i64 = exp_digits.parse::<i64>().unwrap_or(i64::MAX).min(1 << 20);
+    let mut e = if neg_exp { -e } else { e } - 4 * frac.len() as i64;
+    // 한 번에 2^e 를 만들면 중간에 넘치거나 0 이 되므로 나눠 곱한다
+    while e > 1000 {
+        v *= 2f64.powi(1000);
+        e -= 1000;
+    }
+    while e < -1000 {
+        v *= 2f64.powi(-1000);
+        e += 1000;
+    }
+    Some(v * 2f64.powi(e as i32))
 }
 
 /// Go `time.ParseDuration` 을 그대로 옮겼다. 나노초 미만은 버리고, int64 를 넘으면 None 이다.
@@ -336,6 +349,16 @@ mod tests {
             ("-1e", false),
             ("+0x10", false),
             ("-1_0", true),
+            ("+0x1p+-2", false),
+            ("+0x0p1024", true),
+            ("0x1p1023", true),
+            ("0x1p1024", false),
+            ("0x.8p1025", false),
+            ("0x1p-2000", true),
+            ("-0x1.fffffffffffffp1023", true),
+            ("0xp1", false),
+            ("0x1.p1", true),
+            ("0x_1p1", true),
             ("=SUM(A1)", false),
             ("-", false),
         ];

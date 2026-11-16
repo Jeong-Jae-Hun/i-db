@@ -673,7 +673,10 @@ impl Results {
         // Go json.Decoder 처럼 첫 값만 읽고 뒤는 보지 않는다
         match serde_json::Deserializer::from_reader(r).into_iter::<Snapshot>().next() {
             Some(Ok(s)) => Ok(s),
-            Some(Err(e)) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("read snapshot {id}: {e}"))),
+            Some(Err(e)) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("read snapshot {id}: {}", crate::gojson::json_error(&e)),
+            )),
             None => Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("read snapshot {id}: EOF"))),
         }
     }
@@ -1273,6 +1276,17 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap(); // umask 와 상관없이 넓게 둔다
         Results::open(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[test]
+    fn 깨진_사본을_읽은_오류에는_잘못_든_값이_나오지_않는다() {
+        let (_d, r) = open_results();
+        let id = new_id(GoTime::now());
+        let mut zw = GzEncoder::new(Vec::new(), Compression::default());
+        zw.write_all(br#"{"id":"x","elapsed":"secret-pw-9"}"#).unwrap();
+        fs::write(r.path(&id), zw.finish().unwrap()).unwrap();
+        let msg = r.read(&id).unwrap_err().to_string();
+        assert!(msg.starts_with("read snapshot ") && !msg.contains("secret"), "{msg}");
     }
 
     #[test]
