@@ -143,7 +143,8 @@ fn read_file(path: &Path) -> io::Result<File> {
     if blank(&data) {
         return Ok(File::default());
     }
-    let f: Option<File> = serde_json::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let f: Option<File> =
+        serde_json::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, crate::gojson::json_error(&e)))?;
     Ok(f.unwrap_or_default())
 }
 

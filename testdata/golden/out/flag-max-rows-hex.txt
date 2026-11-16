@@ -1,0 +1,16 @@
+args: ["conns","-p","{P}","--format","tsv","--max-rows","0x_10"]
+exit: 0
+--- stdout
+name	group	kind	env	host	db	source	folder
+app-stg	grp	postgresql	stg	127.0.0.1	app	datagrip	grp
+app-prod	grp	postgresql	prod	127.0.0.1	app	datagrip	grp
+app-stg-redis	grp	redis	stg	127.0.0.1	0	datagrip	grp
+app-prod-redis	grp	redis	prod	127.0.0.1	0	datagrip	grp
+nogroup-stg		postgresql	stg	127.0.0.1	other	datagrip	기타
+한글-stg	팀	postgresql	stg	localhost	app	datagrip	팀
+logs-stg	mon	loki	stg	http://127.0.0.1:1		db	mon
+search-stg	data	opensearch	stg	http://127.0.0.1:1		db	data
+metrics-prod	mon	prometheus	prod	http://127.0.0.1:1		db	mon
+ddb-stg	aws	dynamodb	stg			db	aws
+aws-stg	aws	aws	stg			db	aws
+--- stderr

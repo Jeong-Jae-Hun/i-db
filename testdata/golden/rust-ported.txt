@@ -20,3 +20,13 @@ conns-tsv
 conns-table
 conns-csv
 query-bad-format
+flag-max-rows-underscore
+flag-max-rows-hex
+flag-max-rows-bad
+flag-timeout-sub-ns
+flag-timeout-overflow
+flag-timeout-negative
+flag-bool-value
+flag-undefined
+flag-needs-arg
+flag-help

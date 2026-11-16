@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use crate::atomicfile;
-use crate::history::{GoTime, blank, go_json, is_false, is_zero_int, mkdir_all, null_default, state_file};
+use crate::history::{GoTime, blank, go_json, is_false, is_zero_int, mkdir_all, null_default, null_list_values, state_file};
 
 /// 프로젝트 하나의 편집기 글 상한. 큰 덤프를 붙여 둔 탭 몇 개로 끝낼 때마다 수십 MB 를 다시 쓰지 않게 한다.
 /// 넘으면 활성 탭부터 차례로 넣고 들어가지 않는 탭은 글을 비우고 dropped 로 표시한다. 되살릴 때 그 수를 알린다.
@@ -74,7 +74,7 @@ pub struct State {
     #[serde(serialize_with = "empty_as_null", deserialize_with = "null_default")]
     pub tabs: Vec<Tab>,
     /// 접속 uuid → 그 접속에서 연·실행한·저장한 파일, 최근 것부터(R44)
-    #[serde(skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "null_default")]
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "null_list_values")]
     pub recent: BTreeMap<String, Vec<Recent>>,
     pub panes: Panes,
     /// 최근 연 테이블 보기, 최근 것부터(R40.3). 명령 팔레트가 맨 위에 보인다
@@ -288,7 +288,13 @@ fn read_all(path: &Path) -> io::Result<Option<BTreeMap<String, State>>> {
     if blank(&data) {
         return Ok(None);
     }
-    serde_json::from_slice(&data).map_err(|e| corrupt(format!("session file is corrupt: {}: {e}", path.display())))
+    serde_json::from_slice(&data).map_err(|e| {
+        corrupt(format!(
+            "session file is corrupt: {}: {}",
+            path.display(),
+            crate::gojson::json_error(&e)
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -650,5 +656,12 @@ mod tests {
         // 다시 쓰면 Go 판과 바이트가 같다
         save(&path, p("/proj/a"), &a).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), GO_SESSION);
+    }
+
+    #[test]
+    fn 접속별_최근_목록이_null_이어도_세션을_깨진_것으로_보지_않는다() {
+        // Go State{Recent: map[string][]Recent{"c": nil}} 이 쓰는 꼴이다
+        let st: State = serde_json::from_str(r#"{"active":0,"tabs":null,"recent":{"c":null},"panes":{}}"#).unwrap();
+        assert_eq!(st.recent.get("c"), Some(&Vec::new()));
     }
 }

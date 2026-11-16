@@ -152,8 +152,12 @@ fn read_file(path: &Path) -> io::Result<Vec<Fav>> {
         return Ok(Vec::new());
     }
     // 깨진 파일 위에 새로 쓰면 남은 즐겨찾기를 다 잃으므로 읽기·쓰기 모두 멈춘다
-    let raw: Option<Vec<Fav>> =
-        serde_json::from_slice(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("read {}: {e}", path.display())))?;
+    let raw: Option<Vec<Fav>> = serde_json::from_slice(&data).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("read {}: {}", path.display(), crate::gojson::json_error(&e)),
+        )
+    })?;
     let by_name: BTreeMap<String, Fav> = raw.unwrap_or_default().into_iter().map(|f| (f.name.clone(), f)).collect();
     Ok(by_name.into_values().collect())
 }

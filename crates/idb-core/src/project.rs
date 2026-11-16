@@ -500,7 +500,7 @@ fn load_db_conns(p: &mut Project, env: &HashMap<String, String>) -> Result<(), L
     let path = p.dir.join(".dbtui").join("connections.json");
     let entries: Vec<ConnEntry> = match fs::read(&path) {
         Ok(b) => serde_json::from_slice::<Option<Vec<ConnEntry>>>(&b)
-            .map_err(|e| LoadError(format!("read {}: {e}", path.display())))?
+            .map_err(|e| LoadError(format!("read {}: {}", path.display(), crate::gojson::json_error(&e))))?
             .unwrap_or_default(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(LoadError(format!("read {}: {e}", path.display()))),
@@ -629,7 +629,7 @@ fn load_folders(p: &mut Project) {
         Ok(b) => match serde_json::from_slice::<Option<HashMap<String, String>>>(&b) {
             Ok(m) => m.unwrap_or_default(),
             Err(e) => {
-                p.warnings.push(format!("folders.json: {e}"));
+                p.warnings.push(format!("folders.json: {}", crate::gojson::json_error(&e)));
                 return;
             }
         },

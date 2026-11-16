@@ -6,6 +6,7 @@ mod danger;
 mod explain;
 mod readonly;
 
+pub(crate) use crate::textutil::{go_lower, go_upper};
 pub use danger::{danger_of, danger_of_redis, hidden_write_of};
 pub use explain::{ExplainOpt, explain_sql, modify_table_rows};
 pub use readonly::{ReadOnlyError, check_read_only_sql};
@@ -395,30 +396,6 @@ pub(crate) fn has_analyze(s: &str) -> bool {
 }
 
 // ─── Go 와 같은 대소문자 ───
-
-/// Go `strings.ToLower` 와 같다. 글자마다 단순 소문자 하나로 바꾼다(İ 는 i, 끝 Σ 도 σ).
-pub(crate) fn go_lower(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '\u{130}' => 'i',
-            c => c.to_lowercase().next().unwrap_or(c),
-        })
-        .collect()
-}
-
-/// Go `strings.ToUpper` 에 가깝다. 대문자가 여러 글자로 늘어나는 글자(ß·합자 등)는 Go 처럼 그대로 둔다.
-/// 결과는 ASCII 명령·형식 이름과만 대조해서 늘어나지 않는 글자만 맞으면 된다.
-pub(crate) fn go_upper(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            let mut up = c.to_uppercase();
-            match (up.next(), up.next()) {
-                (Some(u), None) => u,
-                _ => c,
-            }
-        })
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {

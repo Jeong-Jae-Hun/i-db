@@ -2,6 +2,7 @@
 //! Go `internal/history` 와 같은 파일(경로·줄 모양·권한·잠금)을 읽고 써서 두 판을 바꿔 써도 기록을 잃지 않는다.
 //! 다른 상태 파일(session·paramstore·recent·favorites)이 같이 쓰는 Go 호환 JSON 도움도 여기 둔다.
 
+use crate::textutil::go_lower;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::ffi::OsString;
@@ -151,6 +152,18 @@ pub(crate) fn null_default<'de, D: Deserializer<'de>, T: Deserialize<'de> + Defa
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// 값 목록이 `null` 인 맵 항목을 빈 목록으로 읽는다(Go `map[string][]T{"k": nil}` → `{"k":null}`).
+pub(crate) fn null_list_values<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<BTreeMap<String, Vec<T>>, D::Error> {
+    let m: Option<BTreeMap<String, Option<Vec<T>>>> = Option::deserialize(d)?;
+    Ok(m.unwrap_or_default().into_iter().map(|(k, v)| (k, v.unwrap_or_default())).collect())
+}
+
+/// `null` 인 행을 빈 행으로 읽는다(Go `[][]string{nil}` → `[null]`).
+pub(crate) fn null_rows<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Vec<String>>, D::Error> {
+    let rows: Option<Vec<Option<Vec<String>>>> = Option::deserialize(d)?;
+    Ok(rows.unwrap_or_default().into_iter().map(Option::unwrap_or_default).collect())
+}
+
 /// 값이 `null` 인 항목은 빼고 맵을 읽는다. Go 는 nil 포인터 값을 `null` 로 쓴다.
 pub(crate) fn skip_null_values<'de, D: Deserializer<'de>, V: Deserialize<'de>>(d: D) -> Result<BTreeMap<String, V>, D::Error> {
     let m: Option<BTreeMap<String, Option<V>>> = Option::deserialize(d)?;
@@ -168,11 +181,6 @@ pub(crate) fn is_zero_int(n: &i64) -> bool {
 /// Go `bytes.TrimSpace(data)` 가 비는지다.
 pub(crate) fn blank(data: &[u8]) -> bool {
     std::str::from_utf8(data).map_or_else(|_| data.trim_ascii().is_empty(), |s| s.trim().is_empty())
-}
-
-/// Go `strings.ToLower` 처럼 글자마다 소문자로 바꾼다. str::to_lowercase 의 낱말 끝 시그마 규칙은 Go 에 없다.
-pub(crate) fn go_lower(s: &str) -> String {
-    s.chars().flat_map(char::to_lowercase).collect()
 }
 
 /// s 를 앞 max 바이트까지 남긴다. 바이트로 자른 끝의 깨진 UTF-8 조각은 버린다(Go `strings.ToValidUTF8(s[:max], "")`).
@@ -507,7 +515,7 @@ pub struct Snapshot {
     pub cols: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "null_default")]
     pub types: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "null_default")]
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "null_rows")]
     pub rows: Vec<Vec<String>>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub text: String,
@@ -784,6 +792,30 @@ mod tests {
         let (_d, _s, path) = open_temp();
         assert_eq!(mode(path.parent().unwrap()), 0o700);
         assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn 검색은_Go_처럼_İ_를_i_로_바꿔_찾는다() {
+        let (_d, s, _path) = open_temp();
+        s.append(Entry {
+            conn: "a".into(),
+            sql: "select İD from t".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let got = s.list(&Filter {
+            query: "id".into(),
+            ..Default::default()
+        });
+        assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn 사본의_null_행은_빈_행으로_읽는다() {
+        // Go [][]string{nil} 은 "rows":[null] 로 쓴다
+        let raw = r#"{"id":"x","time":"0001-01-01T00:00:00Z","conn":"c","sql":"s","rows":[null,["1"]],"elapsed":0,"row_count":2}"#;
+        let snap: Snapshot = serde_json::from_str(raw).unwrap();
+        assert_eq!(snap.rows, vec![Vec::<String>::new(), vec!["1".to_string()]]);
     }
 
     #[test]

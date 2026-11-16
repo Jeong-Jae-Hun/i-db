@@ -6,9 +6,10 @@ use std::path::Path;
 use idb_core::project::{self, Conn, Project, SOURCE_DB, folder_of, go_quote};
 use idb_core::result::QueryResult;
 
-use crate::goflag::{FlagDef, FlagSet, FlagType, ParseError, Parsed, go_duration_string, parse_go_duration};
+use crate::goflag::{FlagDef, FlagSet, FlagType, ParseError, Parsed};
 use crate::output::{self, CliResult};
 use crate::usage_text::{CONN_USAGE, HISTORY_USAGE, UPDATE_USAGE};
+use idb_core::gostrconv::{duration_string, parse_duration};
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERR: i32 = 1;
@@ -181,7 +182,7 @@ pub struct Opts {
     pub table: String,
     pub max_rows: i64,
     pub max_rows_set: bool,
-    pub timeout_ns: i128,
+    pub timeout_ns: i64,
     pub prod: bool,
     pub write: bool,
     pub force: bool,
@@ -190,8 +191,8 @@ pub struct Opts {
     pub params: Vec<(String, String)>,
     /// status 의 -c, flows 의 -f(여러 번)
     pub conns: Vec<String>,
-    pub since_ns: Option<i128>,
-    pub until_ns: Option<i128>,
+    pub since_ns: Option<i64>,
+    pub until_ns: Option<i64>,
     pub args: Vec<String>,
 }
 
@@ -208,14 +209,14 @@ fn check_value(name: &str, v: &str) -> Result<(), String> {
 }
 
 /// --since·--until 값이다. Go 기간 꼴(1h·15m)에 더해 날짜(7d)를 받는다. 날짜는 10년까지다.
-fn parse_day_duration(s: &str) -> Result<i128, String> {
+fn parse_day_duration(s: &str) -> Result<i64, String> {
     if let Some(n) = s.strip_suffix('d') {
         return match project::go_atoi(n) {
-            Some(days) if (0..=MAX_FLAG_DAYS).contains(&days) => Ok(days as i128 * 24 * 3600 * 1_000_000_000),
+            Some(days) if (0..=MAX_FLAG_DAYS).contains(&days) => Ok(days * 24 * 3600 * 1_000_000_000),
             _ => Err(format!("invalid duration {} (days 0..{MAX_FLAG_DAYS})", go_quote(s))),
         };
     }
-    match parse_go_duration(s) {
+    match parse_duration(s) {
         Some(ns) if ns >= 0 => Ok(ns),
         _ => Err(format!("invalid duration {}", go_quote(s))),
     }
@@ -258,7 +259,7 @@ fn flag_set(cmd: &str) -> FlagSet {
         "timeout",
         FlagType::Duration,
         "전체 시간 제한",
-        Some(go_duration_string(std::time::Duration::from_secs(30))),
+        Some(duration_string(30_000_000_000)),
     );
     add("prod", FlagType::Bool, "prod 접속 허용(읽기만)", None);
     if cmd_takes(cmd, "write") {

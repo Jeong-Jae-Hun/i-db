@@ -65,7 +65,8 @@ struct PlanRoot {
 /// PostgreSQL 13 이하는 상속·파티션 테이블을 바꿀 때 자식마다 Member 자식을 두므로 Outer 가 없으면 Member 의 합이다.
 /// ModifyTable 자신의 Plan Rows 는 RETURNING 이 없으면 0 이라 쓰지 않는다. InitPlan·SubPlan 자식은 건너뛴다.
 pub fn modify_table_rows(raw: &[u8]) -> Result<i64, String> {
-    let plans: Option<Vec<PlanRoot>> = serde_json::from_slice(raw).map_err(|e| format!("parse EXPLAIN JSON: {e}"))?;
+    let plans: Option<Vec<PlanRoot>> =
+        serde_json::from_slice(raw).map_err(|e| format!("parse EXPLAIN JSON: {}", crate::gojson::json_error(&e)))?;
     let plans = plans.unwrap_or_default();
     let top = match plans.as_slice() {
         [PlanRoot { plan: Some(p) }] if p.node_type.as_deref() == Some("ModifyTable") => p,

@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 //! Go 판이 만든 골든 출력(testdata/golden/out)과 db-rs 출력을 바이트로 비교한다.
 //! 형식·자리 규칙은 레포 루트 golden_test.go 머리 주석과 같다. rust-ported.txt 에 적은 케이스만 통과를 요구하고,
 //! 적지 않은 케이스가 이미 맞으면 옮겨 적으라고 알린다.
@@ -28,13 +29,14 @@ fn live_vars() -> Option<HashMap<&'static str, String>> {
     let addr = std::env::var("DBTUI_TEST_REDIS_ADDR").ok()?;
     let u = url::Url::parse(&raw).ok()?;
     let (rhost, rport) = addr.rsplit_once(':')?;
-    // Go url.QueryEscape 와 같게 비밀번호를 다시 인코딩한다(파일에는 인코딩된 값이 든다)
-    let pw = u.password().unwrap_or_default().to_string();
+    // Go 러너처럼 URL 의 값을 풀었다가 비밀번호만 url.QueryEscape 로 다시 싼다(.env 로더가 QueryUnescape 로 읽는다)
+    let unescape = |s: &str| percent_decode(s);
+    let pw = go_query_escape(&unescape(u.password().unwrap_or_default()));
     Some(HashMap::from([
         ("PG_HOST", u.host_str()?.to_string()),
         ("PG_PORT", u.port().map(|p| p.to_string()).unwrap_or_default()),
-        ("PG_DB", u.path().trim_start_matches('/').to_string()),
-        ("PG_USER", u.username().to_string()),
+        ("PG_DB", unescape(u.path().trim_start_matches('/'))),
+        ("PG_USER", unescape(u.username())),
         ("PG_PASSWORD", pw),
         ("REDIS_HOST", rhost.to_string()),
         ("REDIS_PORT", rport.to_string()),
@@ -75,8 +77,41 @@ fn normalize(s: &str, dir: &str) -> String {
     out
 }
 
+/// URL 의 %XX 를 푼다(Go url.URL 의 Path·Username 처럼 이미 풀린 값을 얻는다).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Go url.QueryEscape: 영숫자와 -_.~ 만 두고 공백은 +, 나머지는 %XX.
+fn go_query_escape(s: &str) -> String {
+    let mut out = String::new();
+    for &c in s.as_bytes() {
+        match c {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(c as char),
+            b' ' => out.push('+'),
+            c => out.push_str(&format!("%{c:02X}")),
+        }
+    }
+    out
+}
+
 #[test]
-fn golden() {
+fn 골든_케이스의_출력이_Go_판과_바이트로_같다() {
     let root = root();
     let golden = root.join("testdata/golden");
     let cases: Vec<Case> = serde_json::from_slice(&fs::read(golden.join("cases.json")).unwrap()).unwrap();

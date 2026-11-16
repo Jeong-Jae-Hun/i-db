@@ -38,9 +38,29 @@ pub fn str_array<'a>(out: &mut String, items: impl IntoIterator<Item = &'a str>)
     out.push(']');
 }
 
+/// serde_json 오류를 값 없는 글로 바꾼다. serde 는 `invalid type: string "원문"` 처럼 잘못 든 값을 오류에 싣는데,
+/// 설정·상태 파일에 비밀값을 잘못 붙여 넣으면 그 값이 stderr·상태 줄로 나간다. 종류와 위치만 남긴다.
+pub fn json_error(e: &serde_json::Error) -> String {
+    let kind = match e.classify() {
+        serde_json::error::Category::Io => "io error",
+        serde_json::error::Category::Syntax => "invalid JSON syntax",
+        serde_json::error::Category::Data => "unexpected JSON value type",
+        serde_json::error::Category::Eof => "unexpected end of JSON input",
+    };
+    format!("{kind} at line {} column {}", e.line(), e.column())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn JSON_오류에는_잘못_든_값이_나오지_않는다() {
+        let e = serde_json::from_str::<Vec<i64>>(r#"["secret-pw-9"]"#).unwrap_err();
+        let msg = json_error(&e);
+        assert!(!msg.contains("secret"), "{msg}");
+        assert_eq!(msg, "unexpected JSON value type at line 1 column 14");
+    }
 
     #[test]
     fn go_와_같은_이스케이프() {

@@ -410,6 +410,132 @@
   ]
  },
  {
+  "name": "flag-max-rows-underscore",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--max-rows",
+   "1_000"
+  ]
+ },
+ {
+  "name": "flag-max-rows-hex",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--max-rows",
+   "0x_10"
+  ]
+ },
+ {
+  "name": "flag-max-rows-bad",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--max-rows",
+   "1__0"
+  ]
+ },
+ {
+  "name": "flag-timeout-sub-ns",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--timeout",
+   "0.5ns"
+  ]
+ },
+ {
+  "name": "flag-timeout-overflow",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--timeout",
+   "2562048h"
+  ]
+ },
+ {
+  "name": "flag-timeout-negative",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--timeout",
+   "-1s"
+  ]
+ },
+ {
+  "name": "flag-bool-value",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--prod=maybe"
+  ]
+ },
+ {
+  "name": "flag-undefined",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "--write"
+  ]
+ },
+ {
+  "name": "flag-needs-arg",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "-c"
+  ]
+ },
+ {
+  "name": "flag-help",
+  "project": "offline",
+  "args": [
+   "conns",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv",
+   "-h"
+  ]
+ },
+ {
   "name": "live-setup-drop",
   "project": "live",
   "args": [

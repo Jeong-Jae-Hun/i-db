@@ -107,8 +107,13 @@ fn read_all(path: &Path) -> io::Result<Option<All>> {
         return Ok(None);
     }
     // Go 는 프로젝트 값이 null 이면 빈 항목으로 읽는다
-    let all: Option<BTreeMap<String, Option<BTreeMap<String, String>>>> =
-        serde_json::from_slice(&data).map_err(|e| corrupt(format!("params file is corrupt: {}: {e}", path.display())))?;
+    let all: Option<BTreeMap<String, Option<BTreeMap<String, String>>>> = serde_json::from_slice(&data).map_err(|e| {
+        corrupt(format!(
+            "params file is corrupt: {}: {}",
+            path.display(),
+            crate::gojson::json_error(&e)
+        ))
+    })?;
     Ok(all.map(|a| a.into_iter().map(|(k, v)| (k, v.unwrap_or_default())).collect()))
 }
 

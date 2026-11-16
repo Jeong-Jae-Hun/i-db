@@ -239,20 +239,13 @@ pub fn to_csv(r: &QueryResult) -> String {
 /// 칸 하나를 CSV 로 쓴다. = + - @ 탭·CR 로 시작하는 글은 스프레드시트 수식 실행을 막으려고 ' 를 붙인다(숫자는 그대로).
 fn csv_field(s: &str) -> String {
     let mut s = s.to_string();
-    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) && !go_parses_float(&s) {
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) && !idb_core::gostrconv::parses_float(&s) {
         s.insert(0, '\'');
     }
     if !s.is_empty() && !s.contains([',', '"', '\r', '\n']) && s.trim() == s {
         return s;
     }
     format!("\"{}\"", s.replace('"', "\"\""))
-}
-
-/// Go `strconv.ParseFloat(s, 64)` 가 받는지다(부호·소수·지수·inf·nan·16진 부동소수).
-fn go_parses_float(s: &str) -> bool {
-    let t = s.strip_prefix(['+', '-']).unwrap_or(s).to_ascii_lowercase();
-    matches!(t.as_str(), "inf" | "infinity" | "nan")
-        || (!t.starts_with("0x") && !t.contains('_') && s.parse::<f64>().is_ok() && !t.starts_with("inf") && !t.starts_with("nan"))
 }
 
 /// 열을 맞춘 글 표를 쓴다. 칸의 제어 문자는 보이는 글자로 바꾸고, 폭은 넓은 글자를 2칸으로 센다. 숫자 열은 오른쪽에 붙인다.

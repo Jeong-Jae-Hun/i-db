@@ -23,7 +23,13 @@ fn main() {
         &mut err,
         std::io::stdout().is_terminal(),
     );
-    let _ = std::io::stdout().write_all(out.as_bytes());
+    // 출력이 막히면(디스크 꽉 참·닫힌 파이프) 성공으로 끝내지 않는다. 결과를 파일로 받는 쪽이 빈 파일을 성공으로 믿게 된다
+    let mut stdout = std::io::stdout();
+    let written = stdout.write_all(out.as_bytes()).and_then(|()| stdout.flush());
     let _ = std::io::stderr().write_all(err.as_bytes());
+    if let Err(e) = written {
+        eprintln!("write stdout: {e}");
+        std::process::exit(cli::EXIT_ERR);
+    }
     std::process::exit(code);
 }

@@ -24,7 +24,7 @@ import (
 //   - 인자의 {P} 는 프로젝트를 복사한 임시 폴더다. 출력에서는 다시 {P} 로 바꾼다.
 //   - "elapsed_ms":N 은 0 으로 바꾼다. 나머지는 그대로 비교한다.
 //
-// 기대 출력 갱신: go test -run TestGolden -update-golden (live 도 갱신하려면 두 환경 변수를 준다)
+// 기대 출력 갱신: go test -run TestGolden_ -update-golden (live 도 갱신하려면 두 환경 변수를 준다)
 
 var updateGolden = flag.Bool("update-golden", false, "rewrite testdata/golden/out")
 
@@ -40,7 +40,7 @@ var (
 	placeholderRe = regexp.MustCompile(`\$\{[A-Z_]+\}`)
 )
 
-func TestGolden(t *testing.T) {
+func TestGolden_골든_케이스의_CLI_출력이_기대_파일과_같다(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "golden", "cases.json"))
 	must(t, err)
 	var cases []goldenCase
@@ -91,7 +91,9 @@ func TestGolden(t *testing.T) {
 }
 
 func goldenText(c goldenCase, code int, out, errw, dir string) string {
-	norm := func(s string) string { return elapsedRe.ReplaceAllString(strings.ReplaceAll(s, dir, "{P}"), `"elapsed_ms":0`) }
+	norm := func(s string) string {
+		return elapsedRe.ReplaceAllString(strings.ReplaceAll(s, dir, "{P}"), `"elapsed_ms":0`)
+	}
 	args, _ := json.Marshal(c.Args)
 	var b strings.Builder
 	b.WriteString("args: " + string(args) + "\n")
