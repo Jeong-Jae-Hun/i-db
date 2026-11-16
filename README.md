@@ -19,6 +19,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Optional client-side decryption view and `enc('...')` expansion for AES-CBC values stored as `<iv hex>^|^<ciphertext hex>` (pgcrypto `encrypt_iv` compatible). Keys come from `.env` (`<GROUP>_AES_KEY`, `<GROUP>_AES_IV`); nothing is installed in your database. Without a key/IV, `enc(...)` is sent as a call to an existing `staticEncrypt(...)` function, so it only works if your database already has one
 - Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources), DynamoDB and Athena in the same tree, editor and results grid, plus a tree-only `aws` view of SNS, SQS (with DLQ counts), Lambda, EventBridge, Scheduler, Step Functions and S3 (see Sources)
 - Dashboard (`Ctrl+G`) and `db status`: every connection's state, latency, version and key numbers at a glance (see Dashboard)
+- Event flows (`Alt+F`) and `db flows`: an outbox table → SNS topic → SQS queues → DLQ · Lambda diagram with live counts, configured in `.dbtui/flows.json` (see Flows)
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
 ## Install
@@ -72,6 +73,7 @@ It reads:
 | `.env` | passwords and optional encryption keys (below) |
 | `.dbtui/connections.json` | optional extra connections added from `db` itself (see Connections) |
 | `.dbtui/folders.json` | optional tree folders you moved connections into (see Folders) |
+| `.dbtui/flows.json` | optional event flows for the flow tab and `db flows` (see Flows) |
 | `.dbtui/favorites.json`, `.dbtui/user360.json` | optional, meant to be committed with the project |
 
 Passwords come from `.env`, URL-encoded, keyed by the connection name upper-cased with non-alphanumerics turned into `_`:
@@ -169,6 +171,7 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some comm
 | `F9` / `F10` / `F11` | Auto/Manual transactions / COMMIT / ROLLBACK |
 | `Ctrl+L` | unlock writes on a prod connection for a few minutes |
 | `Ctrl+G` | dashboard of all connections (see Dashboard) |
+| `Alt+F` · tree `F` on an SNS topic | event flows (see Flows) |
 | `Ctrl+]` | Loki/Prometheus range 15m · 1h · 6h · 24h · 7d (per tab) |
 | `Ctrl+H` | history |
 | tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
@@ -193,6 +196,38 @@ db status -c app-stg -c app-stg-redis --format tsv
 
 Columns are `group`, `name`, `env`, `kind`, `ok`, `latency_ms`, `version` and `metrics` (in JSON, `metrics` is an array of `{name, value, warn}` and `ok` is `null` for skipped connections). Prod connections are not contacted without `--prod` and show `--prod 로 확인`. The exit code is 1 if any checked connection failed. Skipped prod connections do not count, so `db status -c app-prod` without `--prod` exits 0 having probed nothing.
 
+### Flows
+
+A flow follows one event path: an outbox table in PostgreSQL → an SNS topic → the SQS queues subscribed to it → each queue's DLQ and the Lambda functions reading it. Flows live in `.dbtui/flows.json`, which holds only connection, table and column names and is meant to be committed:
+
+```json
+[
+  { "name": "shop-hub-stg",
+    "outbox": { "conn": "shop-stg", "table": "public.t_outbox", "type": "event_type", "retry": "retry_count", "due": "check_needed_at", "where": "event_type like 'DATA_%'" },
+    "aws": "aws-stg", "topic": "stg-shop-hub" }
+]
+```
+
+`outbox` is optional (a flow may be just a topic), and inside it `retry`, `due` and `where` are optional. `conn` must name a PostgreSQL connection and `aws` an `aws` connection; `topic` is a topic name or full ARN. Table and column names are quoted as identifiers. `where` is raw SQL added with `AND`, must be a single condition without `;`, and every outbox query runs in a READ ONLY transaction with a 5 second limit. The outbox numbers are `대기` (rows matching `where`), `재시도` (`retry > 0`) and `오래됨` (`due` older than 5 minutes). A missing file just means no flows; a broken entry shows `설정 오류: <reason>` and the others keep working.
+
+`Alt+F` (palette `흐름`) opens a single flow tab, and `F` on an SNS topic in an `aws` tree adds that topic as an extra flow. Flows are listed on the left (`●` fine, `!` warning, `✕` failed, `…` not checked yet) and the selected one is drawn on the right:
+
+```text
+[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 오래됨 1] ──▶ [SNS stg-shop-hub] ─┬─▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]
+                                                                                              │   └─ DLQ q1-dlq 4
+                                                                                              └─▶ [https https://hook.example.com]
+```
+
+When the pane is too narrow the boxes stack top to bottom. DLQ messages, retries, stale rows, a disabled Lambda mapping and a failing last result are highlighted. Flows are resolved again every 30 seconds while the tab is active; `r` refreshes now, `↑↓` picks a flow, `←→` picks a box and `Enter` opens its details in a result tab (outbox counts per type, queue attributes, topic subscriptions or the function's event source mappings). Resolution uses the same read-only AWS calls as the tree (`sns:ListTopics` for a name, `sns:ListSubscriptionsByTopic`, `sqs:GetQueueUrl`, `sqs:GetQueueAttributes`, `lambda:ListEventSourceMappings`). Email subscriptions are shown masked as `a***@domain`. The dashboard adds `DLQ 쌓인 큐` and, when flows have a `retry` column, `아웃박스 재시도` cards.
+
+```sh
+db flows                                  # every flow, prod connections skipped
+db flows -f shop-hub-stg --format json    # one row per box: flow, stage, name, metrics, warn
+db flows --prod
+```
+
+Prod connections are not contacted without `--prod` (`--prod 로 확인`). The exit code is 1 if any entry is broken or any check failed.
+
 ## CLI
 
 `db <command>` runs without the screen, prints the result and exits. `db help` lists commands, `db <command> -h` shows flags.
@@ -207,6 +242,7 @@ db explain -c app-stg "select * from orders where id = 1"
 db redis -c app-stg-redis GET some:key
 db schema-diff -c app-stg --to app-prod --prod -s public
 db status --format json
+db flows --format json
 db conn add app-stg2 --url 'postgres://app_ro:pw@db.stg.example.internal:5432/app'
 ```
 

@@ -181,7 +181,7 @@ var (
 )
 
 var focusHints = map[focus]string{
-	fTree:   "Enter 열기 · d 구조 · D DDL · I CSV · A/L/S 운영 · B DB · F 검색 · X 키 삭제 · N 새 접속 · / 거르기 · ? 도움말",
+	fTree:   "Enter 열기 · d 구조 · D DDL · I CSV · A/L/S 운영 · B DB · F 검색·흐름 · X 키 삭제 · N 새 접속 · / 거르기 · ? 도움말",
 	fEditor: "Ctrl+R 실행 · Ctrl+E 계획 · Ctrl+B 정의 · F8 정렬 · F9 Auto/Manual · F3/F4 즐겨찾기 · Ctrl+P 팔레트",
 	fResult: "F2 고치기 · Ctrl+S 제출 · p 고정 · C IN · F/R 외래 키 · D 복호화 · +/- 거르기 · o 값 · F1 도움말",
 }
@@ -209,6 +209,7 @@ var helpSections = []struct {
 		{"F7", "마지막 표 결과 전체 내보내기 CSV (esc 취소)", "f7"},
 		{"Ctrl+U", "사용자 한눈에 보기 (이메일·uid·id·닉네임으로 여러 DB 조회)", "ctrl+u"},
 		{"Ctrl+G", "대시보드 (모든 접속 상태·지연·버전·수치, 30초마다 다시 확인)", "ctrl+g"},
+		{"Alt+F", "흐름 (아웃박스 → SNS → SQS → DLQ·Lambda, .dbtui/flows.json, 30초마다 다시 확인)", "alt+f"},
 		{"Alt+C", "같은 쿼리 다른 접속에서 비교 (기본 stg↔prod)", "alt+c"},
 		{"Ctrl+L", "prod 쓰기 잠금 열기·닫기 (탭 접속, DB_PROD_UNLOCK_MIN 분)", "ctrl+l"},
 		{"Ctrl+]", "Loki·Prometheus 범위 15m·1h·6h·24h·7d (탭마다)", "ctrl+]"},
@@ -273,7 +274,7 @@ var helpSections = []struct {
 		{"A / L / S", "활동 / 잠금 / 테이블 크기 (PostgreSQL 접속)", "A"},
 		{"A / L / S", "INFO / SLOWLOG / 큰 키 (Redis 접속)", "A"},
 		{"B", "데이터베이스 바꾸기 (PostgreSQL 접속)", "B"},
-		{"F", "데이터 검색 (PostgreSQL 접속·스키마)", "F"},
+		{"F", "데이터 검색 (PostgreSQL 접속·스키마) · aws SNS 토픽은 흐름", "F"},
 		{"X", "패턴 맞는 키 일괄 삭제 (Redis 접속·이름공간, esc 멈춤)", "X"},
 		{"N", "새 접속 (URL 붙여넣기 · Ctrl+T 시험, .dbtui/connections.json)", "N"},
 		{"E", "접속 고치기 (db 전용 접속) · 폴더 줄은 폴더 이름 바꾸기", "E"},
@@ -715,6 +716,7 @@ type queryTab struct {
 	undo       []*undoEntry  // 제출 되돌리기 묶음, 마지막이 가장 최근(R50)
 	since      time.Duration // Loki·Prometheus 범위(R62.2). 0 이면 1h
 	dash       *dashState    // 대시보드 탭이면 그 상태(R64). 편집기·결과 대신 대시보드를 그린다
+	flow       *flowState    // 흐름 탭이면 그 상태(R69). 대시보드처럼 편집기·결과 자리 전체에 그린다
 }
 
 // completer 는 편집기 자동완성 함수다. 탭의 접속이 바뀌어도 부를 때 다시 읽도록 탭을 가리킨다.
@@ -2626,6 +2628,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case dashTickMsg:
 		return m, m.dashTicked(msg)
+	case dashOutboxMsg:
+		m.dashOutboxed(msg)
+		return m, nil
+	case flowSnapMsg:
+		m.flowSnapped(msg)
+		return m, nil
+	case flowTickMsg:
+		return m, m.flowTicked(msg)
 	case autoSaveMsg:
 		if t := m.findTab(msg.tab); t != nil && t.editRev == msg.rev {
 			m.autoSaveStatus(t)
@@ -3203,6 +3213,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.userLookup()
 	case "ctrl+g":
 		return m, m.openDash()
+	case "alt+f":
+		return m, m.openFlows(nil)
 	case "ctrl+l":
 		return m, m.toggleLock()
 	case "alt+c":
@@ -3748,6 +3760,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if t.dash != nil && m.focus != fTree {
 		return m, m.dashKey(k)
 	}
+	if t.flow != nil && m.focus != fTree {
+		return m, m.flowKey(k)
+	}
 	switch m.focus {
 	case fEditor:
 		var cmd tea.Cmd
@@ -4053,6 +4068,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return pickListMsg{conn: conn, prompt: "데이터베이스 ", items: names, err: err, do: do}
 		})
 	case "F":
+		// aws 트리의 SNS 토픽 줄은 그 토픽의 흐름(R69)이다
+		if cmd, ok := m.treeFlow(n); ok {
+			return m, cmd
+		}
 		// ─── 데이터 검색 (R33.2) ───
 		// 찾을 글을 받아 스키마(접속 줄이면 search_path 첫 스키마)의 글자 열을 찾는다. prod 는 테이블 수를 세어 먼저 묻는다.
 		if n == nil || (n.kind != nConn && n.kind != nSchema) || m.conn(n.conn).Kind != db.KindPG {
@@ -4331,6 +4350,8 @@ func (m *model) View() string {
 		}
 	} else if t.dash != nil {
 		header += barStyle.Bold(true).Render("대시보드") + hintStyle.Render(fmt.Sprintf(" · 접속 %d", len(connOrder(m.proj.Conns))))
+	} else if t.flow != nil {
+		header += barStyle.Bold(true).Render("흐름") + hintStyle.Render(fmt.Sprintf(" · %d", len(t.flow.list)))
 	} else {
 		header += hintStyle.Render("접속 없음 · 트리에서 고르세요")
 	}
@@ -4487,6 +4508,15 @@ func (m *model) View() string {
 		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
 			pane(paneSpec{title: "대시보드", info: info, body: m.dashView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
 	}
+	if t.flow != nil {
+		h := l.edH + l.resH + 2
+		info := m.label("r 새로고침 · ←→ 상자 · Enter 상세")
+		if n := len(t.flow.pending); n > 0 {
+			info = fmt.Sprintf("확인 중 %d · ", n) + info
+		}
+		right = lipgloss.JoinVertical(lipgloss.Left, tabBar,
+			pane(paneSpec{title: "흐름", info: info, body: m.flowView(t, l.rightW, h), w: l.rightW, h: h, focused: m.focus != fTree}))
+	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		pane(paneSpec{title: "Explorer", info: treeInfo, body: strings.TrimRight(tb.String(), "\n"), w: l.treeW, h: l.treeH, focused: m.focus == fTree,
 			hot: m.drag == bTree}),
@@ -4546,6 +4576,9 @@ func (m *model) View() string {
 	hint := focusHints[m.focus]
 	if t.dash != nil && m.focus != fTree {
 		hint = dashHint
+	}
+	if t.flow != nil && m.focus != fTree {
+		hint = flowHint
 	}
 	return header + "\n" + body + "\n" + m.bar(status, hintStyle.Render(m.label(hint)+" "))
 }

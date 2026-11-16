@@ -18,6 +18,9 @@ var _ source.Prober = (*Backend)(nil)
 // 수백 개가 한계라 넘으면 앞쪽만 세고 `(앞 N개)` 를 붙인다.
 const probeQueues = 200
 
+// MetricDLQ 는 DLQ 에 메시지가 쌓인 큐 수의 수치 이름이다. 대시보드 요약 카드(R64.1)가 더한다
+const MetricDLQ = "DLQ 쌓임"
+
 // Probe 는 대시보드 확인이다(R64.2·R67.1): 큐 수와 DLQ 에 메시지가 쌓인 큐 수다. 지연은 ListQueues(모든 페이지) 시간이다.
 // DLQ 는 같이 읽은 큐 속성에서 찾는다. 목록에 없는 DLQ(다른 계정)는 확인을 싸게 두려고 세지 않는다.
 func (b *Backend) Probe(ctx context.Context) db.Health {
@@ -51,7 +54,7 @@ func (b *Backend) Probe(ctx context.Context) db.Health {
 	if len(probed) < len(urls) {
 		dlq += fmt.Sprintf(" (앞 %d개)", len(probed))
 	}
-	ms := []db.Metric{{Name: "큐", Value: strconv.Itoa(len(urls))}, {Name: "DLQ 쌓임", Value: dlq, Warn: piled > 0}}
+	ms := []db.Metric{{Name: "큐", Value: strconv.Itoa(len(urls))}, {Name: MetricDLQ, Value: dlq, Warn: piled > 0}}
 	if failed > 0 {
 		ms = append(ms, db.Metric{Name: "읽기 실패", Value: strconv.Itoa(failed), Warn: true})
 	}
