@@ -36,9 +36,11 @@ var (
 // Options.PageSize 가 0 이하면 DefaultPageSize, db.MaxRows 를 넘으면 db.MaxRows 다.
 // 실행기가 1,000행에서 자르므로 그보다 큰 페이지는 끝을 잃는다.
 // NoHistory 면 이 보기의 페이지·정렬·거르기 읽기를 실행 기록에 남기지 않는다(R73.5, WHERE 에 찾은 값이 든다).
+// PresetWhere 는 조건을 주고 연 보기(R36 외래 키 따라가기 등)라는 뜻이다. 사용자가 WHERE 입력을 적용하면 풀린다.
 type Options struct {
-	PageSize  int
-	NoHistory bool
+	PageSize    int
+	NoHistory   bool
+	PresetWhere bool
 }
 
 // Action 은 키·클릭 처리 뒤 통합이 할 일이다. Requery 면 SQL(), Count 면 CountSQL() 을 실행한다.
@@ -93,6 +95,7 @@ type Model struct {
 	compIdx int
 	// noHistory 는 Options.NoHistory 다. 값 복사로 페이지·WHERE 를 바꿔도 이어진다
 	noHistory bool
+	preset    bool
 }
 
 func New(t db.TableRef, opt Options) Model {
@@ -100,8 +103,11 @@ func New(t db.TableRef, opt Options) Model {
 	if size <= 0 {
 		size = DefaultPageSize
 	}
-	return Model{table: t, pageSize: min(size, db.MaxRows), noHistory: opt.NoHistory}
+	return Model{table: t, pageSize: min(size, db.MaxRows), noHistory: opt.NoHistory, preset: opt.PresetWhere}
 }
+
+// PresetWhere 는 지금 WHERE 가 사용자가 친 것이 아니라 열 때 받은 조건인지다(Options.PresetWhere).
+func (m Model) PresetWhere() bool { return m.preset }
 
 // NoHistory 는 이 보기의 읽기를 실행 기록에 남기지 않는지다.
 func (m Model) NoHistory() bool { return m.noHistory }
@@ -236,6 +242,7 @@ func (m Model) Update(k tea.KeyMsg) (Model, Action) {
 			} else {
 				cond, short := n.shortCondition(text)
 				n = n.withWhere(cond)
+				n.preset = false
 				if short {
 					n.short = cond
 				}

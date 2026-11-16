@@ -31,6 +31,9 @@ const (
 	// 쓸 때마다 폴더를 훑지 않게 줄이기는 이 간격에 한 번이다
 	pruneEvery = 10 * time.Minute
 	snapExt    = ".json.gz"
+	// 쓰다 죽은 프로세스가 남긴 임시 파일(atomicfile 의 .snap-*)은 이만큼 지나면 지운다. 쓰는 중인 파일은 건드리지 않게 넉넉히 둔다
+	snapTemp       = ".snap-"
+	snapTempMaxAge = time.Hour
 )
 
 // idRe 는 사본 이름으로 받는 꼴이다(NewID). CLI 가 받은 글로 폴더 밖 경로를 열지 않게 한다
@@ -96,11 +99,20 @@ func ResultsDir(historyPath string) string {
 	return filepath.Join(filepath.Dir(historyPath), "results")
 }
 
-// OpenResults 는 폴더가 없으면 0700 으로 만들고 있는 사본 목록을 읽는다.
+// OpenResults 는 폴더가 없으면 0700 으로 만들고(있으면 0700 으로 좁히고) 있는 사본 목록을 읽는다.
 func OpenResults(dir string) (*Results, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// MkdirAll 은 이미 있는 폴더의 권한을 바꾸지 않는다. 사본은 실제 데이터라 넓게 만들어진 폴더도 좁힌다
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
+	return ReadResults(dir)
+}
+
+// ReadResults 는 폴더를 만들거나 고치지 않고 사본 목록만 읽는다(db history). 폴더가 없으면 os.ErrNotExist 를 감싼 오류다.
+func ReadResults(dir string) (*Results, error) {
 	r := &Results{dir: dir, have: map[string]int64{}, maxAge: snapshotMaxAge, maxTotal: snapshotMaxTotal}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -199,7 +211,7 @@ func (r *Results) MaybePrune(now time.Time) error {
 	return r.Prune(now)
 }
 
-// Prune 은 maxAge(30일)보다 오래된 사본을 지우고, 남은 합이 maxTotal(200MiB)을 넘으면 오래된 것부터 지운다.
+// Prune 은 maxAge(30일)보다 오래된 사본과 한 시간 넘은 임시 파일을 지우고, 남은 합이 maxTotal(200MiB)을 넘으면 오래된 것부터 지운다.
 // 나이는 파일 수정 시각으로 잰다. 다른 프로세스가 같은 폴더를 줄여도 없는 파일은 건너뛴다.
 func (r *Results) Prune(now time.Time) error {
 	r.mu.Lock()
@@ -218,6 +230,14 @@ func (r *Results) Prune(now time.Time) error {
 	var errs []error
 	var total int64
 	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), snapTemp) {
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > snapTempMaxAge {
+				if err := os.Remove(filepath.Join(r.dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+					errs = append(errs, err)
+				}
+			}
+			continue
+		}
 		id, ok := strings.CutSuffix(e.Name(), snapExt)
 		if !ok || !idRe.MatchString(id) {
 			continue

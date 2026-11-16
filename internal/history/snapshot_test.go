@@ -196,3 +196,49 @@ func TestList_거르기는_접속_이름과_날짜_범위도_본다(t *testing.T
 		t.Fatalf("From: %q", got)
 	}
 }
+
+func TestResults_한_시간_넘은_임시_파일은_줄일_때_지우고_쓰는_중인_것은_둔다(t *testing.T) {
+	r := openResults(t)
+	now := time.Now()
+	stale, fresh := filepath.Join(r.dir, ".snap-111"), filepath.Join(r.dir, ".snap-222")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(stale, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Prune(now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("오래된 임시 파일은 지운다: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("쓰는 중일 수 있는 임시 파일은 둔다: %v", err)
+	}
+}
+
+func TestOpenResults_이미_있는_넓은_폴더도_0700_으로_좁히고_ReadResults_는_폴더를_만들지_않는다(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "results")
+	if _, err := ReadResults(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("없는 폴더: %v", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("ReadResults 는 폴더를 만들지 않는다")
+	}
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil { // umask 와 상관없이 넓게 둔다
+		t.Fatal(err)
+	}
+	if _, err := OpenResults(dir); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("폴더 권한: %v %v", info.Mode().Perm(), err)
+	}
+}

@@ -105,11 +105,10 @@ func (m *model) hasSnapshot(e history.Entry) bool {
 	return e.Result && m.results != nil && m.results.Has(e.ID)
 }
 
-// historyKey 는 기록 창의 키다. e·d 는 거르기 글이 없을 때만 동작이고, 있으면 글자다(Ctrl+E·Ctrl+D 는 늘 동작).
+// historyKey 는 기록 창의 키다. 글자 키는 모두 거르기 글이고 동작은 Ctrl+E·Ctrl+D 다(e·d 로 시작하는 글을 칠 수 있게).
 func (m *model) historyKey(k tea.KeyMsg) tea.Cmd {
 	list := m.historyMatches()
 	ks := k.String()
-	empty := m.input.Value() == ""
 	var e *history.Entry
 	if m.histCursor < len(list) {
 		e = &list[m.histCursor]
@@ -124,7 +123,7 @@ func (m *model) historyKey(k tea.KeyMsg) tea.Cmd {
 	case ks == "up" || ks == "ctrl+p":
 		m.histCursor = clamp(m.histCursor-1, len(list))
 		return nil
-	case ks == "enter" || ks == "ctrl+e" || (ks == "e" && empty):
+	case ks == "enter" || ks == "ctrl+e":
 		m.overlay = oNone
 		switch {
 		case e == nil:
@@ -133,7 +132,7 @@ func (m *model) historyKey(k tea.KeyMsg) tea.Cmd {
 			return m.openSnapshot(*e)
 		}
 		return m.historyToEditor(*e)
-	case ks == "ctrl+d" || (ks == "d" && empty):
+	case ks == "ctrl+d":
 		switch {
 		case e == nil:
 		case !m.hasSnapshot(*e):

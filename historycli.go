@@ -97,8 +97,8 @@ func runHistoryCLI(args []string, stdout, stderr io.Writer, tty bool) int {
 	if since > 0 {
 		f.From = time.Now().Add(-time.Duration(since))
 	}
-	// 사본 폴더가 없으면(DB_HISTORY_RESULTS=0 로만 썼거나 아직 없음) ◆ 없이 찍는다
-	results, _ := history.OpenResults(history.ResultsDir(hp))
+	// 읽기만 하므로 사본 폴더를 만들지 않는다. 없으면(DB_HISTORY_RESULTS=0 로만 썼거나 아직 없음) ◆ 없이 찍는다
+	results, _ := history.ReadResults(history.ResultsDir(hp))
 	entries := st.List(f)
 	if *format == "json" {
 		out := make([]jsonHistory, len(entries))
@@ -132,12 +132,11 @@ func runHistoryCLI(args []string, stdout, stderr io.Writer, tty bool) int {
 
 // historyShow 는 사본 하나를 db query 와 같은 꼴로 찍는다. table 은 위에 시각·접속·SQL 을 붙인다.
 func historyShow(hp, id string, o cliOpts, stdout, stderr io.Writer) int {
-	results, err := history.OpenResults(history.ResultsDir(hp))
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return exitErr
+	var s history.Snapshot
+	results, err := history.ReadResults(history.ResultsDir(hp))
+	if err == nil {
+		s, err = results.Read(id)
 	}
-	s, err := results.Read(id)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		fmt.Fprintf(stderr, "결과 사본이 없음: %s\n", id)

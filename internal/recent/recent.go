@@ -265,13 +265,14 @@ func (s *Store) RecentTables(n int) []Table {
 	return out[:min(n, len(out))]
 }
 
-// SetView 는 마지막 정렬·WHERE 를 남기고 바뀌었는지 돌려준다. prod 면 WHERE 와 그 기록을 남기지 않고 지운다.
+// SetView 는 마지막 정렬·WHERE 를 남기고 바뀌었는지 돌려준다. prod 면 정렬·WHERE·WHERE 기록을 남기지 않고 지운다
+// (정렬 글도 식에 값이 들 수 있어 prod 는 열 폭만 남긴다).
 func (s *Store) SetView(conn, schema, name, order, where string, prod bool, now time.Time) bool {
 	if conn == "" || name == "" || len(order) > maxText || len(where) > maxText {
 		return false
 	}
 	if prod {
-		where = ""
+		order, where = "", ""
 	}
 	t := s.table(conn, schema, name)
 	if t == nil && order == "" && where == "" {

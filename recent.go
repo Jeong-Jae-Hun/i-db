@@ -35,6 +35,7 @@ type recentConn struct {
 type recallState struct {
 	pos   int
 	draft string
+	tab   int // 고르기를 시작한 탭
 }
 
 // loadRecent 는 기억을 읽는다. DB_RECENT=0 이면 nil 이다. 읽지 못하면 빈 기억으로 시작하고 한 번 알린다.
@@ -183,7 +184,7 @@ func (m *model) finderOrder(items []finder.Item) []finder.Item {
 
 // ─── 테이블 보기 설정 ───
 
-// restoreTable 은 기억한 정렬·WHERE 로 테이블 보기를 연다(R75.4). prod 면 WHERE 는 쓰지 않는다. 바꾼 것을 알릴 글을 돌려준다.
+// restoreTable 은 기억한 정렬·WHERE 로 테이블 보기를 연다(R75.4). prod 면 정렬·WHERE 를 쓰지 않는다(예전 파일에 남았어도). 바꾼 것을 알릴 글을 돌려준다.
 func (m *model) restoreTable(tv tableview.Model, conn int) (tableview.Model, string) {
 	if m.recent == nil || tv.NoHistory() {
 		return tv, ""
@@ -193,12 +194,12 @@ func (m *model) restoreTable(tv tableview.Model, conn int) (tableview.Model, str
 	if !ok {
 		return tv, ""
 	}
-	where := pref.Where
+	where, order := pref.Where, pref.Order
 	if c.Env() == "prod" {
-		where = ""
+		where, order = "", ""
 	}
 	var what []string
-	if pref.Order != "" {
+	if order != "" {
 		what = append(what, "정렬")
 	}
 	if where != "" {
@@ -207,10 +208,11 @@ func (m *model) restoreTable(tv tableview.Model, conn int) (tableview.Model, str
 	if len(what) == 0 {
 		return tv, ""
 	}
-	return tv.Restore(where, pref.Order), "이전 " + strings.Join(what, "·") + " 적용 (w·O 칸을 비우고 Enter 로 해제)"
+	return tv.Restore(where, order), "이전 " + strings.Join(what, "·") + " 적용 (w·O 칸을 비우고 Enter 로 해제)"
 }
 
 // noteTableResult 는 테이블 보기 페이지가 성공하면 그 정렬·WHERE 를 남기고 기억한 열 폭을 입힌다(R75.4).
+// 조건을 주고 연 보기(R36 등)는 사용자가 WHERE 입력을 적용하기 전까지 남기지 않는다. 그 WHERE 는 사용자가 친 글이 아니다.
 func (m *model) noteTableResult(t *queryTab) {
 	if m.recent == nil || t.tv == nil || t.tv.NoHistory() || t.viewConn < 0 {
 		return
@@ -218,6 +220,9 @@ func (m *model) noteTableResult(t *queryTab) {
 	c, ref := m.conn(t.viewConn), t.tv.Table()
 	if pref, ok := m.recent.Table(c.UUID, ref.Schema, ref.Table); ok {
 		t.grid.SetWidths(pref.Widths)
+	}
+	if t.tv.PresetWhere() {
+		return
 	}
 	if m.recent.SetView(c.UUID, ref.Schema, ref.Table, t.tv.Order(), t.tv.Where(), c.Env() == "prod", time.Now()) {
 		m.saveRecent()
@@ -263,6 +268,19 @@ func (m *model) filterRecall() []string {
 	return m.recent.Filters()
 }
 
+// endRecall 은 입력 기록 자리를 쓰는 입력(지금 탭의 결과 거르기·WHERE)이 닫혔거나 다른 탭으로 갔으면 자리를 버린다.
+// Enter·esc 말고도 마우스·초점 이동으로 닫히므로 키마다가 아니라 Update 끝에서 본다.
+func (m *model) endRecall() {
+	if m.recall == (recallState{}) {
+		return
+	}
+	t := m.cur()
+	open := m.focus == fResult && (t.grid.FilterTyping() || t.tv != nil && t.tv.TypingWhere())
+	if !open || m.recall.tab != t.id {
+		m.recall = recallState{}
+	}
+}
+
 // recallStep 은 ↑(up)·↓ 로 list(최근 것부터)에서 다음 글을 고른다. 고를 것이 없으면 false 다.
 // 처음 ↑ 는 치던 글을 두고 가장 최근 기록을, ↓ 로 끝까지 내려오면 치던 글로 돌아간다.
 func (m *model) recallStep(list []string, up bool, cur string) (string, bool) {
@@ -270,7 +288,7 @@ func (m *model) recallStep(list []string, up bool, cur string) (string, bool) {
 	switch {
 	case up && r.pos < len(list):
 		if r.pos == 0 {
-			r.draft = cur
+			r.draft, r.tab = cur, m.cur().id
 		}
 		r.pos++
 	case !up && r.pos > 0:
@@ -297,21 +315,30 @@ func (m *model) gridTypingKey(t *queryTab, ks string) bool {
 		}
 		return true
 	case "enter":
-		m.recent.AddFilter(t.grid.Query().Filter)
-		m.saveRecent()
+		if m.keepsFilter(t) {
+			m.recent.AddFilter(t.grid.Query().Filter)
+			m.saveRecent()
+		}
 	}
 	m.recall = recallState{}
 	return false
 }
 
-// whereTypingKey 는 테이블 보기 WHERE 입력의 ↑↓ 를 기록 고르기로 쓴다(R75.5). 처리했으면 true 다.
-// ORDER BY 입력과 기록이 없는(prod 등) WHERE 입력에서는 하지 않는다. 그 밖의 키는 기록 자리를 처음으로 돌린다.
+// keepsFilter 는 이 탭의 거르기 글을 기록에 남길지다. 거르기 기록은 모든 프로젝트·접속이 같이 보는 목록이라
+// 값이 든 결과의 거르기는 남기지 않는다: prod 결과, 사용자 한눈에 보기·비교(R51·R53, viewConn -1), 연결된 곳(R73), 기록 사본(R11.4).
+func (m *model) keepsFilter(t *queryTab) bool {
+	return t.viewConn >= 0 && m.conn(t.viewConn).Env() != "prod" && t.linked == nil && t.snap == nil
+}
+
+// whereTypingKey 는 테이블 보기 WHERE 입력의 ↑↓ 를 기록 고르기로 쓴다(R75.5). 기록 자리를 옮겼을 때만 true 고,
+// 아니면 키를 테이블 보기로 넘긴다. ORDER BY 입력과 기록이 없는(prod 등) WHERE 입력에서는 하지 않는다. 그 밖의 키는 기록 자리를 처음으로 돌린다.
 func (m *model) whereTypingKey(t *queryTab, ks string) bool {
 	if (ks == "up" || ks == "down") && t.tv.TypingWhere() {
-		if w, ok := m.recallStep(m.whereRecall(t), ks == "up", t.tv.Input()); ok {
+		w, ok := m.recallStep(m.whereRecall(t), ks == "up", t.tv.Input())
+		if ok {
 			*t.tv = t.tv.SetInput(w)
 		}
-		return true
+		return ok
 	}
 	m.recall = recallState{}
 	return false

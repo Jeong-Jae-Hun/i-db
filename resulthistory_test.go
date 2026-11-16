@@ -246,7 +246,7 @@ func TestHistoryWindow_줄은_시각_접속_행수_시간_SQL_이고_사본이_�
 			t.Fatalf("사본 없는 줄: %q", ln)
 		}
 	}
-	if !strings.Contains(view, "✗ ") || !strings.Contains(view, "e 편집기에 넣기") {
+	if !strings.Contains(view, "✗ ") || !strings.Contains(view, "Ctrl+E 편집기에 넣기") {
 		t.Fatalf("실패 표시·안내:\n%s", view)
 	}
 }
@@ -330,7 +330,7 @@ func TestHistoryWindow_사본_탭의_r_은_prod_쓰기면_확인을_거친다(t 
 	}
 }
 
-func TestHistoryWindow_사본이_없으면_Enter_는_편집기에_e_는_늘_편집기에_d_는_사본만_지운다(t *testing.T) {
+func TestHistoryWindow_사본이_없으면_Enter_는_편집기에_Ctrl_E_는_늘_편집기에_Ctrl_D_는_사본만_지운다(t *testing.T) {
 	m, state := historyModel(t)
 	seedHistory(t, m)
 	openHistoryWindow(m, "plain")
@@ -338,21 +338,21 @@ func TestHistoryWindow_사본이_없으면_Enter_는_편집기에_e_는_늘_편�
 	if len(m.tabs) != 1 || m.cur().snap != nil || m.cur().editor.Value() != "select 2 from plain" || m.focus != fEditor {
 		t.Fatalf("사본 없으면 편집기: tabs=%d %q", len(m.tabs), m.cur().editor.Value())
 	}
-	// 거르기 글이 없을 때 e 는 사본이 있어도 편집기에 넣는다(목록은 최근 것부터 fail·plain·snap)
+	// Ctrl+E 는 사본이 있어도 편집기에 넣는다(목록은 최근 것부터 fail·plain·snap)
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m.Update(key("e"))
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
 	if m.overlay != oNone || len(m.tabs) != 2 || m.cur().snap != nil || m.cur().editor.Value() != "select id, name from orders" {
-		t.Fatalf("e: tabs=%d %q", len(m.tabs), m.cur().editor.Value())
+		t.Fatalf("Ctrl+E: tabs=%d %q", len(m.tabs), m.cur().editor.Value())
 	}
 	snap := m.hist.List(history.Filter{Query: "orders"})[0]
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlH})
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m.Update(key("d"))
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	if m.overlay != oHistory || m.results.Has(snap.ID) || len(snapFiles(t, state)) != 0 || !strings.Contains(m.status, "결과 사본을 지움") {
-		t.Fatalf("d: overlay=%v status=%q", m.overlay, m.status)
+		t.Fatalf("Ctrl+D: overlay=%v status=%q", m.overlay, m.status)
 	}
 	if len(m.hist.List(history.Filter{})) != 3 {
 		t.Fatal("기록 줄은 지우지 않는다")
@@ -360,10 +360,20 @@ func TestHistoryWindow_사본이_없으면_Enter_는_편집기에_e_는_늘_편�
 	if strings.Contains(ansi.Strip(m.View()), "◆ "+time.Now().Format("01-02")) {
 		t.Fatal("지운 사본은 표시하지 않는다")
 	}
-	// 거르기 글이 있으면 e·d 는 글자다
-	typeText(m, "xed")
-	if m.input.Value() != "xed" || m.overlay != oHistory {
-		t.Fatalf("글자: %q", m.input.Value())
+}
+
+func TestHistoryWindow_빈_거르기에서_e_d_는_글자라_events_delete_로_거르기를_시작한다(t *testing.T) {
+	m, state := historyModel(t)
+	seedHistory(t, m)
+	for _, word := range []string{"events", "delete"} {
+		openHistoryWindow(m, word)
+		if m.input.Value() != word || m.overlay != oHistory || len(m.tabs) != 1 {
+			t.Fatalf("%s: 글자로 친다: %q overlay=%v tabs=%d", word, m.input.Value(), m.overlay, len(m.tabs))
+		}
+		m.Update(key("esc"))
+	}
+	if len(snapFiles(t, state)) != 1 {
+		t.Fatal("d 로 사본을 지우지 않는다")
 	}
 }
 
@@ -414,6 +424,13 @@ func TestSource_트리_미리_보기도_질의_글로_기록하고_사본을_남
 
 // ─── db history ───
 
+// historyCLI 는 `db history <args>` 를 터미널에서 돌린 종료 코드·stdout·stderr 다.
+func historyCLI(args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := runCLI(context.Background(), append([]string{"history"}, args...), nil, true, &out, &errb, false)
+	return code, out.String(), errb.String()
+}
+
 func TestHistoryCLI_목록은_접속_기간으로_거르고_show_는_사본을_찍는다(t *testing.T) {
 	m, _ := historyModel(t)
 	finishRun(t, m, 1, "select id, name from orders", table(2))
@@ -421,12 +438,7 @@ func TestHistoryCLI_목록은_접속_기간으로_거르고_show_는_사본을_�
 	must(t, m.hist.Append(history.Entry{ID: history.NewID(old), Time: old, Conn: "x-prod", SQL: "select old"}))
 	must(t, m.hist.Append(history.Entry{ID: history.NewID(time.Now()), Time: time.Now(), Conn: "x-prod", SQL: db.MaskedSQL}))
 
-	run := func(args ...string) (int, string, string) {
-		var out, errb bytes.Buffer
-		code := runCLI(context.Background(), append([]string{"history"}, args...), nil, true, &out, &errb, false)
-		return code, out.String(), errb.String()
-	}
-	code, out, _ := run("--format", "json")
+	code, out, _ := historyCLI("--format", "json")
 	var list []jsonHistory
 	if code != 0 || json.Unmarshal([]byte(out), &list) != nil || len(list) != 3 {
 		t.Fatalf("json: %d %s", code, out)
@@ -434,14 +446,14 @@ func TestHistoryCLI_목록은_접속_기간으로_거르고_show_는_사본을_�
 	if list[2].SQL != "select id, name from orders" || !list[2].Result || list[2].Conn != "x-stg" || list[2].ElapsedMS != 120 || list[0].SQL != db.MaskedSQL {
 		t.Fatalf("목록: %+v", list)
 	}
-	if code, out, _ = run("--conn", "x-prod", "--since", "24h"); code != 0 || strings.Count(out, "\n") != 2 || !strings.Contains(out, db.MaskedSQL) {
+	if code, out, _ = historyCLI("--conn", "x-prod", "--since", "24h"); code != 0 || strings.Count(out, "\n") != 2 || !strings.Contains(out, db.MaskedSQL) {
 		t.Fatalf("tsv 거르기: %d %q", code, out)
 	}
-	if code, out, _ = run("--format", "table"); code != 0 || !strings.Contains(out, "◆") || !strings.Contains(out, "(3행)") {
+	if code, out, _ = historyCLI("--format", "table"); code != 0 || !strings.Contains(out, "◆") || !strings.Contains(out, "(3행)") {
 		t.Fatalf("table: %d %s", code, out)
 	}
 
-	code, out, _ = run("show", list[2].ID, "--format", "json")
+	code, out, _ = historyCLI("show", list[2].ID, "--format", "json")
 	var shown struct {
 		Conn string     `json:"conn"`
 		Cols []string   `json:"cols"`
@@ -450,21 +462,41 @@ func TestHistoryCLI_목록은_접속_기간으로_거르고_show_는_사본을_�
 	if code != 0 || json.Unmarshal([]byte(out), &shown) != nil || shown.Conn != "x-stg" || len(shown.Rows) != 2 || shown.Cols[1] != "name" {
 		t.Fatalf("show: %d %s", code, out)
 	}
-	if code, _, errText := run("show", list[1].ID); code != 1 || !strings.Contains(errText, "결과 사본이 없음") {
+	if code, _, errText := historyCLI("show", list[1].ID); code != 1 || !strings.Contains(errText, "결과 사본이 없음") {
 		t.Fatalf("사본 없는 기록: %d %q", code, errText)
 	}
-	if code, _, _ := run("show", "../history"); code != 1 {
+	if code, _, _ := historyCLI("show", "../history"); code != 1 {
 		t.Fatal("이름 꼴이 아니면 읽지 않는다")
 	}
-	if code, _, _ := run("show"); code != 2 {
+	if code, _, _ := historyCLI("show"); code != 2 {
 		t.Fatal("id 가 없으면 사용법")
 	}
-	if code, _, _ := run("--format", "csv"); code != 2 {
+	if code, _, _ := historyCLI("--format", "csv"); code != 2 {
 		t.Fatal("csv 는 받지 않는다")
 	}
 }
 
 // ─── 통합 (DBTUI_TEST_PG_URL 이 있을 때만) ───
+
+func TestHistoryCLI_목록과_show_는_사본_폴더를_만들지_않는다(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	hp, err := history.DefaultPath()
+	must(t, err)
+	hist, err := history.Open(hp)
+	must(t, err)
+	id := history.NewID(time.Now())
+	must(t, hist.Append(history.Entry{ID: id, Time: time.Now(), Conn: "x-stg", SQL: "select 1", Result: true}))
+	if code, out, _ := historyCLI("--format", "json"); code != 0 || strings.Contains(out, `"result":true`) {
+		t.Fatalf("사본 폴더가 없으면 ◆ 없이 찍는다: %d %s", code, out)
+	}
+	if code, _, errText := historyCLI("show", id); code != 1 || !strings.Contains(errText, "결과 사본이 없음") {
+		t.Fatalf("show: %d %q", code, errText)
+	}
+	if _, err := os.Stat(history.ResultsDir(hp)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("읽기만 하는 CLI 는 사본 폴더를 만들지 않는다: %v", err)
+	}
+}
 
 func TestSnapshot_PG_실행_결과를_사본으로_남기고_기록_창에서_연다(t *testing.T) {
 	state := t.TempDir()

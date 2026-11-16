@@ -192,7 +192,7 @@ var helpSections = []helpSection{
 		{"Ctrl+E", "EXPLAIN (실행하지 않음)", "ctrl+e"},
 		{"Alt+E", "EXPLAIN ANALYZE, BUFFERS (쓰기 문장은 y/N)", "alt+e"},
 		{"Ctrl+P", "명령 팔레트 (동작·테이블·접속을 이름으로 찾아 실행·열기, 자주 쓴 동작·최근 테이블 먼저)", ""},
-		{"Ctrl+H", "실행 기록 (Enter ◆ 결과 사본을 새 탭에 · e 편집기에 · d 사본 지우기 · 오늘·어제 거르기)", "ctrl+h"},
+		{"Ctrl+H", "실행 기록 (Enter ◆ 결과 사본을 새 탭에 · Ctrl+E 편집기에 · Ctrl+D 사본 지우기 · 오늘·어제 거르기)", "ctrl+h"},
 		{"Ctrl+N", "객체 찾기 (테이블·뷰·Redis 키, 최근 연 테이블 먼저)", "ctrl+n"},
 		{"Ctrl+O / Ctrl+S", "파일 열기 / 저장 (결과 편집이 있으면 제출)", "ctrl+o"},
 		{"F9", "트랜잭션 Auto / Manual (Manual 은 실행 전 BEGIN)", "f9"},
@@ -1328,6 +1328,7 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 // 추정 행 수를 먼저 읽고, 그 결과가 오면 첫 페이지를 읽는다. 탭의 접속·테이블 보기는 확인을 다 지나 시작할 때 바꾼다.
 // 여는 길(트리·찾기·팔레트·외래 키·정의로 이동)이 모두 여기를 지난다. 최근 테이블(R40.3)은 확인을 지나 보기가 시작될 때(start) 남긴다.
 func (m *model) openTable(t *queryTab, conn int, ref db.TableRef, where string, opt tableview.Options) tea.Cmd {
+	opt.PresetWhere = where != ""
 	tv := tableview.New(ref, opt)
 	note := ""
 	if where != "" {
@@ -2044,6 +2045,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tip = ""
 	}
 	_, cmd := m.update(msg)
+	m.endRecall()
 	m.noteTip()
 	return m, cmd
 }

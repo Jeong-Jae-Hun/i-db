@@ -195,16 +195,45 @@ func TestRecentTable_열_폭_정렬_WHERE_를_기억하고_다시_열면_되살�
 	}
 }
 
-func TestRecentTable_prod_는_WHERE_를_남기지_않고_정렬과_폭만_되살린다(t *testing.T) {
+func TestRecentTable_조건을_주고_연_보기는_사용자가_WHERE_를_적용하기_전까지_정렬_WHERE_를_남기지_않는다(t *testing.T) {
+	m := recentModel(t)
+	tab := openUsers(m, 1)
+	apply(m, tab, "w", "status=ACTIVE")
+
+	// 외래 키 따라가기(R36)처럼 값이 든 조건으로 연 보기
+	m.newTab()
+	ft := m.cur()
+	m.openTable(ft, 1, db.TableRef{Schema: "public", Table: "users"}, `"email" = 'fk@x.com'`, tableview.Options{})
+	tablePage(m, ft)
+	apply(m, ft, "O", "id desc")
+	data, err := os.ReadFile(recentPath(t))
+	must(t, err)
+	if strings.Contains(string(data), "fk@x.com") {
+		t.Fatalf("받은 조건은 파일에 없다: %s", data)
+	}
+	if tb, _ := m.recent.Table("s", "public", "users"); tb.Where != `"status"::text = 'ACTIVE'` || tb.Order != "" {
+		t.Fatalf("이전 기억 그대로: %+v", tb)
+	}
+
+	apply(m, ft, "w", "id > 3")
+	if tb, _ := m.recent.Table("s", "public", "users"); tb.Where != `"id"::text > '3'` || tb.Order == "" {
+		t.Fatalf("사용자가 친 WHERE 를 적용한 뒤부터 남긴다: %+v", tb)
+	}
+}
+
+func TestRecentTable_prod_는_정렬_WHERE_를_남기지_않고_열_폭만_되살린다(t *testing.T) {
 	m := recentModel(t)
 	tab := openUsers(m, 0)
 	apply(m, tab, "w", "status = 'secret@x.com'")
-	apply(m, tab, "O", "id desc")
+	apply(m, tab, "O", "email = 'order@x.com' desc")
 	m.Update(key(">"))
 	data, err := os.ReadFile(recentPath(t))
 	must(t, err)
-	if strings.Contains(string(data), "secret@x.com") {
-		t.Fatalf("prod WHERE 는 파일에 없다: %s", data)
+	if strings.Contains(string(data), "secret@x.com") || strings.Contains(string(data), "order@x.com") {
+		t.Fatalf("prod 정렬·WHERE 는 파일에 없다: %s", data)
+	}
+	if !strings.Contains(string(data), `"widths"`) {
+		t.Fatalf("열 폭은 남긴다: %s", data)
 	}
 	m.Update(key("w"))
 	before := tab.tv.Input()
@@ -215,13 +244,14 @@ func TestRecentTable_prod_는_WHERE_를_남기지_않고_정렬과_폭만_되살
 
 	r := reopen(m)
 	rt := r.cur()
+	r.recent.SetView("p", "public", "users", "id DESC", "", false, time.Now()) // 예전 판이 남긴 prod 정렬도 쓰지 않는다
 	r.openTable(rt, 0, db.TableRef{Schema: "public", Table: "users"}, "", tableview.Options{})
-	if sql := rt.tv.SQL(); strings.Contains(sql, "WHERE") || !strings.Contains(sql, "ORDER BY") {
-		t.Fatalf("prod 는 정렬만 되살린다: %s", sql)
+	if sql := rt.tv.SQL(); strings.Contains(sql, "WHERE") || strings.Contains(sql, "ORDER BY") {
+		t.Fatalf("prod 는 정렬·WHERE 를 되살리지 않는다: %s", sql)
 	}
 	tablePage(r, rt)
-	if !strings.Contains(r.status, "이전 정렬 적용") {
-		t.Fatalf("알림: %q", r.status)
+	if strings.Contains(r.status, "이전") {
+		t.Fatalf("알림이 없다: %q", r.status)
 	}
 }
 
@@ -307,6 +337,100 @@ func TestRecentRecall_거르기_입력의_위아래는_이전_거르기를_고�
 	}
 }
 
+// filterOnce 는 지금 탭 결과에서 / 로 f 를 쳐 Enter 로 확정한다.
+func filterOnce(m *model, f string) {
+	m.setFocus(fResult)
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(key("/"))
+	typeText(m, f)
+	m.Update(key("enter"))
+}
+
+func TestRecentRecall_prod_사용자_찾기_연결된_곳_기록_사본_결과의_거르기는_남기지_않는다(t *testing.T) {
+	m := recentModel(t)
+	m.Update(resultMsg{tab: m.cur().id, seq: m.cur().seq, conn: 0, res: channels(), rev: m.cur().grid.Revision()})
+	filterOnce(m, "prod@x.com")
+
+	ut, _ := m.startMulti("사용자 찾기")
+	m.showMulti(multiMsg{tab: ut.id, seq: ut.seq, titles: []string{"a", "b"}, conns: []int{1, 1}, subs: []*db.Result{channels(), channels()}, errs: make([]error, 2)})
+	filterOnce(m, "user360@x.com")
+	ut.view = 1 // 둘째 결과도 같다
+	filterOnce(m, "sub@x.com")
+
+	lt := m.newTab()
+	show(m, channels())
+	lt.linked = &linkedView{}
+	filterOnce(m, "linked@x.com")
+
+	st := m.newTab()
+	show(m, channels())
+	st.snap = &snapTab{}
+	filterOnce(m, "snap@x.com")
+	if got := m.recent.Filters(); len(got) != 0 {
+		t.Fatalf("값이 든 결과의 거르기는 남기지 않는다: %v", got)
+	}
+
+	m.newTab()
+	show(m, channels())
+	filterOnce(m, "1315")
+	if got := m.recent.Filters(); !slices.Equal(got, []string{"1315"}) {
+		t.Fatalf("prod 가 아닌 보통 결과는 남긴다: %v", got)
+	}
+}
+
+func TestRecentRecall_WHERE_입력의_위아래는_기록을_옮기지_못하면_키를_넘긴다(t *testing.T) {
+	m := recentModel(t)
+	tab := openUsers(m, 1)
+	m.setFocus(fResult)
+	m.Update(key("w"))
+	if m.whereTypingKey(tab, "up") || m.whereTypingKey(tab, "down") {
+		t.Fatal("기록이 없으면 ↑↓ 를 먹지 않는다")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	apply(m, tab, "w", "id > 1")
+	m.Update(key("w"))
+	if !m.whereTypingKey(tab, "up") {
+		t.Fatal("기록을 고르면 먹는다")
+	}
+	if m.whereTypingKey(tab, "up") {
+		t.Fatal("더 오래된 기록이 없으면 넘긴다")
+	}
+	if !m.whereTypingKey(tab, "down") || m.whereTypingKey(tab, "down") {
+		t.Fatal("치던 글로 돌아온 뒤 ↓ 는 넘긴다")
+	}
+}
+
+func TestRecentRecall_초점을_옮겨_입력이_닫히면_기록_자리를_버린다(t *testing.T) {
+	m := recentModel(t)
+	show(m, channels())
+	for _, f := range []string{"1315", "owner_id=null"} {
+		filterOnce(m, f)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(key("/"))
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.cur().grid.Query().Filter; got != "1315" {
+		t.Fatalf("둘째 ↑: %q", got)
+	}
+	// 키가 아닌 길(트리 클릭)로 결과 영역을 떠나 거르기 입력이 닫힌다
+	m.Update(press(2, 3))
+	if m.focus != fTree || m.cur().grid.FilterTyping() {
+		t.Fatalf("트리로 초점: focus=%v typing=%v", m.focus, m.cur().grid.FilterTyping())
+	}
+	m.setFocus(fResult)
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(key("/"))
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.cur().grid.Query().Filter; got != "owner_id=null" {
+		t.Fatalf("다시 연 입력의 첫 ↑ 는 가장 최근: %q", got)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.cur().grid.Query().Filter; got != "" {
+		t.Fatalf("치던 글은 새 입력의 것(빈 글): %q", got)
+	}
+}
+
 func TestRecentTree_그룹은_켤_때_접고_접속_아래는_처음_펼칠_때_되살리며_켤_때_접속하지_않는다(t *testing.T) {
 	m := recentModel(t)
 	group := m.roots[0].label
@@ -353,6 +477,35 @@ func TestRecentTree_그룹은_켤_때_접고_접속_아래는_처음_펼칠_때_
 	slices.Sort(open)
 	if !slices.Equal(open, []string{"s:p:public", "s:s:public"}) || len(closed) != 0 {
 		t.Fatalf("끝낼 때 남긴 펼침: open=%v closed=%v", open, closed)
+	}
+}
+
+func TestRecentTree_저장소_노드는_기억하지_않아_다시_펼쳐도_요금_조회_목록을_더_부르지_않는다(t *testing.T) {
+	noBilledEnv(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	f := newFake()
+	registerFake(t, f)
+	m := sourceModel(t) // 접속 3 은 DynamoDB(R72 요금 대상)
+	m.loadRecent()
+	cn := expandConn(t, m, 3)
+	drive(m, m.activate(childNamed(cn, "logs-2026"), true))
+	m.saveRecentOnQuit()
+	if open, _ := m.recent.Tree(); slices.ContainsFunc(open, func(id string) bool { return strings.Contains(id, "s4") }) {
+		t.Fatalf("저장소 노드 펼침은 기억하지 않는다: %v", open)
+	}
+
+	// 예전·손으로 고친 파일에 저장소 아래 id 가 있어도 되살리며 목록을 부르지 않는다
+	r := reopen(m)
+	t.Cleanup(func() { r.stop(); r.sources.close() })
+	r.recent.SetTree([]string{"f:s4:logs-2026", "s:s4:logs-2026", "q:s4"}, nil)
+	f.mu.Lock()
+	f.listed = nil
+	f.mu.Unlock()
+	expandConn(t, r, 3)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !slices.Equal(f.listed, []string{""}) {
+		t.Fatalf("사용자가 펼친 접속 목록만 부른다: %q", f.listed)
 	}
 }
 

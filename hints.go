@@ -70,7 +70,7 @@ var (
 	flowHints  = []string{"r 새로고침", "↑↓ 흐름", "←→ 상자", "Enter 상세", "? 키", "Ctrl+W 닫기"}
 	boardHints = []string{"r 새로고침", "방향키·hjkl 패널", "Enter 쿼리 탭에 열기", "? 키", "Ctrl+W 닫기"}
 	// 기록 창(R11.2). e·d 는 거르기 글이 없을 때만 듣는다
-	historyHints = []string{"↑↓ 고르기", "Enter 열기(◆ 사본은 새 탭)", "e 편집기에 넣기", "d 사본 지우기", "글 SQL·접속·오늘·어제 거르기", "esc 닫기"}
+	historyHints = []string{"↑↓ 고르기", "Enter 열기(◆ 사본은 새 탭)", "Ctrl+E 편집기에 넣기", "Ctrl+D 사본 지우기", "글 SQL·접속·오늘·어제 거르기", "esc 닫기"}
 )
 
 // fitHints 는 항목을 앞에서부터 w 칸에 들어가는 만큼만 잇는다. 항목 중간에서 자르지 않는다.

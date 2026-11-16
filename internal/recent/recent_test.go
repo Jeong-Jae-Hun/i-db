@@ -78,20 +78,22 @@ func TestTables_500개를_넘으면_가장_오래_안_연_테이블부터_버린
 	}
 }
 
-func TestTables_prod_는_WHERE_와_그_기록을_남기지_않고_정렬과_폭만_남긴다(t *testing.T) {
+func TestTables_prod_는_정렬_WHERE_와_그_기록을_남기지_않고_열_폭만_남긴다(t *testing.T) {
 	s, path := newStore(t)
+	// 예전 판이 남긴 prod 정렬도 다음 SetView 가 지운다
+	s.SetView("p", "public", "users", "id DESC", "", false, t0)
 	s.AddWhere("p", "public", "users", "email = 'a@b.com'", true, t0)
-	s.SetView("p", "public", "users", "id DESC", "email = 'a@b.com'", true, t0)
+	s.SetView("p", "public", "users", "email = 'c@d.com' DESC", "email = 'a@b.com'", true, t0)
 	s.SetWidth("p", "public", "users", "email", 30, t0)
 	must(t, s.Save())
 	data, err := os.ReadFile(path)
 	must(t, err)
-	if strings.Contains(string(data), "a@b.com") {
-		t.Fatalf("prod WHERE 는 파일에 없다: %s", data)
+	if strings.Contains(string(data), "a@b.com") || strings.Contains(string(data), "c@d.com") || strings.Contains(string(data), "DESC") {
+		t.Fatalf("prod 정렬·WHERE 는 파일에 없다: %s", data)
 	}
 	tb, _ := s.Table("p", "public", "users")
-	if tb.Order != "id DESC" || tb.Where != "" || tb.Widths["email"] != 30 || len(s.Wheres("p", "public", "users", true)) != 0 {
-		t.Fatalf("정렬·폭만: %+v", tb)
+	if tb.Order != "" || tb.Where != "" || tb.Widths["email"] != 30 || len(s.Wheres("p", "public", "users", true)) != 0 {
+		t.Fatalf("열 폭만: %+v", tb)
 	}
 
 	s.SetView("s", "public", "users", "", "status = 'A'", false, t0)
