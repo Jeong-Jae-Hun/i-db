@@ -134,9 +134,14 @@ func connRoots(conns []db.Conn, reuse map[int]*node, groupOpen map[string]bool) 
 // envRank 는 폴더 안 환경 순서다(R66.1). Env 는 이 셋만 돌려준다
 var envRank = map[string]int{"local": 0, "stg": 1, "prod": 2}
 
+// isReadConn 은 읽기 복제본 접속인지 이름·호스트로 본다(R66.1). 트리 정렬과 연결된 곳 찾기(R73.4)가 같이 쓴다.
+func isReadConn(c db.Conn) bool {
+	return strings.Contains(c.Name, "-read") || strings.HasPrefix(c.Host, "read.") || strings.Contains(c.Host, ".cluster-ro-")
+}
+
 // connRank 는 같은 환경 안의 순서다: 쓰기 DB → 읽기 DB → Redis → 검색 → 로그·지표 → DynamoDB → Athena → aws(R66.1).
 func connRank(c db.Conn) int {
-	read := strings.Contains(c.Name, "-read") || strings.HasPrefix(c.Host, "read.") || strings.Contains(c.Host, ".cluster-ro-")
+	read := isReadConn(c)
 	switch c.Kind {
 	case db.KindPG:
 		return 1 + boolRank(read)

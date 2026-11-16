@@ -11,7 +11,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Results grid: sort (`s` or header click), filter with `/` (`abc`, `!abc`, `col:abc`, `col=v`, `col>v`, `col=null`), re-read from the server when possible (PostgreSQL, OpenSearch `_search`, Loki `time`, DynamoDB sort key; otherwise the status line says why), `]` loads the next 1,000 rows of a truncated PostgreSQL result, copy as TSV/CSV/JSON/INSERT/UPDATE/`IN (...)` (a `Ctrl+K` or right-click menu picks row / selection / visible rows / column × TSV or CSV with header, JSON, Markdown table, INSERT, `IN` list; copies go to OSC 52 and the system clipboard), charts, JSON tree, cell aggregates, result pinning and diff
 - In-place editing of single-table results (preview SQL before submit, undo of the last submit), paste from spreadsheets, CSV import
 - Server-side table view with a DataGrip-style WHERE / ORDER BY bar (column completion, `/` short filters), paging, exact count; follow foreign keys in both directions
-- Linked rows (`Ctrl+B` on a result cell, or right-click → `연결된 곳 찾기`) and `db linked`: find where a value such as `user_id = 1315` appears in other tables even without foreign keys, by column naming (`user_id`, `*_user_id`, `users.id`) across the same database and the other PostgreSQL connections of the same group and environment. Only columns that lead an index are counted (up to 100+ rows, 2 s per table, read-only); `Enter` opens the table view filtered to that value. The value is never put in tab titles, history or the session
+- Linked rows (`Ctrl+B` on a result cell, or right-click → `연결된 곳 찾기`) and `db linked`: find where a value such as `user_id = 1315` appears in other tables even without foreign keys, by column naming (`user_id`, `*_user_id`, `users.id`) across the same database and the other PostgreSQL connections of the same group and environment (a read replica such as `app-stg-read` is skipped when the writer for the same database is searched too). Only columns that lead an index are counted (up to 100+ rows, 2 s per table, read-only); `Enter` opens the table view filtered to that value. The value is never put in tab titles, history or the session
 - Command palette (`Ctrl+P`) that runs any action or jumps to any table across connections, recently opened tables first
 - EXPLAIN / EXPLAIN ANALYZE as a plan tree, activity/locks/table sizes, cancel or terminate backends
 - Transactions in Auto or Manual mode, full-schema data search, schema diff between connections, run a statement on another connection and diff the results
@@ -164,7 +164,7 @@ IAM permissions used (the SNS, SQS and S3 ones only with `DB_ALLOW_BILLED=1`): `
 
 ## TUI
 
-Press `F1` for every key binding, or `Ctrl+P` for the command palette. Some common ones:
+Press `F1` for every key binding, or `Ctrl+P` for the command palette. Outside the editor, `?` lists only the keys of the current pane (result, tree, dashboard, flows, board, Redis value editor). The status line shows the keys that work right now, most useful first (for example `a 행 추가 · Enter 고치기 · …` on an editable result, `변경 2건 · Ctrl+S 제출 · u 되돌리기 · …` with pending edits, `y 복사 · C IN 목록 · …` while selecting) and drops items from the end when the terminal is narrow. The first time you land on an editable result, a read-only result, a table view, a flow tab or a board tab, a one-time tip appears there; seen tips are remembered in `tips.json` next to the session file (`DB_TIPS=0` turns tips off). Some common keys:
 
 | Key | Action |
 |---|---|
@@ -341,11 +341,12 @@ claude mcp add db -- db mcp -p ~/work/db-project --max-rows 100
 | `DB_RESTORE=0` | do not save or restore tabs |
 | `DB_KITTY_KEYS=0`/`1` | force the kitty keyboard protocol off/on |
 | `DB_KEYS=cmd`/`ctrl` | show key hints as ⌘ or Ctrl |
+| `DB_TIPS=0` | do not show the one-time tips in the status line |
 | `DB_CLIPBOARD=osc52`/`system`/`both` | where copies go: OSC 52 only, the system clipboard only (`pbcopy`, `clip` through `cmd.exe` with the UTF-8 code page on WSL and Windows, `wl-copy`/`xclip`), or both (default). Copies over 10 MB are refused; export with `e`/`E` |
 | `DB_ALLOW_BILLED=1` | allow AWS calls billed per request or per byte scanned (SQS, SNS, S3, Athena, DynamoDB data reads). Off by default; only `1` turns it on |
 | `DB_UPDATE_CHECK=0` | do not check GitHub for a new release at startup |
 | `GITHUB_TOKEN` | sent with `db update` and the startup check to GitHub API requests (higher rate limit) |
-| `XDG_STATE_HOME` | where history, session, parameter values, undo log and the last update check live (default `~/.local/state/db/`) |
+| `XDG_STATE_HOME` | where history, session, seen tips, parameter values, undo log and the last update check live (default `~/.local/state/db/`) |
 
 ## Development
 

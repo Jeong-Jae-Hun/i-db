@@ -41,7 +41,6 @@ const (
 	boardRows = 50
 	// boardFlowTypes 는 흐름 패널에 보일 아웃박스 종류 줄 최대 수다(R70.3)
 	boardFlowTypes    = 10
-	boardHint         = "r 새로고침 · 방향키·hjkl 패널 · Enter 쿼리 탭에 열기 · Ctrl+W 닫기 · F1 도움말"
 	boardNoFile       = "보드 없음 · .dbtui/boards/<이름>.json 을 쓰세요"
 	msgBoardExpensive = "비싼 질의라 보드에서 돌리지 않음"
 )

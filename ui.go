@@ -119,6 +119,7 @@ const (
 	oPrompt // 한 줄 입력(즐겨찾기 이름·데이터 검색 글). Enter 면 promptDo 를 부른다
 	oLong   // 칸 값 전체 화면 편집기(R49.3)
 	oConn   // 접속 추가·고치기 창(R59.2)
+	oKeys   // 이 화면의 키(R74.2). helpSections 에서 지금 포커스 묶음만 보인다
 )
 
 // runKind 는 실행 결과를 받는 방법이다. 표를 바꾸는 종류만 보류 중인 편집을 버릴지 먼저 묻는다.
@@ -180,19 +181,10 @@ var (
 	previewKeys = map[string]int{"up": -1, "k": -1, "down": 1, "j": 1, "pgup": -10, "pgdown": 10}
 )
 
-var focusHints = map[focus]string{
-	fTree:   "Enter 열기 · d 구조 · D DDL · I CSV · A/L/S 운영 · B DB · F 검색·흐름 · X 키 삭제 · N 새 접속 · / 거르기 · ? 도움말",
-	fEditor: "Ctrl+R 실행 · Ctrl+E 계획 · Ctrl+B 정의 · F8 정렬 · F9 Auto/Manual · F3/F4 즐겨찾기 · Ctrl+P 팔레트",
-	fResult: "F2 고치기 · Ctrl+S 제출 · p 고정 · C IN · F/R 외래 키 · D 복호화 · +/- 거르기 · o 값 · F1 도움말",
-}
-
 // helpSections 는 F1 도움말과 명령 팔레트(R40)의 항목이다. 항목은 {키, 설명, 팔레트가 다시 누를 키}이고
-// 셋째가 비면 팔레트에 넣지 않는다(마우스·⌘ 조합·설명 줄). at 은 팔레트가 키를 누르기 전에 옮길 포커스다(fKeep 이면 그대로).
-var helpSections = []struct {
-	title string
-	at    focus
-	keys  [][3]string
-}{
+// 셋째가 비면 팔레트에 넣지 않는다(마우스·⌘ 조합·설명 줄). 첫째가 빈 항목은 묶음 안의 작은 제목이다(R74.2).
+// at 은 팔레트가 키를 누르기 전에 옮길 포커스다(fKeep 이면 그대로).
+var helpSections = []helpSection{
 	{"전역", fKeep, [][3]string{
 		{"Tab / Shift+Tab", "포커스 이동 (자동완성 창이 열려 있으면 Tab 은 고르기)", "tab"},
 		{"Ctrl+R / F5", "실행: 선택한 글 전부, 없으면 커서 문장", "ctrl+r"},
@@ -264,6 +256,7 @@ var helpSections = []struct {
 		{"자동 저장", "파일 없는 탭은 첫 실행 때 queries/ 에 저장, 파일 탭은 고친 1초 뒤 저장", ""},
 	}},
 	{"트리", fTree, [][3]string{
+		{"", "이동·열기", ""},
 		{"j k / ↑ ↓", "이동", "j"},
 		{"Enter / l", "펼치기 · 테이블·키 열기", "enter"},
 		{"h", "접기 · 부모로", "h"},
@@ -271,57 +264,68 @@ var helpSections = []struct {
 		{"Enter (접속)", "펼치기 · 그 접속을 쓰는 탭이 없으면 최근 파일 열기", "enter"},
 		{"Enter (쿼리 파일)", "파일 열기 (이미 열린 탭이면 그 탭으로)", "enter"},
 		{"Enter (저장소)", "인덱스·라벨 값·지표·테이블 미리 보기 (OpenSearch·Loki·Prometheus·Grafana·DynamoDB·Athena, 펼치기는 l)", "enter"},
+		{"", "보기·운영", ""},
 		{"d / D", "테이블 구조 / DDL 을 새 탭에", "d"},
 		{"I", "CSV 가져오기 (테이블)", "I"},
 		{"A / L / S", "활동 / 잠금 / 테이블 크기 (PostgreSQL 접속)", "A"},
 		{"A / L / S", "INFO / SLOWLOG / 큰 키 (Redis 접속)", "A"},
 		{"B", "데이터베이스 바꾸기 (PostgreSQL 접속)", "B"},
 		{"F", "데이터 검색 (PostgreSQL 접속·스키마) · aws SNS 토픽은 흐름 (DB_ALLOW_BILLED=1)", "F"},
+		{"=", "다른 접속과 스키마 비교 (PostgreSQL 접속·스키마)", "="},
 		{"X", "패턴 맞는 키 일괄 삭제 (Redis 접속·이름공간, esc 멈춤)", "X"},
+		{"", "접속", ""},
 		{"N", "새 접속 (URL 붙여넣기 · Ctrl+T 시험, .dbtui/connections.json)", "N"},
 		{"E", "접속 고치기 (db 전용 접속) · 폴더 줄은 폴더 이름 바꾸기", "E"},
 		{"M", "접속을 다른 폴더로 옮기기 (빈 값이면 원래 그룹, .dbtui/folders.json)", "M"},
 		{"X (PostgreSQL·저장소 접속)", "접속 지우기 (db 전용 접속, .env 비밀번호도)", ""},
 		{"Alt+X", "접속 지우기 (db 전용 접속, Redis 포함)", "alt+X"},
-		{"=", "다른 접속과 스키마 비교 (PostgreSQL 접속·스키마)", "="},
+		{"", "거르기·기타", ""},
 		{"/", "거르기 (Redis 키는 SCAN 패턴)", "/"},
 		{"esc", "거르기 해제", "esc"},
 		{"r", "새로고침 (접속은 자동완성 목록도, 쿼리 파일 목록도)", "r"},
-		{"?", "도움말", "?"},
+		{"?", "이 화면의 키 (전체는 F1)", "?"},
 		{"q", "종료", "q"},
 	}},
 	{"결과", fResult, [][3]string{
+		{"", "이동", ""},
 		{"h j k l / 방향키", "셀 이동", "j"},
 		{"PgUp / PgDn · g / G", "쪽 이동 · 처음 / 끝", "pgdown"},
 		{"0 / $", "첫 열 / 끝 열", "0"},
-		{"Enter / v", "셀 전체 값 / 레코드 세로 보기", "enter"},
-		{"s · /", "정렬(오름→내림→없음) · 거르기 abc !abc col:abc col=v col>v col=null", "s"},
-		{"y / Y", "셀 / 행 복사", "y"},
-		{"Ctrl+K · 오른쪽 클릭", "복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN (마지막 꼴 기억)", "ctrl+k"},
-		{"e / E", "CSV / JSON 내보내기", "e"},
 		{"< / >", "열 폭", ">"},
+		{"", "보기", ""},
+		{"Enter / v", "셀 전체 값 / 레코드 세로 보기", "enter"},
+		{"o", "셀 전체 값", "o"},
 		{"w", "텍스트 줄바꿈 (테이블 보기는 WHERE, / 도 같음)", "w"},
+		{"t · esc", "실행 계획 나무 ↔ JSON · 닫기", "t"},
+		{"c", "차트 (다시 c·esc 로 표)", "c"},
+		{"D", "staticEncrypt 칸 복호화 보기 (다시 D 원래 값)", "D"},
+		{"", "정렬·거르기", ""},
+		{"s · /", "정렬(오름→내림→없음) · 거르기 abc !abc col:abc col=v col>v col=null", "s"},
 		{"O", "테이블 보기 ORDER BY 입력 (Tab 열 이름 완성)", "O"},
+		{"[ / ] · #", "테이블 보기 이전·다음 페이지 · 정확한 개수 (일반 결과 ] 는 다음 1,000행 더 읽기)", "]"},
+		{"+ / -", "테이블 보기 WHERE 에 칸 값 = / <> 더하기·빼기", "+"},
+		{"", "편집", ""},
 		{"Enter·F2 / esc", "칸 고치기 / 취소 (Ctrl+N 은 NULL)", "f2"},
 		{"a · Ctrl+D · d · u", "행 추가 · 복제 · 삭제 표시 · 되돌리기", "a"},
 		{"Ctrl+S", "변경 미리 보기 뒤 제출", "ctrl+s"},
 		{"Ctrl+Z", "마지막 제출 되돌리기 (미리 보기 뒤 확인)", "ctrl+z"},
 		{"붙여넣기", "시트 칸(TSV)을 커서부터 덮어쓰기 (넘치면 새 행)", ""},
 		{"칸 고치는 중", "space bool 순환 · now/today · Ctrl+O 큰 편집기 · enum 은 고르기 창", ""},
-		{"i / U", "행을 INSERT / UPDATE 문으로 복사", "i"},
-		{"o", "셀 전체 값", "o"},
-		{"[ / ] · #", "테이블 보기 이전·다음 페이지 · 정확한 개수 (일반 결과 ] 는 다음 1,000행 더 읽기)", "]"},
-		{"p / P · { / }", "결과 고정 / 풀기 · 결과 탭 이동", "p"},
-		{"K / X", "pid 행의 쿼리 취소 / 연결 종료", "K"},
-		{"t · esc", "실행 계획 나무 ↔ JSON · 닫기", "t"},
-		{"c", "차트 (다시 c·esc 로 표)", "c"},
+		{"", "복사·내보내기", ""},
+		{"y / Y", "셀 / 행 복사", "y"},
+		{"Ctrl+K · 오른쪽 클릭", "복사 꼴 고르기: 행·선택·보이는 행·열 × TSV·CSV(헤더)·JSON·Markdown·INSERT·IN (마지막 꼴 기억)", "ctrl+k"},
 		{"V", "사각형 선택 · 합·평균·최소·최대 (y 복사, esc·V 끝)", "V"},
-		{"=", "고정한 결과와 비교 (esc 닫기)", "="},
 		{"C", "열(선택) 값을 IN 목록으로 복사", "C"},
+		{"i / U", "행을 INSERT / UPDATE 문으로 복사", "i"},
+		{"e / E", "CSV / JSON 내보내기", "e"},
+		{"", "찾기·비교", ""},
 		{"F / R", "외래 키 따라가기 / 이 행을 참조하는 테이블", "F"},
 		{"Ctrl+B", "연결된 곳 찾기 (칸 값이 든 다른 테이블 · 같은 그룹·환경 접속, Enter 로 열기)", "ctrl+b"},
-		{"D", "staticEncrypt 칸 복호화 보기 (다시 D 원래 값)", "D"},
-		{"+ / -", "테이블 보기 WHERE 에 칸 값 = / <> 더하기·빼기", "+"},
+		{"p / P · { / }", "결과 고정 / 풀기 · 결과 탭 이동", "p"},
+		{"=", "고정한 결과와 비교 (esc 닫기)", "="},
+		{"", "기타", ""},
+		{"K / X", "pid 행의 쿼리 취소 / 연결 종료", "K"},
+		{"?", "이 화면의 키 (전체는 F1)", "?"},
 		{"q", "종료", "q"},
 	}},
 	{"대시보드 (Ctrl+G)", fKeep, [][3]string{
@@ -329,11 +333,20 @@ var helpSections = []struct {
 		{"Enter", "트리에서 그 접속 고르기", ""},
 		{"/ · esc", "그룹·이름·환경으로 거르기 · 해제", ""},
 		{"j k / ↑ ↓", "이동", ""},
+		{"?", "이 화면의 키", ""},
+	}},
+	{"흐름 (Alt+F)", fKeep, [][3]string{
+		{"r", "바로 다시 풀기", ""},
+		{"↑ ↓ / j k", "흐름 고르기", ""},
+		{"← → / h l", "상자 고르기", ""},
+		{"Enter", "상자 상세 (SNS 구독·큐 속성 등)", ""},
+		{"?", "이 화면의 키", ""},
 	}},
 	{"보드 (Alt+B)", fKeep, [][3]string{
 		{"r", "바로 다시 돌리기 (파일도 다시 읽음)", ""},
 		{"방향키 / h j k l", "패널 고르기", ""},
 		{"Enter", "패널 질의를 새 쿼리 탭에서 실행 · 흐름 패널은 흐름 탭", ""},
+		{"?", "이 화면의 키", ""},
 	}},
 	{"JSON 값 보기 (o)", fResult, [][3]string{
 		{"t", "나무 ↔ 원문", "t"},
@@ -356,6 +369,12 @@ var helpSections = []struct {
 		{"열 머리 클릭", "정렬 (테이블 보기는 서버 정렬, Shift 는 정렬 열 더하기)", ""},
 		{"WHERE · ORDER BY 칸 클릭", "테이블 보기 조건·정렬 입력", ""},
 	}},
+}
+
+type helpSection struct {
+	title string
+	at    focus
+	keys  [][3]string
 }
 
 type nodeKind int
@@ -832,6 +851,9 @@ type model struct {
 	qfiles map[int][]string
 	qstale bool // 자동 저장으로 쓴 파일이 있어 qfiles 순서가 낡았다. 탭을 옮기거나 닫을 때 다시 읽는다
 	mac    bool // 키 안내를 ⌘ 글자로 보인다(R47.1)
+	// 한 번만 보이는 팁(R74.3). tips 가 nil 이면 끈 것이고, tip 은 지금 보이는 팁이라 다음 키에서 지운다
+	tips *tipState
+	tip  string
 
 	// prod 쓰기 잠금(R54). prodLock 은 켤 때 늘 참이고 v6 이전 시험만 끈다. unlocked 는 접속별로 연 마감 시각이다
 	prodLock    bool
@@ -1992,7 +2014,17 @@ func notifyCmd(conn string, elapsed time.Duration, rows int, failed, canceled bo
 
 // ─── Update ───
 
+// Update 는 메시지를 처리한 뒤 처음 들어간 화면이면 팁을 건다(R74.3). 보이던 팁은 다음 키에서 지운다.
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(tea.KeyMsg); ok {
+		m.tip = ""
+	}
+	_, cmd := m.update(msg)
+	m.noteTip()
+	return m, cmd
+}
+
+func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -2729,7 +2761,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.overlay != oNone {
 			m.endDrag()
 		}
-		if m.overlay == oHelp && msg.Action == tea.MouseActionPress {
+		if (m.overlay == oHelp || m.overlay == oKeys) && msg.Action == tea.MouseActionPress {
 			m.overlay = oNone
 			return m, nil
 		}
@@ -2927,6 +2959,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.connFormKey(k)
 	case oHelp:
 		m.overlay = oNone
+		return m, nil
+	case oKeys:
+		if ks == "esc" || ks == "?" || ks == "q" {
+			m.overlay = oNone
+		}
 		return m, nil
 	case oConfirm:
 		if y := m.yes; y != nil {
@@ -3257,6 +3294,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "f1":
 		m.overlay = oHelp
 		return m, nil
+	case "?":
+		// 편집기에서는 글자다(대시보드·흐름·보드 탭은 편집기 자리도 그 화면이다). 입력 중인 결과 영역·창은 위에서 이미 받았다
+		if m.focus != fEditor || t.dash != nil || t.flow != nil || t.board != nil {
+			m.overlay = oKeys
+			return m, nil
+		}
 	case "tab":
 		// 자동완성 창·템플릿 펼치기·템플릿 자리 돌기는 편집기가 Tab 을 쓴다
 		if m.focus != fEditor || !t.editor.WantsTab() {
@@ -4028,8 +4071,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 	case "G", "end":
 		m.cursor = clamp(len(m.rows)-1, len(m.rows))
-	case "?":
-		m.overlay = oHelp
 	case "/":
 		m.overlay = oFilter
 		m.input.Prompt = "/ "
@@ -4395,25 +4436,57 @@ func (m *model) View() string {
 			lines = append(lines, truncate(line, m.w))
 		}
 		return strings.Join(lines, "\n")
-	case oHelp:
-		blocks := make([]string, 0, len(helpSections))
-		for _, s := range helpSections {
+	case oHelp, oKeys:
+		secs, foot := helpSections, "아무 키나 눌러 닫기"
+		if m.overlay == oKeys {
+			secs, foot = nil, m.label("esc·? 닫기 · 닫은 뒤 F1 전체 도움말")
+			for _, i := range m.keySections() {
+				secs = append(secs, helpSections[i])
+			}
+		}
+		// 이 화면의 키(?)는 묶음 하나를 작은 제목마다 나눠 두 단에 담고, 단마다 폭을 잘라 오른쪽 단이 밀리지 않게 한다
+		keys, colW := m.overlay == oKeys, max(1, m.w-6)
+		if m.w >= 130 || keys && m.w >= 100 {
+			colW = (m.w - 10) / 2
+		}
+		var blocks []string
+		for _, s := range secs {
 			lines := []string{helpTitle.Render(s.title)}
 			for _, kv := range s.keys {
-				lines = append(lines, helpKey.Width(22).Render(m.label(kv[0]))+m.label(kv[1]))
+				if kv[0] == "" {
+					if keys && len(lines) > 1 {
+						blocks, lines = append(blocks, strings.Join(lines, "\n")), nil
+					}
+					lines = append(lines, dimStyle.Render("─ "+kv[1]))
+					continue
+				}
+				line := helpKey.Width(22).Render(m.label(kv[0])) + m.label(kv[1])
+				if keys {
+					line = truncate(line, colW)
+				}
+				lines = append(lines, line)
 			}
 			blocks = append(blocks, strings.Join(lines, "\n"))
 		}
 		// 넓은 화면은 두 단으로 나눠 작은 높이에서도 대부분 보이게 한다
 		content := strings.Join(blocks, "\n\n")
-		if m.w >= 130 {
+		if colW < m.w-6 && len(blocks) > 1 {
 			half := (len(blocks) + 1) / 2
+			if keys {
+				// 작은 제목 묶음은 크기가 제각각이라 줄 수로 반을 가른다
+				total, acc := strings.Count(content, "\n"), 0
+				for half = 1; half < len(blocks)-1; half++ {
+					if acc += strings.Count(blocks[half-1], "\n") + 2; acc*2 >= total {
+						break
+					}
+				}
+			}
 			content = lipgloss.JoinHorizontal(lipgloss.Top,
 				strings.Join(blocks[:half], "\n\n"), "    ", strings.Join(blocks[half:], "\n\n"))
 		}
-		lines := strings.Split(content+"\n\n"+dimStyle.Render("아무 키나 눌러 닫기"), "\n")
+		lines := strings.Split(content+"\n\n"+dimStyle.Render(foot), "\n")
 		if len(lines) > m.h-2 {
-			lines = append(lines[:max(1, m.h-3)], dimStyle.Render("… 창을 키우면 더 보입니다"))
+			lines = append(lines[:max(1, m.h-3)], dimStyle.Render("… 창을 키우면 더 보입니다 · "+foot))
 		}
 		for i, ln := range lines {
 			lines[i] = truncate(ln, max(1, m.w-6))
@@ -4688,18 +4761,17 @@ func (m *model) View() string {
 	}
 
 	// ─── 상태 줄 ───
+	// 키 안내(R74.1)는 상태 글 오른쪽 남은 폭에 앞 항목부터 들어가는 만큼만 보인다. 팁(R74.3)은 맨 앞이다
 	status := barStyle.Render(" " + textutil.Printable(m.status, false))
-	hint := focusHints[m.focus]
-	if t.dash != nil && m.focus != fTree {
-		hint = dashHint
+	items := m.hints()
+	if m.tip != "" {
+		items = append([]string{m.tip}, items...)
 	}
-	if t.flow != nil && m.focus != fTree {
-		hint = flowHint
+	hint := fitHints(items, m.hintWidth())
+	if hint == "" {
+		return header + "\n" + body + "\n" + m.bar(status, "")
 	}
-	if t.board != nil && m.focus != fTree {
-		hint = boardHint
-	}
-	return header + "\n" + body + "\n" + m.bar(status, hintStyle.Render(m.label(hint)+" "))
+	return header + "\n" + body + "\n" + m.bar(status, hintStyle.Render(hint+" "))
 }
 
 // bar 는 헤더·상태 줄처럼 왼쪽과 오른쪽 글을 화면 폭에 맞춰 배경색으로 채운 한 줄이다.

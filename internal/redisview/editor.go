@@ -117,6 +117,12 @@ func NewEditor(v Value) Model {
 // Editing 이 참이면 입력·확인 중이라 통합은 모든 키를 이 모델에 넘겨야 한다.
 func (m Model) Editing() bool { return m.op != opNone }
 
+// Confirming 은 항목·키 지우기의 y/N 확인 중인지다. 이때는 y 만 지우고 다른 키는 취소다.
+func (m Model) Confirming() bool { return m.op == opDelete || m.op == opDeleteKey }
+
+// Type 은 편집 중인 키의 Redis 타입이다(string·hash·list·set·zset 등).
+func (m Model) Type() string { return m.v.Type }
+
 // SetSize 는 그릴 크기를 정한다.
 func (m Model) SetSize(w, h int) Model {
 	m.w, m.h = w, h

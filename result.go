@@ -299,8 +299,33 @@ func (m *model) sourceRequery(t *queryTab, conn int, keep grid.Query, sq source.
 // 만들어 1만 행에서 막는다. 그 이상은 F7 전체 내보내기로 받는다. 늘리려면 보이는 창 근처만 들고 나머지는 서버 커서로 읽어야 한다
 const maxMoreRows = 10 * db.MaxRows
 
+// morePending 은 moreReason 이 보류 중인 변경 때문에 막았다는 표시다. 알림 글은 키 이름이 들어 loadMore 가 만든다
+const morePending = "pending"
+
 // loadMore 는 잘린 PostgreSQL 일반 결과(R14.5 와 같은 기준)의 다음 1,000행을 지금 정렬·거르기로 읽어 덧붙인다(`]`).
 func (m *model) loadMore(t *queryTab) tea.Cmd {
+	conn, base, reason := m.moreReason(t)
+	switch reason {
+	case "":
+	case morePending:
+		m.status = fmt.Sprintf(m.label("변경 %d건을 먼저 제출(Ctrl+S)하거나 되돌리세요(u)"), t.grid.Pending())
+		return nil
+	default:
+		m.status = "더 읽지 않음: " + reason
+		return nil
+	}
+	sql := t.grid.PageSQL(base, len(t.res.Rows))
+	sent, note, err := m.expandEnc(conn, sql)
+	if err != nil {
+		m.status = err.Error()
+		return nil
+	}
+	return m.guard(pendingRun{tab: t.id, conn: conn, readOnly: true, kind: rkMore, tx: true, sql: sql, stmts: 1, note: note,
+		exec: execScript(m.clients, script{conn: m.conn(conn), stmts: []string{sent}, readOnlyTx: true})})
+}
+
+// moreReason 은 더 읽지 못하는 까닭이다(R14.7). 읽을 수 있으면 접속과 감쌀 원래 문장이다. 키 안내(R74.1)도 이것으로 `]`를 보인다.
+func (m *model) moreReason(t *queryTab) (int, string, string) {
 	conn, reason := m.rereadConn(t, false)
 	switch {
 	case t.res == nil || len(t.res.Cols) == 0:
@@ -313,8 +338,7 @@ func (m *model) loadMore(t *queryTab) tea.Cmd {
 	case len(t.res.Rows) >= maxMoreRows:
 		reason = fmt.Sprintf("%s행까지만 더 읽음 (F7 전체 내보내기)", textutil.GroupDigits(maxMoreRows))
 	case t.grid.Pending() > 0:
-		m.status = fmt.Sprintf(m.label("변경 %d건을 먼저 제출(Ctrl+S)하거나 되돌리세요(u)"), t.grid.Pending())
-		return nil
+		reason = morePending
 	case t.grid.Query() != t.fetched:
 		reason = "정렬·거르기가 받은 행에만 걸림"
 	}
@@ -322,18 +346,7 @@ func (m *model) loadMore(t *queryTab) tea.Cmd {
 	if reason == "" {
 		base, reason = pgBase(t)
 	}
-	if reason != "" {
-		m.status = "더 읽지 않음: " + reason
-		return nil
-	}
-	sql := t.grid.PageSQL(base, len(t.res.Rows))
-	sent, note, err := m.expandEnc(conn, sql)
-	if err != nil {
-		m.status = err.Error()
-		return nil
-	}
-	return m.guard(pendingRun{tab: t.id, conn: conn, readOnly: true, kind: rkMore, tx: true, sql: sql, stmts: 1, note: note,
-		exec: execScript(m.clients, script{conn: m.conn(conn), stmts: []string{sent}, readOnlyTx: true})})
+	return conn, base, reason
 }
 
 // appendMore 는 더 읽은 행을 결과에 덧붙이고 요약(`2,000행 · 더 있음`)을 돌려준다. 고정한 결과가 같은 행을 가리킬 수 있어

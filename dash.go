@@ -30,7 +30,6 @@ var (
 
 const (
 	dashProdHint = "--prod 로 확인" // CLI 가 확인하지 않은 prod 접속(R64.3)
-	dashHint     = "r 새로고침 · Enter 트리에서 고르기 · / 거르기 · Ctrl+W 닫기 · F1 도움말"
 	// 표가 이만큼 줄을 못 얻으면 요약 카드를 한 줄로 접는다(R64.1)
 	dashMinRows = 5
 )

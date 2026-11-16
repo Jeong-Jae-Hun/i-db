@@ -772,7 +772,7 @@ func TestKeys_맥이면_키_안내_도움말_팔레트가_커맨드_글자이고
 	m := testModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 200, Height: 120})
 	m.setFocus(fEditor)
-	if v := m.View(); !strings.Contains(v, "Ctrl+R 실행 · Ctrl+E 계획") {
+	if v := m.View(); !strings.Contains(v, "Ctrl+R 실행 · Ctrl+E 실행 계획") {
 		t.Fatal("맥이 아니면 Ctrl 그대로")
 	}
 	m.Update(keyMsgOf("ctrl+p"))
@@ -782,7 +782,7 @@ func TestKeys_맥이면_키_안내_도움말_팔레트가_커맨드_글자이고
 	m.Update(key("esc"))
 
 	m.mac = true
-	if v := m.View(); !strings.Contains(v, "⌘R 실행 · ⌘E 계획 · ⌘B 정의 · ⌥⌘L 정렬 · ⌘⇧M Auto/Manual · ⌘⇧O/⌘⇧S 즐겨찾기 · ⌘P 팔레트") {
+	if v := m.View(); !strings.Contains(v, "⌘R 실행 · ⌘E 실행 계획 · ⌥⌘L 정렬 · ⌘? 도움말 · ⌘B 정의 · ⌃Space 자동완성 · ⌘P 팔레트") {
 		t.Fatal("상태 줄 키 안내가 ⌘")
 	}
 	m.Update(keyMsgOf("f1"))

@@ -71,17 +71,32 @@ type linkedMsg struct {
 }
 
 // linkedConns 는 conn 과 그룹·환경(R6.2)이 같은 PostgreSQL 접속이다. conn 이 맨 앞이고 그룹이 없으면 conn 하나다.
-// 환경이 같아야 하므로 stg 에서 찾을 때 prod 는 들지 않는다.
+// 환경이 같아야 하므로 stg 에서 찾을 때 prod 는 들지 않는다. 같은 데이터베이스의 읽기·쓰기 접속 짝은 같은 데이터라
+// 하나만 센다(R73.4): 읽기 접속을 빼되 conn 자신은 남기고, conn 이 읽기 접속이면 짝인 쓰기 접속을 뺀다.
 func linkedConns(proj *db.Project, conn int) []int {
 	out := []int{conn}
 	cur := proj.Conns[conn]
 	if cur.Group == "" {
 		return out
 	}
+	var same []int
 	for i, c := range proj.Conns {
 		if i != conn && c.Kind == db.KindPG && c.Group == cur.Group && c.Env() == cur.Env() {
-			out = append(out, i)
+			same = append(same, i)
 		}
+	}
+	all := append([]int{conn}, same...)
+	for _, i := range same {
+		c := proj.Conns[i]
+		// 쓰기 접속은 conn 이 같은 DB 의 읽기 접속일 때만, 읽기 접속은 같은 DB 의 쓰기 접속이 함께 들 때 뺀다
+		twin := slices.ContainsFunc(all, func(j int) bool {
+			o := proj.Conns[j]
+			return j != i && o.DB == c.DB && isReadConn(o) != isReadConn(c)
+		})
+		if twin && (isReadConn(c) || isReadConn(cur) && cur.DB == c.DB) {
+			continue
+		}
+		out = append(out, i)
 	}
 	return out
 }

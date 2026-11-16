@@ -41,7 +41,6 @@ const (
 	flowAWSTimeout = 15 * time.Second
 	// flowNoMetrics 는 토픽·큐가 있는 흐름 이름 옆 흐린 안내다. 큐·DLQ 수는 SQS 요청마다 요금이 붙어 묻지 않는다(R72)
 	flowNoMetrics = "수치는 요금이 붙어 보지 않음"
-	flowHint      = "r 새로고침 · ↑↓ 흐름 · ←→ 상자 · Enter 상세 · Ctrl+W 닫기 · F1 도움말"
 	flowNoFile    = "흐름 없음 · .dbtui/flows.json 을 쓰세요 (DB_ALLOW_BILLED=1 이면 aws 트리 SNS 토픽에서 F)"
 	// stageType 은 아웃박스 종류 한 줄(R69.6)이다. 그림에서는 아웃박스 아래 줄로, `db flows` 에서는 한 줄로 보인다
 	stageType = "outbox-type"
@@ -760,14 +759,20 @@ func (m *model) flowIcon(s *flowState, f flows.Flow) (string, lipgloss.Style) {
 
 // ─── 트리 F ───
 
+// snsTopic 은 n 이 aws 트리의 SNS 토픽 줄이면 그 ARN 이다. 트리 F(흐름)와 키 안내(R74)가 같이 본다.
+func (m *model) snsTopic(n *node) (string, bool) {
+	if n == nil || n.kind != nSource || m.conn(n.conn).Kind != db.KindAWS {
+		return "", false
+	}
+	arn, ok := strings.CutPrefix(n.key, "sns/")
+	return arn, ok && !strings.Contains(arn, "/")
+}
+
 // treeFlow 는 aws 트리의 SNS 토픽 줄에서 그 토픽만의 흐름을 연다. 트리에서 연 흐름은 아웃박스·큐가 없고 토픽 이름만이라
 // 아무것도 묻지 않는다(R72). SNS 폴더는 요금 허용 때만 보여 이 줄도 그때만 있다. 접속은 SNS 상자 Enter(구독 표)에 쓴다.
 func (m *model) treeFlow(n *node) (tea.Cmd, bool) {
-	if n == nil || n.kind != nSource || m.conn(n.conn).Kind != db.KindAWS {
-		return nil, false
-	}
-	arn, ok := strings.CutPrefix(n.key, "sns/")
-	if !ok || strings.Contains(arn, "/") {
+	arn, ok := m.snsTopic(n)
+	if !ok {
 		return nil, false
 	}
 	c := m.conn(n.conn)
