@@ -192,8 +192,12 @@ func flowBoxes(f flows.Flow, s flowSnap, done bool) []flowBox {
 		qb := flowBox{stage: "sqs", name: q.Name, metrics: pending, err: cmp.Or(s.awsErr, q.Err), note: s.awsNote, sub: i, conn: f.AWS, path: "sqs/" + cmp.Or(q.Arn, cq.Name)}
 		out = append(out, qb)
 		if q.DLQ != "" {
-			// DLQ 는 다른 계정일 수 있어 이름이 아닌 ARN 으로 연다
-			out = append(out, flowBox{stage: "dlq", name: q.DLQ, sub: i, conn: f.AWS, path: "sqs/" + cmp.Or(q.DLQArn, cq.DLQ)})
+			// DLQ 는 다른 계정일 수 있어 ARN 으로만 연다. 풀이 전이라 ARN 을 모르면 이름으로 열지 않는다(같은 이름의 다른 큐를 열 수 있다)
+			dlq := flowBox{stage: "dlq", name: q.DLQ, sub: i, conn: f.AWS}
+			if arn := cmp.Or(q.DLQArn, cq.DLQ); strings.HasPrefix(arn, "arn:") {
+				dlq.path = "sqs/" + arn
+			}
+			out = append(out, dlq)
 		}
 		for _, mp := range q.Lambdas {
 			b := flowBox{stage: "lambda", name: mp.Function, metrics: mp.State + " · " + mp.LastResult, short: mp.LastResult, sub: i, conn: f.AWS, path: "lambda/" + mp.Function,

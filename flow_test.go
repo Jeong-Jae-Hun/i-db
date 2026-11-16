@@ -166,8 +166,8 @@ func TestFlowBoxes_큐_상자는_결과_전에도_설정_순서대로_이름을_
 	if want := "outbox:shop-stg public.t_outbox:…\nsns:stg-hub:\nsqs:q1:…\ndlq:q1-dlq:\nsqs:q2:…"; strings.Join(got, "\n") != want {
 		t.Fatalf("결과 전:\n%s", strings.Join(got, "\n"))
 	}
-	if wait[2].path != "sqs/q1" || wait[3].path != "sqs/q1-dlq" {
-		t.Fatalf("풀기 전 경로는 설정 이름: %q %q", wait[2].path, wait[3].path)
+	if wait[2].path != "sqs/q1" || wait[3].path != "" {
+		t.Fatalf("풀기 전 큐는 설정 이름으로, DLQ 는 ARN 을 몰라 열지 않는다: %q %q", wait[2].path, wait[3].path)
 	}
 	bad := flowBoxes(hubFlow(), flowSnap{awsErr: "aws sts:GetCallerIdentity: ExpiredToken"}, true)
 	if !bad[2].failed() || !bad[4].failed() || bad[1].failed() || boxLabel(bad[2]) != "[SQS q1 | 오류: aws sts:GetCallerIdentity: ExpiredToken]" {
@@ -779,6 +779,21 @@ func TestFlowBoxes_종류가_잘리면_빠진_설정_종류를_0건으로_그리
 	for _, b := range flowBoxes(typeFlow(), flowSnap{outbox: &st}, true) {
 		if b.name == "IDLE" {
 			t.Fatalf("잘린 결과에 없는 설정 종류를 0건으로 그렸다: %+v", b)
+		}
+	}
+}
+
+func TestFlowBoxes_풀이_전_DLQ_는_ARN_을_몰라_상세를_열지_않는다(t *testing.T) {
+	for _, b := range flowBoxes(hubFlow(), flowSnap{}, true) {
+		if b.stage == "dlq" && b.path != "" {
+			t.Fatalf("풀이 전 DLQ 를 이름으로 연다: %+v", b)
+		}
+	}
+	f := hubFlow()
+	f.Queues[0].DLQ = "arn:aws:sqs:ap-northeast-2:999988887777:q1-dlq"
+	for _, b := range flowBoxes(f, flowSnap{}, true) {
+		if b.stage == "dlq" && b.path != "sqs/"+f.Queues[0].DLQ {
+			t.Fatalf("ARN 으로 적은 DLQ 는 그 ARN 으로 연다: %+v", b)
 		}
 	}
 }
