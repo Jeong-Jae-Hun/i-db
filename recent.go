@@ -102,17 +102,22 @@ var (
 )
 
 // recentSaver 는 기억 쓰기를 한 번에 하나씩 화면 밖에서 한다. 쓰는 동안 들어온 사본은 가장 새 것 하나만 남겨 다음에 쓴다.
+// 첫 실패는 failed 에 남아 지워지지 않는다. 그 뒤 사본은 받지 않고, 끝 알림과 끝낼 때 flush 가 같은 실패를 본다.
 type recentSaver struct {
-	mu   sync.Mutex
-	next *recent.Snapshot
-	idle chan struct{} // 돌고 있는 고루틴이 끝나면 닫힌다. 돌지 않으면 nil
-	err  error
+	mu     sync.Mutex
+	next   *recent.Snapshot
+	idle   chan struct{} // 돌고 있는 고루틴이 끝나면 닫힌다. 돌지 않으면 nil
+	failed error
 }
 
 // submit 은 snap 을 다음에 쓸 사본으로 둔다. 쓰는 고루틴이 없으면 띄우고, 그 끝을 recentSavedMsg 로 알릴 명령을 돌려준다.
+// 이미 실패했으면 버린다(화면이 실패 알림을 받기 전에 들어온 저장도 다시 쓰지 않는다).
 func (s *recentSaver) submit(snap *recent.Snapshot) tea.Cmd {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failed != nil {
+		return nil
+	}
 	s.next = snap
 	if s.idle != nil {
 		return nil
@@ -122,7 +127,7 @@ func (s *recentSaver) submit(snap *recent.Snapshot) tea.Cmd {
 	go s.run(idle)
 	return func() tea.Msg {
 		<-idle
-		return recentSavedMsg{err: s.takeErr()}
+		return recentSavedMsg{err: s.failure()}
 	}
 }
 
@@ -140,22 +145,20 @@ func (s *recentSaver) run(idle chan struct{}) {
 		s.mu.Unlock()
 		if err := writeRecent(snap); err != nil {
 			s.mu.Lock()
-			s.err, s.next, s.idle = err, nil, nil
+			s.failed, s.idle = err, nil
 			s.mu.Unlock()
 			return
 		}
 	}
 }
 
-func (s *recentSaver) takeErr() error {
+func (s *recentSaver) failure() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := s.err
-	s.err = nil
-	return err
+	return s.failed
 }
 
-// flush 는 돌고 있는 쓰기가 끝나기를 wait 까지 기다리고 그동안 난 실패를 돌려준다.
+// flush 는 돌고 있는 쓰기가 끝나기를 wait 까지 기다리고 실패가 있었으면 돌려준다.
 func (s *recentSaver) flush(wait time.Duration) error {
 	s.mu.Lock()
 	idle := s.idle
@@ -167,7 +170,7 @@ func (s *recentSaver) flush(wait time.Duration) error {
 			return errRecentFlush
 		}
 	}
-	return s.takeErr()
+	return s.failure()
 }
 
 // ─── 팔레트·찾기 ───

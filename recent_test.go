@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Jeong-Jae-Hun/i-db/internal/atomicfile"
 	"github.com/Jeong-Jae-Hun/i-db/internal/complete"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/recent"
@@ -636,35 +636,64 @@ func TestRecent_쓰기에_실패하면_이번_실행에서_끄고_한_번_알린
 	}
 }
 
-func TestRecentSave_다른_db_가_잠금을_쥐고_있어도_화면은_기다리지_않고_정해진_시간_뒤_끄고_알린다(t *testing.T) {
+func TestRecentSave_쓰기가_막혀_있어도_화면은_기다리지_않고_실패는_알림으로_끈다(t *testing.T) {
 	m := recentModel(t)
-	must(t, os.MkdirAll(filepath.Dir(recentPath(t)), 0o700))
-	lock, err := atomicfile.Lock(recentPath(t)) // 멈춘 다른 db 가 쥔 잠금
-	must(t, err)
-	defer lock.Close()
-	old := recent.LockWait
-	recent.LockWait = 200 * time.Millisecond
-	t.Cleanup(func() { recent.LockWait = old })
-
-	start := time.Now()
-	cmd := palette(m, "Ctrl+T · 쿼리 탭")
-	if d := time.Since(start); d > 100*time.Millisecond {
-		t.Fatalf("화면이 잠금을 기다렸다: %v", d)
+	release, started, _ := blockingWrites(t, errors.New("lock wait timed out"))
+	done := make(chan tea.Cmd)
+	go func() { done <- palette(m, "Ctrl+T · 쿼리 탭") }()
+	var cmd tea.Cmd
+	select {
+	case cmd = <-done: // release 를 닫기 전에 돌아와야 한다
+	case <-time.After(30 * time.Second):
+		t.Fatal("화면이 막힌 쓰기를 기다렸다")
 	}
+	<-started
 	if m.recent == nil || len(m.tabs) != 2 {
-		t.Fatal("동작은 바로 끝난다")
+		t.Fatal("동작은 쓰기와 상관없이 끝난다")
 	}
+	close(release)
 	drive(m, cmd)
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("잠금 기다림은 LockWait 까지다: %v", d)
-	}
 	if m.recent != nil || !strings.Contains(m.status, "최근 기록 저장 실패, 이번 실행에서 끔") || !strings.Contains(m.status, "timed out") {
 		t.Fatalf("끄고 알린다: %q", m.status)
 	}
 }
 
-// blockingWrites 는 writeRecent 를 release 가 닫힐 때까지 막고 실제로 쓰는 것으로 바꾼다. 쓰기를 시작하면 started 에 알리고 쓴 횟수를 센다.
-func blockingWrites(t *testing.T) (release, started chan struct{}, writes *atomic.Int32) {
+// failedSave 는 첫 쓰기가 실패한 모델이다. 끝 알림 명령을 먼저 돌려 그 실패를 화면 몫으로 받아 간 상태까지 만든다.
+func failedSave(t *testing.T) (*model, *atomic.Int32) {
+	t.Helper()
+	m := recentModel(t)
+	release, _, writes := blockingWrites(t, errors.New("disk full"))
+	close(release)
+	m.noteAction("a")
+	if msg, ok := m.recentCmd().(recentSavedMsg); !ok || msg.err == nil {
+		t.Fatalf("끝 알림에 실패: %#v", msg)
+	}
+	m.recentCmd = nil
+	return m, writes
+}
+
+func TestRecentSave_끝_알림이_실패를_먼저_받아도_끝낼_때_flush_는_같은_실패를_돌려준다(t *testing.T) {
+	m, _ := failedSave(t)
+	if err := m.recentSaver.flush(time.Minute); err == nil {
+		t.Fatal("끝낼 때도 실패를 안다")
+	}
+}
+
+func TestRecentSave_실패한_뒤_화면이_알림을_받기_전에_들어온_저장은_쓰지_않는다(t *testing.T) {
+	m, writes := failedSave(t)
+	m.noteAction("b") // 화면은 아직 recentSavedMsg 를 받지 않아 m.recent 가 남아 있다
+	if m.recentCmd != nil {
+		t.Fatal("새 쓰기를 띄우지 않는다")
+	}
+	_ = m.recentSaver.flush(time.Minute)
+	if n := writes.Load(); n != 1 {
+		t.Fatalf("실패 뒤에는 쓰지 않는다: %d번 썼다", n)
+	}
+}
+
+// blockingWrites 는 writeRecent 를 release 가 닫힐 때까지 막는 것으로 바꾼다. fail 이 있으면 그 오류를, 없으면 실제로 쓴다.
+// 쓰기를 시작하면 started 에 알리고 쓴 횟수를 센다.
+func blockingWrites(t *testing.T, fail error) (release, started chan struct{}, writes *atomic.Int32) {
 	t.Helper()
 	release, started, writes = make(chan struct{}), make(chan struct{}, 10), &atomic.Int32{}
 	old := writeRecent
@@ -672,6 +701,9 @@ func blockingWrites(t *testing.T) (release, started chan struct{}, writes *atomi
 		started <- struct{}{}
 		<-release
 		writes.Add(1)
+		if fail != nil {
+			return fail
+		}
 		return s.Write()
 	}
 	t.Cleanup(func() { writeRecent = old })
@@ -680,7 +712,7 @@ func blockingWrites(t *testing.T) (release, started chan struct{}, writes *atomi
 
 func TestRecentSave_쓰는_동안_들어온_저장은_가장_새_것_하나로_합쳐_차례로_쓴다(t *testing.T) {
 	m := recentModel(t)
-	release, started, writes := blockingWrites(t)
+	release, started, writes := blockingWrites(t, nil)
 	m.noteAction("a")
 	<-started // 첫 쓰기가 막힌 동안 셋이 더 온다
 	m.noteAction("b")
@@ -700,7 +732,7 @@ func TestRecentSave_쓰는_동안_들어온_저장은_가장_새_것_하나로_�
 
 func TestRecentSave_끝낼_때_쓰기가_멈춰_있으면_정해진_시간만_기다리고_알린다(t *testing.T) {
 	m := recentModel(t)
-	release, _, _ := blockingWrites(t)
+	release, _, _ := blockingWrites(t, nil)
 	t.Cleanup(func() { close(release); _ = m.recentSaver.flush(5 * time.Second) }) // writeRecent 를 되돌리기 전에 쓰기를 끝낸다
 	old := recentFlushWait
 	recentFlushWait = 100 * time.Millisecond
