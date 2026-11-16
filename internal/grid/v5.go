@@ -29,6 +29,12 @@ type Follow struct {
 	Reverse bool
 }
 
+// Linked 는 Ctrl+B 로 커서 칸 값이 든 다른 테이블을 찾아 달라는 요청이다(R73). 찾기는 통합이 한다.
+// Col 은 칸 열 이름(원본을 알면 테이블 열 이름), Table 은 원본 테이블 이름(모르면 "")이고 Value 는 DB 값이다.
+type Linked struct {
+	Col, Table, Value string
+}
+
 // CellFilter 는 +·- 로 커서 칸 값을 서버 WHERE 에 더하거나 빼 달라는 요청이다(R38).
 // 조건 글은 통합이 tableview.Condition 으로 만든다. Null 이면 Value 는 쓰지 않는다.
 type CellFilter struct {

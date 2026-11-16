@@ -230,7 +230,7 @@ var helpSections = []struct {
 		{"⌘S / ⌘O", "저장·제출 / 열기", ""},
 		{"⌘/ · ⌘D · ⌘K · ⌘A", "주석 · 줄 복제 · 복사 (결과는 복사 꼴 고르기) · 전체 선택", ""},
 		{"⌘Z / ⌘⇧Z", "되돌리기 / 다시 하기", ""},
-		{"⌘B", "정의로 이동 (= Ctrl+B)", ""},
+		{"⌘B", "정의로 이동 · 결과는 연결된 곳 찾기 (= Ctrl+B)", ""},
 		{"⌘P", "명령 팔레트 (= Ctrl+P)", ""},
 		{"⌘T ⌘W ⌘1..9 ⌘N ⌘H ⌘?", "= Ctrl+T Ctrl+W Alt+1..9 Ctrl+N Ctrl+H F1", ""},
 		{"⌘⇧O ⌘⇧S ⌘⇧D ⌘⇧E", "= F3 F4 F6 F7", ""},
@@ -319,6 +319,7 @@ var helpSections = []struct {
 		{"=", "고정한 결과와 비교 (esc 닫기)", "="},
 		{"C", "열(선택) 값을 IN 목록으로 복사", "C"},
 		{"F / R", "외래 키 따라가기 / 이 행을 참조하는 테이블", "F"},
+		{"Ctrl+B", "연결된 곳 찾기 (칸 값이 든 다른 테이블 · 같은 그룹·환경 접속, Enter 로 열기)", "ctrl+b"},
 		{"D", "staticEncrypt 칸 복호화 보기 (다시 D 원래 값)", "D"},
 		{"+ / -", "테이블 보기 WHERE 에 칸 값 = / <> 더하기·빼기", "+"},
 		{"q", "종료", "q"},
@@ -728,6 +729,7 @@ type queryTab struct {
 	dash       *dashState    // 대시보드 탭이면 그 상태(R64). 편집기·결과 대신 대시보드를 그린다
 	flow       *flowState    // 흐름 탭이면 그 상태(R69). 대시보드처럼 편집기·결과 자리 전체에 그린다
 	board      *boardState   // 보드 탭이면 그 상태(R70). 대시보드처럼 편집기·결과 자리 전체에 그린다
+	linked     *linkedView   // 연결된 곳 탭이면 그 상태(R73). 표가 그 결과일 때만 Enter 가 테이블을 연다
 }
 
 // completer 는 편집기 자동완성 함수다. 탭의 접속이 바뀌어도 부를 때 다시 읽도록 탭을 가리킨다.
@@ -1732,8 +1734,10 @@ func (m *model) gridKey(k tea.KeyMsg) tea.Cmd {
 		if t.grid.Selecting() {
 			target = grid.TargetSelection
 		}
-		m.openCopyMenu(t, target)
+		m.openCopyMenu(t, target, false)
 		return nil
+	case a.Linked != nil:
+		return m.linkedSearch(t, *a.Linked)
 	case a.Copy != nil:
 		return copyCmd(*a.Copy)
 	case a.CopyAs != nil:
@@ -1803,7 +1807,8 @@ func copyCmd(s string) tea.Cmd {
 
 // openCopyMenu 는 복사 고르기 창(R71)을 연다. 커서는 target 에서 마지막으로 고른 꼴에 둔다.
 // 그 대상에 없는 꼴(IN 목록은 열만)이면 그 꼴이 있는 첫 대상, 그것도 없으면 target 의 첫 꼴이다.
-func (m *model) openCopyMenu(t *queryTab, target grid.CopyTarget) {
+// linked 면(오른쪽 클릭) 맨 끝에 연결된 곳 찾기(R73)를 더한다. 고르면 Ctrl+B 를 누른 것과 같다.
+func (m *model) openCopyMenu(t *queryTab, target grid.CopyTarget, linked bool) {
 	choices := t.grid.CopyChoices()
 	if len(choices) == 0 {
 		m.status = "복사할 행 없음"
@@ -1815,6 +1820,9 @@ func (m *model) openCopyMenu(t *queryTab, target grid.CopyTarget) {
 		labels[i] = c.String()
 		byLabel[labels[i]] = c
 	}
+	if linked {
+		labels = append(labels, linkedMenuItem)
+	}
 	cursor := slices.Index(choices, grid.CopyChoice{Target: target, Format: m.copyFormat})
 	if cursor < 0 {
 		cursor = slices.IndexFunc(choices, func(c grid.CopyChoice) bool { return c.Format == m.copyFormat })
@@ -1823,6 +1831,9 @@ func (m *model) openCopyMenu(t *queryTab, target grid.CopyTarget) {
 		cursor = max(0, slices.IndexFunc(choices, func(c grid.CopyChoice) bool { return c.Target == target }))
 	}
 	m.openPicker("복사 ", labels, nil, func(label string) tea.Cmd {
+		if label == linkedMenuItem {
+			return m.gridKey(tea.KeyMsg{Type: tea.KeyCtrlB})
+		}
 		c := byLabel[label]
 		m.copyFormat = c.Format
 		a := t.grid.CopyWith(c)
@@ -2246,6 +2257,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case multiMsg:
 		m.showMulti(msg)
+		return m, nil
+	case linkedMsg:
+		m.showLinked(msg)
 		return m, nil
 	case schemaDiffMsg:
 		m.showSchemaDiff(msg)
@@ -2844,7 +2858,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 오른쪽 클릭은 그 칸으로 옮긴 뒤 현재 행 대상의 복사 고르기 창을 연다(R71.3)
 			if msg.Button == tea.MouseButtonRight {
 				if t.grid.CellAt(gm.X, gm.Y) {
-					m.openCopyMenu(t, grid.TargetRow)
+					m.openCopyMenu(t, grid.TargetRow, true)
 				}
 				return m, nil
 			}
@@ -3936,6 +3950,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t.view = (t.view+1+d+n)%n - 1
 			t.grid.SetResult(t.shown())
 			return m, nil
+		case "enter":
+			// 연결된 곳 표(R73)의 Enter 는 칸 값 보기 대신 그 줄의 테이블을 연다
+			if t.linked != nil && t.linked.res != nil && t.shown() == t.linked.res && !t.grid.Viewing() {
+				return m, m.openLinked(t)
+			}
+		case "esc":
+			// 연결된 곳 찾기는 Ctrl+C 처럼 esc 로도 멈춘다. 읽기만 하므로 반영 걱정이 없다
+			if t.linked != nil && t.running != nil {
+				t.running()
+				t.running, t.cancelled = nil, true
+				m.status = "취소 요청함"
+				return m, nil
+			}
 		case "]":
 			// 테이블 보기는 다음 페이지(R16.1)이고 일반 결과는 더 읽기다(R14.7)
 			if t.tv == nil {

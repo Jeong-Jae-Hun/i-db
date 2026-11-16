@@ -113,6 +113,10 @@ func TestCopyMenu_오른쪽_클릭은_그_칸으로_옮기고_현재_행_대상�
 	if m.overlay != oPicker || m.focus != fResult || m.pickerItems[m.pickerCursor] != "현재 행 · Markdown 표" {
 		t.Fatalf("overlay=%v focus=%v cursor=%q", m.overlay, m.focus, m.pickerItems[m.pickerCursor])
 	}
+	// 오른쪽 클릭 창 끝에는 연결된 곳 찾기(R73)가 붙는다
+	if m.pickerItems[len(m.pickerItems)-1] != linkedMenuItem {
+		t.Fatalf("끝 항목: %v", m.pickerItems)
+	}
 	cmd := pickLabel(t, m, "현재 행 · TSV (헤더)")
 	if cmd == nil || m.status != "복사함 (2줄) · 현재 행 · TSV (헤더)" {
 		t.Fatalf("status=%q", m.status)

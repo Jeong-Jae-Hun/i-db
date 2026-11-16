@@ -60,6 +60,7 @@ var cliCommands = []cliCommand{
 	{"redis", "db redis -c 접속 명령 [인자…] [--write [--force]]", "Redis 명령 하나(기본 읽기 명령만). - 로 시작하는 인자는 -- 뒤에 쓴다"},
 	{"user360", "db user360 --prod 이메일|uid|id|닉네임", "사용자 한눈에 보기(R51). prod 를 조회해 --prod 가 필요하다"},
 	{"search", "db search -c 접속 [-s 스키마] 찾을글", "스키마의 글자 열 전체 검색(테이블당 5행)"},
+	{"linked", "db linked -c 접속 --column 열 --value 값 [--table 스키마.테이블]", "칸 값이 든 다른 테이블을 이름 규칙으로 찾아 셈(R73). 같은 그룹·환경의 PostgreSQL 접속도, 실패가 있으면 1"},
 	{"schema-diff", "db schema-diff -c 접속A --to 접속B [-s 스키마] [--to-schema 스키마2]", "두 스키마의 테이블·열·제약·인덱스 비교"},
 	{"status", "db status [-c 접속 …] [--format table|tsv|json] [--prod]", "모든 접속(또는 -c 로 고른 접속)을 동시에 확인해 상태·지연·버전·주요 수치를 찍음(R64.3). prod 는 --prod 일 때만, 하나라도 실패하면 1"},
 	{"flows", "db flows [-f 흐름 …] [--format table|tsv|json] [--prod]", "이벤트 흐름(.dbtui/flows.json: 아웃박스 → SNS → SQS → DLQ·Lambda)을 한 번 풀어 상자마다 한 줄을 찍음(R69). prod 는 --prod 일 때만, 설정 오류·실패가 있으면 1"},
@@ -79,6 +80,7 @@ var cliCmdFlags = map[string][]string{
 	"f":       {"query", "explain", "redis", "logs", "metrics"},
 	"s":       {"tables", "describe", "ddl", "search", "schema-diff"},
 	"to":      {"schema-diff"}, // --to-schema 도 같다
+	"column":  {"linked"},      // --value·--table 도 같다
 }
 
 func cmdTakes(cmd, flagName string) bool {
@@ -104,6 +106,7 @@ type cliOpts struct {
 	cmd                         string
 	dir, conn, format, file     string
 	schema, to, toSchema        string
+	column, value, table        string // linked(R73)
 	maxRows                     int
 	maxRowsSet                  bool // --max-rows 를 줬다. 저장소 기본 1,000행(R62.2)과 가른다
 	timeout                     time.Duration
@@ -176,12 +179,14 @@ func refused(msg string) error { return &cliError{exitRefused, msg} }
 func usageErr(format string, a ...any) error { return &cliError{exitUsage, fmt.Sprintf(format, a...)} }
 
 // cliResult 는 출력할 결과 하나다. user360 처럼 여러 개면 title 로 나눈다. decryptFailed 는 --decrypt 로 풀지 못한 칸 수다.
+// failed 는 결과는 찍되 일부가 실패해 1 로 끝낼 때다(linked 의 접속·테이블 실패).
 type cliResult struct {
 	title         string
 	conn          db.Conn
 	res           *db.Result
 	err           error
 	decryptFailed int
+	failed        bool
 }
 
 // runCLI 는 `db <명령> …` 을 실행하고 종료 코드를 돌려준다. stdin 이 nil 이면(터미널) 표준 입력에서 SQL 을 읽지 않는다.
@@ -259,7 +264,7 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, 
 	for i := range results {
 		r := &results[i]
 		// --decrypt 로 풀지 못한 칸이 있으면 결과는 찍되 실패로 끝낸다
-		failed = failed || r.decryptFailed > 0
+		failed = failed || r.decryptFailed > 0 || r.failed
 		if r.err != nil {
 			failed = true
 			r.err = errors.New(cliErrText(ctx, proj, o, r.err, r.conn.Name))
@@ -374,6 +379,11 @@ func newCLIFlags(cmd string, out io.Writer) (*flag.FlagSet, *cliOpts) {
 	if cmdTakes(cmd, "to") {
 		fs.StringVar(&o.to, "to", "", "비교할 접속")
 		fs.StringVar(&o.toSchema, "to-schema", "", "비교할 스키마(기본: -s 와 같음)")
+	}
+	if cmdTakes(cmd, "column") {
+		fs.StringVar(&o.column, "column", "", "칸의 열 이름(user_id 면 *_user_id·users.id 도 찾음)")
+		fs.StringVar(&o.value, "value", "", "찾을 값(DB 값 그대로)")
+		fs.StringVar(&o.table, "table", "", "칸의 원본 테이블(열이 id 일 때 이름 뿌리를 뽑음)")
 	}
 	i := findCommand(cmd)
 	fs.Usage = func() {
@@ -625,6 +635,30 @@ func runCommand(ctx context.Context, o cliOpts, proj *db.Project, clients *db.Cl
 		}
 		res, err := r.Run(ctx, args)
 		return []cliResult{{conn: c, res: res}}, err
+
+	case "linked":
+		// 접속을 열기 전에 prod(--prod)·사용법을 거른다. 다른 접속은 환경이 같을 때만 들어 prod 는 --prod 아래에서만 닿는다
+		c, err := pickConn(proj, o, "-c", o.conn, db.KindPG)
+		if err != nil {
+			return nil, err
+		}
+		if o.column == "" || o.value == "" {
+			return nil, usageErr("--column 과 --value 가 필요함")
+		}
+		_, table, _ := strings.Cut(o.table, ".")
+		base := db.LinkedBase(o.column, cmp.Or(table, o.table))
+		if strings.EqualFold(o.column, "id") && base == "" {
+			return nil, usageErr("id 열은 --table 이 있어야 찾음")
+		}
+		idx := linkedConns(proj, connByName(proj, c.Name))
+		conns := make([]db.Conn, len(idx))
+		for i, ci := range idx {
+			conns[i] = proj.Conns[ci]
+		}
+		found := findLinked(ctx, clients, conns, o.column, base, o.value)
+		res, _, summary, failed := linkedTable(conns, found, func(i int, err error) string { return cliErrText(ctx, proj, o, err, conns[i].Name) })
+		res.Text = summary
+		return []cliResult{{conn: c, res: res, failed: failed}}, nil
 
 	case "schema-diff":
 		a, err := pickConn(proj, o, "-c", o.conn, db.KindPG)
