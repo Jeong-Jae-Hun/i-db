@@ -547,18 +547,20 @@ func TestRewrite_search_가_아니면_바꾸지_않는다(t *testing.T) {
 	}
 }
 
-func TestRewrite_거르기는_원래_query_를_must_에_두고_조건을_더한다(t *testing.T) {
-	info := func(name string) (string, string) {
-		switch name {
-		case "msg":
-			return "text", "msg.keyword"
-		case "body":
-			return "text", ""
-		case "n":
-			return "long", ""
-		}
-		return "", ""
+// rewriteInfo 는 거르기 시험의 필드 정보다: msg 는 keyword 하위 필드가 있는 text, body 는 그것이 없는 text, n 은 long 이다.
+func rewriteInfo(name string) (string, string) {
+	switch name {
+	case "msg":
+		return "text", "msg.keyword"
+	case "body":
+		return "text", ""
+	case "n":
+		return "long", ""
 	}
+	return "", ""
+}
+
+func TestRewrite_거르기는_원래_query_를_must_에_두고_조건을_더한다(t *testing.T) {
 	base := "GET logs/_search\n" + `{"query":{"match":{"app":"api"}},"size":5}`
 	must := `{"bool":{"%s":[%s],"must":[{"match":{"app":"api"}}]}}`
 	cases := []struct {
@@ -582,7 +584,7 @@ func TestRewrite_거르기는_원래_query_를_must_에_두고_조건을_더한�
 	}
 	for _, c := range cases {
 		f := c.f
-		got, ok := rewrite(base, Rewrite{Filter: &f}, info)
+		got, ok := rewrite(base, Rewrite{Filter: &f}, rewriteInfo)
 		q := fmt.Sprintf(must, c.where, c.want)
 		if c.where == "must_not" { // JSON 키는 이름순이다
 			q = `{"bool":{"must":[{"match":{"app":"api"}}],"must_not":[` + c.want + `]}}`
@@ -592,11 +594,11 @@ func TestRewrite_거르기는_원래_query_를_must_에_두고_조건을_더한�
 			t.Errorf("%+v:\n got %s\nwant %s", c.f, got, want)
 		}
 	}
-	got, _ := rewrite("GET logs/_search", Rewrite{Sort: "msg", Filter: &Filter{"", ":", ""}}, info)
+	got, _ := rewrite("GET logs/_search", Rewrite{Sort: "msg", Filter: &Filter{"", ":", ""}}, rewriteInfo)
 	if got != "GET logs/_search\n"+`{"sort":[{"msg.keyword":{"missing":"_last","order":"asc"}}]}` {
 		t.Errorf("빈 모든 필드 찾기는 거르기 없음, text 정렬은 keyword: %s", got)
 	}
-	got, _ = rewrite("GET logs/_search", Rewrite{Filter: &Filter{"a", "=", "1"}}, info)
+	got, _ = rewrite("GET logs/_search", Rewrite{Filter: &Filter{"a", "=", "1"}}, rewriteInfo)
 	if !strings.Contains(got, `"must":[{"match_all":{}}]`) {
 		t.Errorf("query 가 없으면 match_all: %s", got)
 	}

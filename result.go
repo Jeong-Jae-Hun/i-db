@@ -202,14 +202,13 @@ func (m *model) requerySearch(t *queryTab, conn int, q grid.Query) (tea.Cmd, str
 		return m.sourceRequery(t, conn, q, *t.baseSrc, sourceRun, nil), ""
 	}
 	sent := new(string)
-	run := func(sq source.Query) func(context.Context, source.Backend) (*db.Result, error) {
+	return m.sourceRequery(t, conn, q, *t.baseSrc, func(sq source.Query) func(context.Context, source.Backend) (*db.Result, error) {
 		return func(ctx context.Context, b source.Backend) (*db.Result, error) {
 			text, res, err := opensearch.Requery(ctx, b, sq, r)
 			*sent = text
 			return res, err
 		}
-	}
-	return m.sourceRequery(t, conn, q, *t.baseSrc, run, sent), ""
+	}, sent), ""
 }
 
 // searchOps 는 R14.4 거르기 연산을 opensearch.Filter 의 Op 글로 바꾼다.

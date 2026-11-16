@@ -376,6 +376,20 @@ func TestRun_취소하면_StopQueryExecution_으로_서버_질의를_멈춘다(t
 
 // ─── 트리·미리 보기 ───
 
+// childNames 는 path 의 자식을 `이름|경로|Info` 줄로 편다.
+func childNames(t *testing.T, b *Backend, path string) []string {
+	t.Helper()
+	nodes, err := b.Children(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, n := range nodes {
+		out = append(out, n.Name+"|"+n.Path+"|"+n.Info)
+	}
+	return out
+}
+
 func TestChildren_데이터베이스_테이블_열과_파티션_키를_보인다(t *testing.T) {
 	f := &fakeAPI{
 		dbs: [][]string{{"logs"}, {"sales"}},
@@ -389,27 +403,16 @@ func TestChildren_데이터베이스_테이블_열과_파티션_키를_보인다
 		}},
 	}
 	b := testBackend(f, db.Conn{})
-	names := func(path string) []string {
-		nodes, err := b.Children(context.Background(), path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var out []string
-		for _, n := range nodes {
-			out = append(out, n.Name+"|"+n.Path+"|"+n.Info)
-		}
-		return out
-	}
-	if got, want := names(""), []string{"logs|logs|", "sales|sales|"}; !reflect.DeepEqual(got, want) {
+	if got, want := childNames(t, b, ""), []string{"logs|logs|", "sales|sales|"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("데이터베이스 = %v, want %v (페이지 이어 받기)", got, want)
 	}
-	if got, want := names("sales"), []string{"orders|sales/orders|EXTERNAL_TABLE", "v_daily|sales/v_daily|VIRTUAL_VIEW"}; !reflect.DeepEqual(got, want) {
+	if got, want := childNames(t, b, "sales"), []string{"orders|sales/orders|EXTERNAL_TABLE", "v_daily|sales/v_daily|VIRTUAL_VIEW"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("테이블 = %v, want %v", got, want)
 	}
-	if got, want := names("sales/orders"), []string{"id|sales/orders/id|bigint", "dt|sales/orders/dt|string (파티션)"}; !reflect.DeepEqual(got, want) {
+	if got, want := childNames(t, b, "sales/orders"), []string{"id|sales/orders/id|bigint", "dt|sales/orders/dt|string (파티션)"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("열 = %v, want %v", got, want)
 	}
-	if got := names("sales/orders/id"); got != nil {
+	if got := childNames(t, b, "sales/orders/id"); got != nil {
 		t.Errorf("열은 잎이어야 한다: %v", got)
 	}
 }
