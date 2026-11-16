@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/redisview"
 )
 
 // ─── R74 키 안내 ───
@@ -240,7 +241,7 @@ func TestKeysOverlay_결과에서_물음표는_결과_묶음만_보이고_esc_�
 		t.Fatal("결과에서 ? 는 이 화면의 키")
 	}
 	v := m.View()
-	for _, want := range []string{"결과", "─ 편집", "변경 미리 보기 뒤 제출", "─ 복사·내보내기", "F1 전체 도움말"} {
+	for _, want := range []string{"결과", "─ 편집", "변경 미리 보기 뒤 제출", "─ 복사·내보내기", "닫은 뒤 F1 전체 도움말"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("%q 가 없다", want)
 		}
@@ -389,5 +390,97 @@ func TestLinkedConns_같은_DB_의_읽기_접속은_쓰기_접속이_있으면_�
 	}
 	if got := linkedConns(proj, 3); !slices.Equal(got, []int{3, 0, 4}) {
 		t.Errorf("다른 DB 의 짝은 건드리지 않는다: %v", got)
+	}
+}
+
+// ─── 리뷰 수정: 실제로 듣는 키만 ───
+
+func TestHints_Redis_값_편집기는_타입이_듣는_키와_지우기_확인의_y_를_보인다(t *testing.T) {
+	m := testModel(t)
+	m.setFocus(fResult)
+	ed := redisview.NewEditor(redisview.Value{Key: "s", Type: "string", TTL: -1, String: "v"})
+	m.cur().redis = &ed
+	if got := hintText(m); got != "e 고치기 · t TTL · r 이름 바꾸기 · D 키 지우기 · esc 닫기 · ? 키" {
+		t.Fatalf("string 은 항목 추가·지우기가 없다: %q", got)
+	}
+	hash := redisview.NewEditor(redisview.Value{Key: "h", Type: "hash", TTL: -1, Fields: [][2]string{{"f", "v"}}})
+	m.cur().redis = &hash
+	if got := hintText(m); got != "e 고치기 · a 항목 추가 · d 항목 지우기 · t TTL · r 이름 바꾸기 · D 키 지우기 · esc 닫기 · ? 키" {
+		t.Fatalf("hash: %q", got)
+	}
+	m.Update(key("d"))
+	if got := hintText(m); got != "y 삭제 · esc 취소" {
+		t.Fatalf("지우기 확인은 y 로만 지운다: %q", got)
+	}
+	m.Update(key("D"))
+	m.Update(key("x"))
+	m.Update(key("e"))
+	if got := hintText(m); got != "Enter 확정 · esc 취소" {
+		t.Fatalf("값 입력 중: %q", got)
+	}
+	other := redisview.NewEditor(redisview.Value{Key: "x", Type: "stream", TTL: -1})
+	m.cur().redis = &other
+	if got := hintText(m); !strings.HasPrefix(got, "t TTL") {
+		t.Fatalf("그 밖의 타입은 TTL·이름·키 삭제만: %q", got)
+	}
+}
+
+func TestHints_고칠_수_없는_칸의_Enter_는_값_보기로_안내한다(t *testing.T) {
+	m := testModel(t)
+	res := &db.Result{Cols: []string{"id", "name", "total"}, Rows: [][]string{{"1", "a", "3"}, {"2", "b", "4"}},
+		Origin: &db.Origin{Table: db.TableRef{Schema: "public", Table: "t"}, PK: []string{"id"}, Cols: []string{"id", "name", ""}}}
+	show(m, res)
+	m.setFocus(fResult)
+	m.Update(key("l"))
+	if got := hintText(m); !strings.HasPrefix(got, "a 행 추가 · Enter 고치기 ·") {
+		t.Fatalf("고칠 수 있는 칸: %q", got)
+	}
+	m.Update(key("l"))
+	if got := hintText(m); !strings.HasPrefix(got, "a 행 추가 · Enter 값 ·") {
+		t.Fatalf("식 열: %q", got)
+	}
+	m.Update(key("enter"))
+	if m.cur().grid.Typing() {
+		t.Fatal("식 열의 Enter 는 고치기가 아니다")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m.Update(key("h"))
+	m.Update(key("d"))
+	if got := hintText(m); !strings.HasPrefix(got, "변경 1건 · Ctrl+S 제출 · u 되돌리기 · Enter 값 · a 행 추가") {
+		t.Fatalf("삭제 표시 행: %q", got)
+	}
+}
+
+func TestTips_창에_가렸거나_폭이_모자라면_본_것으로_남기지_않고_나중에_보인다(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("DB_TIPS", "")
+	m := testModel(t)
+	m.tips = loadTips()
+	show(m, channels())
+	m.setFocus(fResult)
+	m.Update(key("?"))
+	if m.tip != "" || slices.Contains(m.tips.Seen, "result-edit") {
+		t.Fatalf("창이 떠 있으면 걸지 않는다: tip=%q seen=%v", m.tip, m.tips.Seen)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if !strings.Contains(statusLine(m), "팁: a 로 행 추가") {
+		t.Fatalf("창을 닫으면 보인다: %q", statusLine(m))
+	}
+
+	m2 := testModel(t)
+	m2.tips = loadTips()
+	m2.Update(tea.WindowSizeMsg{Width: 70, Height: 30})
+	m2.status = strings.Repeat("긴 상태 ", 6)
+	show(m2, readOnlyResult())
+	m2.status = strings.Repeat("긴 상태 ", 6)
+	m2.setFocus(fResult)
+	m2.Update(key("j"))
+	if m2.tip != "" || slices.Contains(m2.tips.Seen, "result-ro") {
+		t.Fatalf("다 들어가지 않으면 걸지 않는다: tip=%q seen=%v", m2.tip, m2.tips.Seen)
+	}
+	m2.status = ""
+	m2.Update(key("j"))
+	if !strings.Contains(statusLine(m2), "팁: ? 로 이 화면의 키") || !slices.Contains(m2.tips.Seen, "result-ro") {
+		t.Fatalf("자리가 나면 보이고 남긴다: %q", statusLine(m2))
 	}
 }

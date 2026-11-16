@@ -334,6 +334,9 @@ func (m Model) Screen() Screen {
 // Editable 은 결과를 고칠 수 있는지다(R15.1, 한 테이블에서 와 PK 열이 모두 있음).
 func (m Model) Editable() bool { return m.editBlock() == "" }
 
+// CellEditable 은 커서 칸을 Enter 로 고칠 수 있는지다. 아니면 Enter 는 칸 값 보기다(cellBlock: 식 열·삭제 표시 행·복호화 보기 등).
+func (m Model) CellEditable() bool { return m.cellBlock(m.col) == "" }
+
 // StopTyping 은 거르기 입력·칸 편집을 끝낸다. 이미 입력한 거르기 글과 편집한 값은 남긴다(Enter 와 같다).
 func (m *Model) StopTyping() {
 	m.typing = false

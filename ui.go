@@ -4439,7 +4439,7 @@ func (m *model) View() string {
 	case oHelp, oKeys:
 		secs, foot := helpSections, "아무 키나 눌러 닫기"
 		if m.overlay == oKeys {
-			secs, foot = nil, m.label("esc·? 닫기 · F1 전체 도움말")
+			secs, foot = nil, m.label("esc·? 닫기 · 닫은 뒤 F1 전체 도움말")
 			for _, i := range m.keySections() {
 				secs = append(secs, helpSections[i])
 			}
@@ -4767,7 +4767,7 @@ func (m *model) View() string {
 	if m.tip != "" {
 		items = append([]string{m.tip}, items...)
 	}
-	hint := fitHints(items, m.w-lipgloss.Width(status)-2)
+	hint := fitHints(items, m.hintWidth())
 	if hint == "" {
 		return header + "\n" + body + "\n" + m.bar(status, "")
 	}
