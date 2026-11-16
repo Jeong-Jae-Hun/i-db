@@ -16,6 +16,10 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 url = "2"
 percent-encoding = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+flate2 = "1"
+sha2 = "0.10"
+tempfile = "3"
 
 [profile.release]
 strip = true
