@@ -19,6 +19,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/history"
 	"github.com/Jeong-Jae-Hun/i-db/internal/paramstore"
 	"github.com/Jeong-Jae-Hun/i-db/internal/statcrypt"
+	"github.com/Jeong-Jae-Hun/i-db/internal/tableview"
 )
 
 const (
@@ -456,7 +457,7 @@ func TestEnc_실제_서버에서_편집기와_테이블_보기_WHERE에_적용�
 		t.Fatalf("편집기: %+v %q", r, m.cur().resErr)
 	}
 	tab := m.cur()
-	drive(m, m.openTable(tab, 0, db.TableRef{Schema: "public", Table: "v7_enc"}, "email = enc('a@b.com')"))
+	drive(m, m.openTable(tab, 0, db.TableRef{Schema: "public", Table: "v7_enc"}, "email = enc('a@b.com')", tableview.Options{}))
 	if r := tab.res; r == nil || len(r.Rows) != 1 || r.Rows[0][0] != "1" {
 		t.Fatalf("테이블 보기 WHERE: %+v %q", r, tab.resErr)
 	}

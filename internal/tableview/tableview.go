@@ -35,7 +35,11 @@ var (
 
 // Options.PageSize 가 0 이하면 DefaultPageSize, db.MaxRows 를 넘으면 db.MaxRows 다.
 // 실행기가 1,000행에서 자르므로 그보다 큰 페이지는 끝을 잃는다.
-type Options struct{ PageSize int }
+// NoHistory 면 이 보기의 페이지·정렬·거르기 읽기를 실행 기록에 남기지 않는다(R73.5, WHERE 에 찾은 값이 든다).
+type Options struct {
+	PageSize  int
+	NoHistory bool
+}
 
 // Action 은 키·클릭 처리 뒤 통합이 할 일이다. Requery 면 SQL(), Count 면 CountSQL() 을 실행한다.
 // Handled 가 false 면 이 모델이 쓰지 않은 키라 grid 에 넘긴다.
@@ -87,6 +91,8 @@ type Model struct {
 	comp    []string
 	compAt  int
 	compIdx int
+	// noHistory 는 Options.NoHistory 다. 값 복사로 페이지·WHERE 를 바꿔도 이어진다
+	noHistory bool
 }
 
 func New(t db.TableRef, opt Options) Model {
@@ -94,8 +100,11 @@ func New(t db.TableRef, opt Options) Model {
 	if size <= 0 {
 		size = DefaultPageSize
 	}
-	return Model{table: t, pageSize: min(size, db.MaxRows)}
+	return Model{table: t, pageSize: min(size, db.MaxRows), noHistory: opt.NoHistory}
 }
+
+// NoHistory 는 이 보기의 읽기를 실행 기록에 남기지 않는지다.
+func (m Model) NoHistory() bool { return m.noHistory }
 
 func (m Model) Typing() bool { return m.typing != fieldNone }
 

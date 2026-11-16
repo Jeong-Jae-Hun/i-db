@@ -14,6 +14,7 @@ import (
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/grid"
+	"github.com/Jeong-Jae-Hun/i-db/internal/tableview"
 	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
 
@@ -24,7 +25,9 @@ import (
 const (
 	// 접속 풀이 4 연결이라 하나는 목록 읽기·테이블 보기에 남긴다
 	linkedWorkers = 3
-	linkedTimeout = 20 * time.Second
+	// 같은 그룹 접속이 여럿이어도 한 번에 찾는 접속 수다. 접속마다 linkedWorkers 개씩 세므로 동시 쿼리는 최대 6개다
+	linkedConnWorkers = 2
+	linkedTimeout     = 20 * time.Second
 	// 0행 줄이 이보다 많으면 표에서 빼고 요약에 개수만 둔다
 	linkedZeroKeep = 50
 )
@@ -51,13 +54,15 @@ type linkedTarget struct {
 }
 
 // linkedView 는 연결된 곳 탭의 상태다. value 는 Enter 의 WHERE 에만 쓰고 메모리에만 둔다.
-// dbs 는 찾기 시작할 때 접속마다의 데이터베이스다(R27.1 로 바뀌면 열지 않는다).
+// searched 는 찾기 시작할 때 접속마다의 모습이다. Enter 는 지금 접속이 이와 같을 때만 연다(R27.1·R59.3).
+// stale 은 찾은 접속 하나라도 고치거나 지웠다는 뜻이다(reloadConns).
 type linkedView struct {
-	res     *db.Result
-	targets map[string]linkedTarget
-	conns   []int
-	dbs     []string
-	value   string
+	res      *db.Result
+	targets  map[string]linkedTarget
+	conns    []int
+	searched []db.Conn
+	value    string
+	stale    bool
 }
 
 type linkedMsg struct {
@@ -81,30 +86,44 @@ func linkedConns(proj *db.Project, conn int) []int {
 	return out
 }
 
-// findLinked 는 접속마다 동시에 후보 열을 찾고 센다. 전체는 linkedTimeout 안에 끝낸다. 화면과 CLI 가 같이 쓴다.
+// linkedSearchConn 은 접속 하나에서 후보 열을 찾고 센다. 시험이 가짜로 바꿔 끼운다
+var linkedSearchConn = func(ctx context.Context, clients *db.Clients, c db.Conn, col, base, value string) (f linkedFound) {
+	pg, err := clients.PG(ctx, c)
+	if err != nil {
+		f.err = err
+		return f
+	}
+	if f.cols, f.truncated, f.err = pg.LinkedColumns(ctx, col, base, value); f.err != nil {
+		return f
+	}
+	f.counts, f.errs = pg.CountLinked(ctx, f.cols, value, linkedWorkers)
+	return f
+}
+
+// findLinked 는 접속을 linkedConnWorkers 개씩 동시에 찾는다. 전체는 linkedTimeout 안에 끝낸다. 화면과 CLI 가 같이 쓴다.
 func findLinked(ctx context.Context, clients *db.Clients, conns []db.Conn, col, base, value string) []linkedFound {
 	ctx, cancel := context.WithTimeout(ctx, linkedTimeout)
 	defer cancel()
 	found := make([]linkedFound, len(conns))
+	slots := make(chan struct{}, linkedConnWorkers)
 	var wg sync.WaitGroup
 	for i, c := range conns {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			f := &found[i]
-			pg, err := clients.PG(ctx, c)
-			if err != nil {
-				f.err = err
-				return
-			}
-			if f.cols, f.truncated, f.err = pg.LinkedColumns(ctx, col, base, value); f.err != nil {
-				return
-			}
-			f.counts, f.errs = pg.CountLinked(ctx, f.cols, value, linkedWorkers)
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			found[i] = linkedSearchConn(ctx, clients, c, col, base, value)
 		}()
 	}
 	wg.Wait()
 	return found
+}
+
+// sameLinkedServer 는 찾을 때의 접속 a 와 지금 접속 b 가 같은 서버·사용자·환경인지다. 데이터베이스는 호출부가 따로 본다.
+// uuid 가 같아도 호스트를 고쳤으면(R59.3) 찾은 값을 다른 서버(prod 일 수도 있다)로 보내지 않는다.
+func sameLinkedServer(a, b db.Conn) bool {
+	return a.UUID == b.UUID && a.Kind == b.Kind && a.Host == b.Host && a.Port == b.Port && a.User == b.User && a.Env() == b.Env()
 }
 
 // linkedTable 은 찾기 결과를 표로 만든다. 줄은 접속 실패, 주인 테이블, 센 행 수 큰 순, 세지 않은 열, 0행 순이고 같으면 이름순이다.
@@ -211,12 +230,12 @@ func (m *model) linkedSearch(t *queryTab, l grid.Linked) tea.Cmd {
 		return nil
 	}
 	idx := linkedConns(m.proj, t.conn)
-	conns, dbs := make([]db.Conn, len(idx)), make([]string, len(idx))
+	conns := make([]db.Conn, len(idx))
 	for i, c := range idx {
-		conns[i], dbs[i] = m.conn(c), m.conn(c).DB
+		conns[i] = m.conn(c)
 	}
 	nt, ctx := m.startMulti("연결된 곳: " + l.Col)
-	nt.linked = &linkedView{conns: idx, dbs: dbs, value: l.Value}
+	nt.linked = &linkedView{conns: idx, searched: conns, value: l.Value}
 	m.status = fmt.Sprintf(m.label("연결된 곳 찾는 중: %s = %s · 접속 %d곳 (Ctrl+C·esc 취소)"),
 		l.Col, truncate(textutil.Printable(l.Value, false), 40), len(idx))
 	id, seq, clients, col, value := nt.id, nt.seq, m.clients, l.Col, l.Value
@@ -236,11 +255,9 @@ func (m *model) showLinked(msg linkedMsg) {
 	}
 	t.running = nil
 	lv := t.linked
-	conns := make([]db.Conn, len(lv.conns))
-	for i, c := range lv.conns {
-		conns[i] = m.conn(c)
-	}
-	res, targets, summary, _ := linkedTable(conns, msg.found, func(i int, err error) string { return m.errText(lv.conns[i], err) })
+	res, targets, summary, _ := linkedTable(lv.searched, msg.found, func(i int, err error) string {
+		return oneLine(db.Redact(err.Error(), lv.searched[i].Password))
+	})
 	lv.res, lv.targets = res, targets
 	t.res, t.resErr, t.subs, t.view, t.viewConn = res, "", nil, -1, -1
 	t.grid.SetResult(res)
@@ -255,6 +272,7 @@ func (m *model) showLinked(msg linkedMsg) {
 }
 
 // openLinked 는 연결된 곳 표의 커서 줄 테이블을 그 접속의 테이블 보기(R16)로 새 탭에 연다. WHERE 는 `"<열>" = <값>` 이다.
+// WHERE 에 값이 들어 그 보기의 읽기는 실행 기록에 남기지 않는다(NoHistory).
 func (m *model) openLinked(t *queryTab) tea.Cmd {
 	lv, row := t.linked, t.grid.CurrentRow()
 	if len(row) < 3 {
@@ -265,8 +283,13 @@ func (m *model) openLinked(t *queryTab) tea.Cmd {
 		m.status = "열 테이블이 없는 줄"
 		return nil
 	}
-	conn := lv.conns[tg.conn]
-	if m.conn(conn).DB != lv.dbs[tg.conn] {
+	conn, was := lv.conns[tg.conn], lv.searched[tg.conn]
+	now := m.conn(conn)
+	switch {
+	case lv.stale || !sameLinkedServer(was, now):
+		m.status = "찾은 뒤 접속을 고치거나 지워 열지 않음 (다시 찾으세요)"
+		return nil
+	case was.DB != now.DB:
 		m.status = "찾는 사이 데이터베이스를 바꿔 열지 않음"
 		return nil
 	}
@@ -275,5 +298,5 @@ func (m *model) openLinked(t *queryTab) tea.Cmd {
 		m.status = err.Error()
 		return nil
 	}
-	return m.openTable(m.newTab(), conn, tg.ref, where)
+	return m.openTable(m.newTab(), conn, tg.ref, where, tableview.Options{NoHistory: true})
 }

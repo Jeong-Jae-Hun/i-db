@@ -29,11 +29,14 @@ const (
 )
 
 // linkedColumnsQuery 는 후보 열이다. $1 같은 이름(id 는 빈 글), $2 base, $3 주인 테이블 이름들, $4 받을 타입, $5 상한.
-// 뷰·파티션 자식은 빼고(부모에서 센다) 인덱스 첫 열(indkey[0])인지 같이 싣는다.
+// 뷰·파티션 자식은 빼고(부모에서 센다) 쓸 수 있는 인덱스의 첫 열(indkey[0])인지 같이 싣는다.
+// 만드는 중·깨진 인덱스(indisvalid·indisready·indislive)와 부분 인덱스(indpred)는 col = 값 에 못 쓸 수 있어 뺀다.
+// 식 인덱스는 indkey[0] 이 0 이라 열 번호(attnum > 0)와 맞지 않아 저절로 빠진다.
 // *_<base>_id 는 LIKE 대신 right() 로 본다. base 의 _ 가 LIKE 와일드카드라서다.
 const linkedColumnsQuery = `select n.nspname::text, c.relname::text, a.attname::text, t.typname::text,
 	lower(a.attname) = 'id' and lower(c.relname) = any($3) as owner,
-	exists(select 1 from pg_index i where i.indrelid = c.oid and i.indkey[0] = a.attnum) as indexed
+	exists(select 1 from pg_index i where i.indrelid = c.oid and i.indkey[0] = a.attnum
+		and i.indisvalid and i.indisready and i.indislive and i.indpred is null) as indexed
 from pg_attribute a
 join pg_class c on c.oid = a.attrelid
 join pg_namespace n on n.oid = c.relnamespace

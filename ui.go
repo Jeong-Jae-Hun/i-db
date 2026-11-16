@@ -1250,7 +1250,7 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 		if t.file != "" || t.editor.Value() != "" || (other && t.bound()) {
 			t = m.newTab()
 		}
-		return m.openTable(t, n.conn, db.TableRef{Schema: n.schema, Table: n.label}, "")
+		return m.openTable(t, n.conn, db.TableRef{Schema: n.schema, Table: n.label}, "", tableview.Options{})
 	}
 	if n.kind == nSource && n.openable && toggle {
 		return m.openSourceNode(t, n)
@@ -1289,8 +1289,8 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 // openTable 은 탭 t 에 테이블 보기(R16)를 연다. where 가 있으면 그 WHERE 로 연다(R36 외래 키 따라가기).
 // 추정 행 수를 먼저 읽고, 그 결과가 오면 첫 페이지를 읽는다. 탭의 접속·테이블 보기는 확인을 다 지나 시작할 때 바꾼다.
 // 여는 길(트리·찾기·팔레트·외래 키·정의로 이동)이 모두 여기를 지난다. 최근 테이블(R40.3)은 확인을 지나 보기가 시작될 때(start) 남긴다.
-func (m *model) openTable(t *queryTab, conn int, ref db.TableRef, where string) tea.Cmd {
-	tv := tableview.New(ref, tableview.Options{})
+func (m *model) openTable(t *queryTab, conn int, ref db.TableRef, where string, opt tableview.Options) tea.Cmd {
+	tv := tableview.New(ref, opt)
 	if where != "" {
 		tv, _ = tv.ToggleWhere(where)
 	}
@@ -2201,7 +2201,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = why
 					return m, nil
 				}
-				return m, m.openTable(m.newTab(), conn, fk.Ref, where)
+				return m, m.openTable(m.newTab(), conn, fk.Ref, where, tableview.Options{})
 			}
 			m.status = "외래 키 열이 아님"
 			return m, nil
@@ -2225,7 +2225,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = why
 				return nil
 			}
-			return m.openTable(m.newTab(), conn, fk.Table, where)
+			return m.openTable(m.newTab(), conn, fk.Table, where, tableview.Options{})
 		}, nil)
 		return m, nil
 	case enumMsg:

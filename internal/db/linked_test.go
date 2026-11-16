@@ -105,6 +105,14 @@ func linkedFixture(t *testing.T) *PGConn {
 		`create table lnk_it.lnk_tags (lnk_member_id uuid)`,
 		`create index on lnk_it.lnk_tags (lnk_member_id)`,
 		`create view lnk_it.lnk_view as select lnk_member_id from lnk_it.lnk_orders`,
+		// 부분·깨진·식 인덱스는 col = 값 에 못 쓸 수 있어 인덱스 없음으로 본다
+		`create table lnk_it.lnk_part (lnk_member_id bigint)`,
+		`create index on lnk_it.lnk_part (lnk_member_id) where lnk_member_id > 0`,
+		`create table lnk_it.lnk_inval (lnk_member_id bigint)`,
+		`create index lnk_inval_idx on lnk_it.lnk_inval (lnk_member_id)`,
+		`update pg_index set indisvalid = false where indexrelid = 'lnk_it.lnk_inval_idx'::regclass`,
+		`create table lnk_it.lnk_expr (lnk_member_id bigint)`,
+		`create index on lnk_it.lnk_expr ((lnk_member_id + 0))`,
 		`insert into lnk_it.lnk_members values (1315), (1316)`,
 		`insert into lnk_it.lnk_orders (lnk_member_id) select 1315 from generate_series(1, 150)`,
 		`insert into lnk_it.lnk_msgs (sender_lnk_member_id, target_lnk_member_id) values (1315, 1315), (1316, 1315)`,
@@ -137,6 +145,9 @@ func TestLinkedColumns_실제_서버에서_이름_규칙_타입_인덱스로_후
 		"lnk_msgs.target_lnk_member_id": {false, false},
 		"lnk_small.lnk_member_id":       {false, true},
 		"lnk_multi.lnk_member_id":       {false, false}, // 인덱스 둘째 열이라 세지 않는다
+		"lnk_part.lnk_member_id":        {false, false},
+		"lnk_inval.lnk_member_id":       {false, false},
+		"lnk_expr.lnk_member_id":        {false, false},
 	}
 	if truncated || len(got) != len(want) {
 		t.Fatalf("후보: truncated=%v %v", truncated, cols)
@@ -185,6 +196,7 @@ func TestCountLinked_실제_서버에서_인덱스_열만_101행까지_센다(t 
 	want := map[string]int{
 		"lnk_members.id": 1, "lnk_orders.lnk_member_id": LinkedCap + 1, "lnk_msgs.sender_lnk_member_id": 1,
 		"lnk_msgs.target_lnk_member_id": -1, "lnk_small.lnk_member_id": 0, "lnk_multi.lnk_member_id": -1, "no_such_table.x": -1,
+		"lnk_part.lnk_member_id": -1, "lnk_inval.lnk_member_id": -1, "lnk_expr.lnk_member_id": -1,
 	}
 	for k, w := range want {
 		if got[k] != w {

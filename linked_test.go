@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/history"
 )
 
 // ─── R73 연결된 곳 찾기 ───
@@ -25,36 +30,28 @@ func TestLinkedConns_같은_그룹_같은_환경의_PostgreSQL_접속만_고른�
 		{Name: "lone-stg", Kind: db.KindPG},
 		{Name: "app2-prod", Group: "app", Kind: db.KindPG},
 	}}
-	names := func(idx []int) string {
-		var out []string
-		for _, i := range idx {
-			out = append(out, proj.Conns[i].Name)
-		}
-		return strings.Join(out, ",")
+	if got := linkedConns(proj, 0); !slices.Equal(got, []int{0, 1}) {
+		t.Errorf("stg 에서는 prod·Redis·다른 그룹이 빠진다: %v", got)
 	}
-	if got := names(linkedConns(proj, 0)); got != "app-stg,app2-stg" {
-		t.Errorf("stg 에서는 prod·Redis·다른 그룹이 빠진다: %s", got)
+	if got := linkedConns(proj, 2); !slices.Equal(got, []int{2, 6}) {
+		t.Errorf("prod 는 prod 끼리: %v", got)
 	}
-	if got := names(linkedConns(proj, 2)); got != "app-prod,app2-prod" {
-		t.Errorf("prod 는 prod 끼리: %s", got)
-	}
-	if got := names(linkedConns(proj, 5)); got != "lone-stg" {
-		t.Errorf("그룹이 없으면 자기 하나: %s", got)
+	if got := linkedConns(proj, 5); !slices.Equal(got, []int{5}) {
+		t.Errorf("그룹이 없으면 자기 하나: %v", got)
 	}
 }
 
 // linkedSample 은 접속 둘의 찾기 결과다. 둘째 접속은 닿지 않았다.
 func linkedSample() ([]db.Conn, []linkedFound) {
-	tr := func(t string) db.TableRef { return db.TableRef{Schema: "public", Table: t} }
 	conns := []db.Conn{{Name: "app-stg"}, {Name: "app2-stg", Password: "pw-secret"}}
 	found := []linkedFound{{
 		cols: []db.LinkedColumn{
-			{Table: tr("a_logs"), Column: "user_id", Indexed: true},
-			{Table: tr("orders"), Column: "user_id", Indexed: true},
-			{Table: tr("msgs"), Column: "target_user_id"},
-			{Table: tr("users"), Column: "id", Indexed: true, Owner: true},
-			{Table: tr("slow"), Column: "user_id", Indexed: true},
-			{Table: tr("pays"), Column: "payer_user_id", Indexed: true},
+			{Table: db.TableRef{Schema: "public", Table: "a_logs"}, Column: "user_id", Indexed: true},
+			{Table: db.TableRef{Schema: "public", Table: "orders"}, Column: "user_id", Indexed: true},
+			{Table: db.TableRef{Schema: "public", Table: "msgs"}, Column: "target_user_id"},
+			{Table: db.TableRef{Schema: "public", Table: "users"}, Column: "id", Indexed: true, Owner: true},
+			{Table: db.TableRef{Schema: "public", Table: "slow"}, Column: "user_id", Indexed: true},
+			{Table: db.TableRef{Schema: "public", Table: "pays"}, Column: "payer_user_id", Indexed: true},
 		},
 		counts: []int{0, 101, -1, 1, 0, 3},
 		errs:   []error{nil, nil, nil, nil, errors.New("canceling statement due to statement timeout"), nil},
@@ -118,6 +115,9 @@ func linkedOrigin() *db.Result {
 
 func TestLinked_CtrlB는_새_탭에서_찾고_값은_제목_편집기에_남기지_않는다(t *testing.T) {
 	m := testModel(t)
+	h, err := history.Open(filepath.Join(t.TempDir(), "history.jsonl"))
+	must(t, err)
+	m.hist = h
 	m.cur().conn = 1
 	show(m, linkedOrigin())
 	m.setFocus(fResult)
@@ -245,6 +245,74 @@ func TestLinked_팔레트와_도움말에_결과_Ctrl_B가_있다(t *testing.T) 
 	}
 }
 
+func TestLinked_찾은_뒤_접속_호스트를_바꾸거나_지우면_Enter로_열지_않는다(t *testing.T) {
+	for _, change := range []func(c *db.Conn){
+		func(c *db.Conn) { c.Host = "db.prod.example.internal" },
+		func(c *db.Conn) { *c = db.Conn{} },
+	} {
+		m := testModel(t)
+		m.cur().conn = 1
+		show(m, linkedOrigin())
+		m.setFocus(fResult)
+		m.Update(key("l"))
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+		tab := m.cur()
+		_, found := linkedSample()
+		m.Update(linkedMsg{tab: tab.id, seq: tab.seq, found: found[:1]})
+		change(&m.proj.Conns[1])
+		m.Update(key("j"))
+		m.Update(key("enter"))
+		if len(m.tabs) != 2 || m.status != "찾은 뒤 접속을 고치거나 지워 열지 않음 (다시 찾으세요)" {
+			t.Fatalf("바뀐 접속에 값을 보내지 않는다: tabs=%d %q", len(m.tabs), m.status)
+		}
+	}
+}
+
+func TestLinked_찾은_접속을_파일에서_고치면_결과를_막는다(t *testing.T) {
+	m := connTestModel(t)
+	i := connByName(m.proj, "mine-stg")
+	m.cur().conn = i
+	m.Update(resultMsg{tab: m.cur().id, seq: m.cur().seq, conn: i, res: linkedOrigin(), rev: m.cur().grid.Revision()})
+	m.setFocus(fResult)
+	m.Update(key("l"))
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	tab := m.cur()
+	m.Update(linkedMsg{tab: tab.id, seq: tab.seq, found: []linkedFound{{
+		cols: []db.LinkedColumn{{Table: db.TableRef{Schema: "public", Table: "orders"}, Column: "user_id", Indexed: true}}, counts: []int{1}, errs: []error{nil},
+	}}})
+	// 서버·사용자·환경이 같은 칸(sslmode)만 고쳐도 고친 접속이라 막는다
+	c := m.conn(i)
+	c.SSLMode, c.Password = "disable", ""
+	_, err := db.UpdateConn(m.proj.Dir, c.Name, c)
+	must(t, err)
+	m.reloadConns()
+	m.switchTab(1)
+	m.setFocus(fResult)
+	m.Update(key("enter"))
+	if len(m.tabs) != 2 || m.status != "찾은 뒤 접속을 고치거나 지워 열지 않음 (다시 찾으세요)" {
+		t.Fatalf("고친 접속: tabs=%d %q", len(m.tabs), m.status)
+	}
+}
+
+func TestFindLinked_접속은_두_개씩만_동시에_찾는다(t *testing.T) {
+	var cur, peak, calls atomic.Int32
+	old := linkedSearchConn
+	linkedSearchConn = func(context.Context, *db.Clients, db.Conn, string, string, string) linkedFound {
+		n := cur.Add(1)
+		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+		}
+		time.Sleep(20 * time.Millisecond)
+		cur.Add(-1)
+		calls.Add(1)
+		return linkedFound{}
+	}
+	t.Cleanup(func() { linkedSearchConn = old })
+	found := findLinked(context.Background(), nil, make([]db.Conn, 5), "user_id", "user", "1")
+	if len(found) != 5 || calls.Load() != 5 || peak.Load() != 2 {
+		t.Fatalf("동시 접속 %d (상한 2), 부름 %d", peak.Load(), calls.Load())
+	}
+}
+
 // ─── CLI ───
 
 func TestCLI_linked_는_prod_플래그_사용법을_지킨다(t *testing.T) {
@@ -287,6 +355,9 @@ func TestLinked_실제_서버에서_CtrlB로_찾고_Enter로_연다(t *testing.T
 		insert into lnkui.lnkui_orders values (1, 1315), (2, 1315), (3, 7);
 		insert into lnkui.lnkui_plain values (1315)`)
 	t.Cleanup(func() { it.sql("drop schema if exists lnkui cascade") })
+	h, err := history.Open(filepath.Join(t.TempDir(), "history.jsonl"))
+	must(t, err)
+	m.hist = h
 
 	m.cur().conn = 0
 	m.cur().editor.SetValue("select * from lnkui.lnkui_orders order by id")
@@ -325,6 +396,23 @@ func TestLinked_실제_서버에서_CtrlB로_찾고_Enter로_연다(t *testing.T
 	drive(m, cmd)
 	if nt := m.cur(); len(m.tabs) != 3 || nt.tv == nil || nt.res == nil || len(nt.res.Rows) != 2 {
 		t.Fatalf("테이블 보기: tabs=%d status=%q", len(m.tabs), m.status)
+	}
+	// 연 보기의 다음 페이지·정렬도 WHERE 에 값이 들어 기록에 남기지 않는다
+	m.setFocus(fResult)
+	_, cmd = m.Update(key("]"))
+	drive(m, cmd)
+	_, cmd = m.Update(key("s"))
+	drive(m, cmd)
+	if !strings.Contains(m.cur().tv.SQL(), "ORDER BY") {
+		t.Fatalf("정렬로 다시 읽었다: %q", m.cur().tv.SQL())
+	}
+	for _, e := range m.historyMatches() {
+		if strings.Contains(e.SQL, "lnkui_orders") && strings.Contains(e.SQL, "1315") {
+			t.Fatalf("기록에 찾은 값: %q", e.SQL)
+		}
+	}
+	if !slices.ContainsFunc(m.historyMatches(), func(e history.Entry) bool { return strings.Contains(e.SQL, "from lnkui.lnkui_orders order by id") }) {
+		t.Fatal("편집기 실행은 그대로 기록한다")
 	}
 }
 

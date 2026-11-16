@@ -13,6 +13,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/complete"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/session"
+	"github.com/Jeong-Jae-Hun/i-db/internal/tableview"
 )
 
 // ─── R40.2 팔레트 테이블 · R40.3 최근 테이블 ───
@@ -121,7 +122,7 @@ func TestRecentTables_트리_찾기_팔레트로_열면_맨_앞에_남기고_하
 		t.Fatalf("찾기·팔레트, 같은 테이블은 하나로: %+v", got)
 	}
 	for i := range 60 {
-		m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: fmt.Sprintf("t%d", i)}, "")
+		m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: fmt.Sprintf("t%d", i)}, "", tableview.Options{})
 	}
 	if got := m.sess.RecentTables; len(got) != 50 || got[0].Table != "t59" {
 		t.Fatalf("50개까지: n=%d first=%s", len(got), got[0].Table)
@@ -150,7 +151,7 @@ func TestRecentTables_버릴지_묻는_확인을_거절하면_남기지_않는�
 	m.setFocus(fResult)
 	m.Update(key("l"))
 	editCell(m, "q")
-	m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: "users"}, "")
+	m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: "users"}, "", tableview.Options{})
 	if m.overlay != oConfirm {
 		t.Fatalf("보류 중인 편집이 있으면 묻는다: overlay=%v", m.overlay)
 	}
@@ -158,7 +159,7 @@ func TestRecentTables_버릴지_묻는_확인을_거절하면_남기지_않는�
 	if len(m.sess.RecentTables) != 0 || m.cur().tv != nil {
 		t.Fatalf("거절하면 남기지 않는다: %+v", m.sess.RecentTables)
 	}
-	m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: "users"}, "")
+	m.openTable(m.cur(), 1, db.TableRef{Schema: "public", Table: "users"}, "", tableview.Options{})
 	m.Update(key("y"))
 	if got := m.sess.RecentTables; len(got) != 1 || got[0].Table != "users" {
 		t.Fatalf("y 면 남긴다: %+v", got)

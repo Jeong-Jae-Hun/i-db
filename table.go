@@ -13,11 +13,15 @@ import (
 // ─── 테이블 보기 ───
 
 // tablePage 는 테이블 보기의 지금 페이지를 읽는 실행이다. 기록에는 enc() 를 바꾸기 전 SQL 이 남는다(R52).
-// 탭 접속이 바뀌었어도 테이블 보기를 연 접속에서 읽는다.
+// 탭 접속이 바뀌었어도 테이블 보기를 연 접속에서 읽는다. NoHistory 보기(R73.5)는 sql 을 비워 기록하지 않는다.
 func (m *model) tablePage(t *queryTab) pendingRun {
 	q := t.tv.SQL()
-	return pendingRun{tab: t.id, conn: t.viewConn, readOnly: true, kind: rkTable, tx: true, sql: q, stmts: 1,
+	p := pendingRun{tab: t.id, conn: t.viewConn, readOnly: true, kind: rkTable, tx: true, sql: q, stmts: 1,
 		exec: m.encExec(t.viewConn, q)}
+	if t.tv.NoHistory() {
+		p.sql = ""
+	}
+	return p
 }
 
 // encExec 는 테이블 보기 문장 q 의 WHERE 에 든 enc('…')를 바꿔 실행한다(R52). 바꿀 수 없으면 실행하지 않고
