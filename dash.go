@@ -179,7 +179,7 @@ func (m *model) dashOutboxed(msg dashOutboxMsg) {
 func (m *model) dashSettle(d *dashState, key string) {
 	delete(d.pending, key)
 	if len(d.pending) == 0 && strings.HasPrefix(m.status, "대시보드 확인 중") {
-		m.status = "대시보드 확인함 " + time.Now().Format("15:04:05")
+		m.status = "대시보드 확인함 " + time.Now().In(textutil.KST).Format("15:04:05")
 	}
 }
 

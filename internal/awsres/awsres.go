@@ -24,6 +24,7 @@ import (
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
+	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
 
 // Backend 는 aws 접속 하나다. 서비스마다 클라이언트를 들고, 시험은 가짜로 바꿔 끼운다.
@@ -223,14 +224,12 @@ func each(n int, fn func(i int)) {
 	_ = g.Wait()
 }
 
-var kst = time.FixedZone("KST", 9*3600)
-
 // shortTime 은 KST `2006-01-02 15:04` 다. 영 값은 빈 글이다.
 func shortTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.In(kst).Format("2006-01-02 15:04")
+	return t.In(textutil.KST).Format("2006-01-02 15:04")
 }
 
 // longTime 은 KST 초까지다. 영 값은 빈 글이다.
@@ -238,7 +237,7 @@ func longTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.In(kst).Format("2006-01-02 15:04:05")
+	return t.In(textutil.KST).Format("2006-01-02 15:04:05")
 }
 
 // arnPart 는 ARN 의 i 번째 마디다(arn:partition:service:region:account:resource). 없으면 빈 글이다.

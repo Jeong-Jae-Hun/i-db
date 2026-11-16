@@ -561,7 +561,7 @@ func (m *model) boardDone(msg boardPanelMsg) tea.Cmd {
 	s.results[msg.group[msg.pos]] = msg.r
 	delete(s.pending, msg.group[msg.pos])
 	if len(s.pending) == 0 && strings.HasPrefix(m.status, "보드 확인 중") {
-		m.status = "보드 확인함 " + time.Now().Format("15:04:05")
+		m.status = "보드 확인함 " + time.Now().In(textutil.KST).Format("15:04:05")
 	}
 	if msg.pos+1 < len(msg.group) {
 		return m.boardStep(t, msg.group, msg.pos+1)
@@ -740,7 +740,7 @@ func (m *model) panelBox(s *boardState, i, pw, ih int, focused bool) string {
 	case p.err != "":
 		meta = "돌리지 않음"
 	case !r.at.IsZero():
-		meta = fmt.Sprintf("%s · %dms", r.at.Format("15:04:05"), r.elapsed.Milliseconds())
+		meta = fmt.Sprintf("%s · %dms", r.at.In(textutil.KST).Format("15:04:05"), r.elapsed.Milliseconds())
 		if s.pending[i] {
 			meta += " · 확인 중"
 		}

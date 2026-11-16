@@ -379,6 +379,21 @@ func TestBoard_AltB_는_보드를_골라_열고_패널을_돌려_격자에_보�
 	}
 }
 
+func TestBoard_패널_시각은_머신_시각대와_상관없이_KST_다(t *testing.T) {
+	fakeBoardRun(t)
+	boardRun = func(context.Context, *db.Clients, *sourcePool, *db.Project, boardPanel, bool) panelResult {
+		return panelResult{res: &db.Result{Cols: []string{"v"}, Rows: [][]string{{"7"}}}, at: time.Date(2026, 11, 16, 3, 4, 5, 0, time.UTC)}
+	}
+	old := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = old })
+	m := boardModel(t, 220)
+	feedBoard(m, m.openBoard("ops"))
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "12:04:05 · 0ms") {
+		t.Fatalf("KST 12:04:05 가 없다:\n%s", v)
+	}
+}
+
 func TestBoard_보드가_없으면_안내하고_좁으면_1열이다(t *testing.T) {
 	fakeBoardRun(t)
 	m := newModel(&db.Project{Dir: t.TempDir(), Mapping: map[string]string{}})

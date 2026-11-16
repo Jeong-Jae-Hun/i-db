@@ -520,7 +520,7 @@ func (m *model) flowSnapped(msg flowSnapMsg) {
 	t.flow.snaps[msg.name] = msg.snap
 	delete(t.flow.pending, msg.name)
 	if len(t.flow.pending) == 0 && strings.HasPrefix(m.status, "흐름 확인 중") {
-		m.status = "흐름 확인함 " + time.Now().Format("15:04:05")
+		m.status = "흐름 확인함 " + time.Now().In(textutil.KST).Format("15:04:05")
 	}
 }
 

@@ -12,14 +12,13 @@ import (
 	"time"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
 
 // timeLayout 은 결과 time 열 형식이다. chart(R28)의 "2006-01-02 15:04:05.999999999" 로 읽힌다
 const timeLayout = "2006-01-02 15:04:05.000"
 
-var kst = time.FixedZone("KST", 9*3600)
-
-func kstTime(t time.Time) string { return t.In(kst).Format(timeLayout) }
+func kstTime(t time.Time) string { return t.In(textutil.KST).Format(timeLayout) }
 
 // queryData 는 Loki·Prometheus query·query_range 의 data 다.
 type queryData struct {

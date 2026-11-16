@@ -6,7 +6,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// KST 는 화면·출력의 시각대다. 접속한 머신의 지역 시각대와 상관없이 늘 한국 시각으로 보인다
+var KST = time.FixedZone("KST", 9*3600)
 
 // secretNameRe 는 비밀 값이 들 만한 이름이다. 넓게 잡아 api_key·monkey 처럼 비밀이 아닌 이름도 걸리지만 가리는 쪽이 안전하다
 var secretNameRe = regexp.MustCompile(`(?i)pass|secret|token|key|pwd`)
