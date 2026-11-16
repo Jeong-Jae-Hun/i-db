@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,6 +31,10 @@ import (
 // `SELECT * FROM "테이블"` 을 Force 로 Run 한다.
 type Backend struct {
 	cl api
+
+	// tables 는 Run 이 읽은 DescribeTable 이다. 결과 정렬을 서버로 다시 읽을지(SortKey) 화면이 네트워크 없이 고른다
+	mu     sync.Mutex
+	tables map[string]*types.TableDescription
 }
 
 // api 는 Backend 가 부르는 DynamoDB 작업이다. 시험은 가짜로 페이지 이어 받기를 본다.
@@ -224,7 +229,54 @@ func (b *Backend) describe(ctx context.Context, table string) (*types.TableDescr
 	if err != nil {
 		return nil, wrap("DescribeTable", err)
 	}
+	if out.Table != nil {
+		b.mu.Lock()
+		if b.tables == nil {
+			b.tables = map[string]*types.TableDescription{}
+		}
+		b.tables[table] = out.Table
+		b.mu.Unlock()
+	}
 	return out.Table, nil
+}
+
+// ─── 서버 정렬 (R63.3) ───
+
+// SortKey 는 PartiQL SELECT text 의 결과를 서버에서 정렬할 수 있으면 그 정렬 키(인덱스를 쓰면 인덱스의 정렬 키)다.
+// WHERE 가 파티션 키를 = 로 고정해야 한다(IN·OR 는 파티션이 여럿이라 ORDER BY 를 받지 않는다). 키는 Run 이 읽어 둔
+// DescribeTable 을 써서 네트워크를 쓰지 않는다. 정렬할 수 없으면 sk 는 비고 reason 에 까닭(한국어)이 있다.
+func (b *Backend) SortKey(text string) (sk, reason string) {
+	toks := tokenize(text)
+	table, index, ok := target(toks)
+	if !isSelect(toks) || !ok {
+		return "", "SELECT 가 아님"
+	}
+	b.mu.Lock()
+	d := b.tables[table]
+	b.mu.Unlock()
+	if d == nil {
+		return "", "키 정보 없음"
+	}
+	pk, sk := keyNames(d.KeySchema)
+	if index != "" {
+		if pk, sk, ok = indexKeys(d, index); !ok {
+			return "", "키 정보 없음"
+		}
+	}
+	switch {
+	case sk == "":
+		return "", "정렬 키 없는 테이블"
+	case !keyCondition(toks, pk, false):
+		return "", "파티션 키 = 조건 없음"
+	}
+	return sk, ""
+}
+
+// Sorted 는 SELECT text 의 맨 바깥 ORDER BY 를 `ORDER BY "<sk>" ASC|DESC` 로 바꾸거나 붙인 글이다(R63.3).
+// SELECT 가 아니거나 LIMIT 이 있으면 ok 가 false 다.
+//   - 예: `SELECT * FROM "t" WHERE pk = 'a' -- 메모`, "sk", true → `SELECT * FROM "t" WHERE pk = 'a' ORDER BY "sk" DESC`
+func Sorted(text, sk string, desc bool) (string, bool) {
+	return sortedStatement(tokenize(text), text, sk, desc)
 }
 
 func keyNames(ks []types.KeySchemaElement) (hash, rng string) {

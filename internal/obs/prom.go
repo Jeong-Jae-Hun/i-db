@@ -79,7 +79,7 @@ func (p *prom) query(ctx context.Context, path string, params url.Values, limit 
 	if err := p.c.getData(ctx, path, params, &d); err != nil {
 		return nil, err
 	}
-	res, err := toResult(d, limit)
+	res, err := toResult(d, limit, false)
 	if err != nil {
 		return nil, fmt.Errorf("prometheus: %w", err)
 	}

@@ -30,6 +30,8 @@ type Query struct {
 	Until time.Duration
 	Limit int  // 행 상한. 0 이면 1,000
 	Force bool // ErrNeedsConfirm 을 확인받은 뒤 다시 보낼 때
+	// Direction 은 Loki 로그 질의 방향이다. "forward" 면 오래된 것부터, 비거나 "backward" 면 최신부터다(R62.3)
+	Direction string
 }
 
 // Backend 는 한 접속이다. 모두 읽기 전용이고, 쓰기로 보이는 질의는 Run 이 보내기 전에 ErrWrite 로 거절한다.

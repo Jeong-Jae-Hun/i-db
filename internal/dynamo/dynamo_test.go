@@ -149,6 +149,7 @@ type fakeAPI struct {
 	calls    int
 	deadline bool // 받은 ctx 에 기한이 있었는지
 	block    func(ctx context.Context, call int) error
+	rangeKey string // 있으면 테이블 정렬 키
 }
 
 func (f *fakeAPI) ListTables(context.Context, *dynamodb.ListTablesInput, ...func(*dynamodb.Options)) (*dynamodb.ListTablesOutput, error) {
@@ -156,8 +157,12 @@ func (f *fakeAPI) ListTables(context.Context, *dynamodb.ListTablesInput, ...func
 }
 
 func (f *fakeAPI) DescribeTable(_ context.Context, in *dynamodb.DescribeTableInput, _ ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
-	return &dynamodb.DescribeTableOutput{Table: &types.TableDescription{TableName: in.TableName,
-		KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}}}}, nil
+	d := &types.TableDescription{TableName: in.TableName,
+		KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}}}
+	if f.rangeKey != "" {
+		d.KeySchema = append(d.KeySchema, types.KeySchemaElement{AttributeName: aws.String(f.rangeKey), KeyType: types.KeyTypeRange})
+	}
+	return &dynamodb.DescribeTableOutput{Table: d}, nil
 }
 
 func (f *fakeAPI) ExecuteStatement(ctx context.Context, _ *dynamodb.ExecuteStatementInput, _ ...func(*dynamodb.Options)) (*dynamodb.ExecuteStatementOutput, error) {
@@ -216,5 +221,61 @@ func TestRun_받은_것_없이_기한이_지나면_오류다(t *testing.T) {
 	defer cancel()
 	if _, err := (&Backend{cl: f}).Run(ctx, source.Query{Text: `SELECT * FROM "t"`, Force: true}); err == nil {
 		t.Fatal("받은 항목이 없으면 오류여야 한다")
+	}
+}
+
+// ─── R63.3 정렬 키 서버 정렬 ───
+
+func TestSortKey_파티션_키_같음_조건이면_Run_이_읽은_정렬_키다(t *testing.T) {
+	b := &Backend{cl: &fakeAPI{perPage: 1, rangeKey: "sk"}}
+	q := `SELECT * FROM "t" WHERE pk = 'a'`
+	if sk, reason := b.SortKey(q); sk != "" || reason != "키 정보 없음" {
+		t.Fatalf("Run 전에는 키를 모른다: %q %q", sk, reason)
+	}
+	if _, err := b.Run(context.Background(), source.Query{Text: q, Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ q, sk, reason string }{
+		{q, "sk", ""},
+		{`SELECT * FROM "t" WHERE "pk" = 'a' AND sk > 3`, "sk", ""},
+		{`SELECT * FROM "t" WHERE pk IN ['a','b']`, "", "파티션 키 = 조건 없음"},
+		{`SELECT * FROM "t" WHERE status = 'x'`, "", "파티션 키 = 조건 없음"},
+		{`SELECT * FROM "other" WHERE pk = 'a'`, "", "키 정보 없음"},
+		{`UPDATE "t" SET a = 1`, "", "SELECT 가 아님"},
+	}
+	for _, c := range cases {
+		if sk, reason := b.SortKey(c.q); sk != c.sk || reason != c.reason {
+			t.Errorf("%s: %q %q", c.q, sk, reason)
+		}
+	}
+	nosk := &Backend{cl: &fakeAPI{perPage: 1}}
+	if _, err := nosk.Run(context.Background(), source.Query{Text: q, Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := nosk.SortKey(q); reason != "정렬 키 없는 테이블" {
+		t.Errorf("정렬 키 없음: %q", reason)
+	}
+}
+
+func TestSorted_맨_바깥_ORDER_BY_를_바꾸거나_붙인다(t *testing.T) {
+	cases := []struct {
+		text string
+		desc bool
+		want string
+	}{
+		{`SELECT * FROM "t" WHERE pk = 'a'`, false, `SELECT * FROM "t" WHERE pk = 'a' ORDER BY "sk" ASC`},
+		{"SELECT * FROM \"t\" WHERE pk = 'a'; -- 메모", true, `SELECT * FROM "t" WHERE pk = 'a' ORDER BY "sk" DESC`},
+		{"SELECT * FROM t WHERE pk = 'a' -- 메모\nORDER BY sk ASC", true, `SELECT * FROM t WHERE pk = 'a' ORDER BY "sk" DESC`},
+		{`SELECT * FROM t WHERE pk = 'order' ORDER BY "sk" DESC;`, false, `SELECT * FROM t WHERE pk = 'order' ORDER BY "sk" ASC`},
+	}
+	for _, c := range cases {
+		if got, ok := Sorted(c.text, "sk", c.desc); !ok || got != c.want {
+			t.Errorf("%q → %v %q", c.text, ok, got)
+		}
+	}
+	for _, text := range []string{`SELECT * FROM t WHERE pk = 'a' LIMIT 5`, `DELETE FROM t WHERE pk = 'a'`} {
+		if got, ok := Sorted(text, "sk", false); ok {
+			t.Errorf("%q → %q", text, got)
+		}
 	}
 }

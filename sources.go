@@ -195,6 +195,16 @@ func (p *sourcePool) get(ctx context.Context, c db.Conn) (source.Backend, error)
 	return nb, nil
 }
 
+// peek 은 c 의 값으로 열려 있는 Backend 다. 없으면 nil 이고 열지 않는다(화면 고루틴이 설정·네트워크를 기다리지 않게).
+func (p *sourcePool) peek(c db.Conn) source.Backend {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ps, ok := p.m[c.UUID]; ok && ps.conn == c {
+		return ps.b
+	}
+	return nil
+}
+
 // forget 은 고치거나 지운 접속의 Backend 를 닫는다(R59.3).
 func (p *sourcePool) forget(uuid string) error {
 	p.mu.Lock()
@@ -242,11 +252,11 @@ func (m *model) runSource(t *queryTab, text string) tea.Cmd {
 	if usesRange(c.Kind) {
 		q.Since = cmpRange(t.since)
 	}
-	p := pendingRun{tab: t.id, conn: t.conn, readOnly: true, sql: q.Text, stmts: 1, exec: m.sourceExec(c, sourceRun(q))}
+	p := pendingRun{tab: t.id, conn: t.conn, readOnly: true, sql: q.Text, stmts: 1, src: &q, exec: m.sourceExec(c, sourceRun(q))}
 	forced := q
 	forced.Force = true
 	retry := p
-	retry.exec = m.sourceExec(c, sourceRun(forced))
+	retry.exec, retry.src = m.sourceExec(c, sourceRun(forced)), &forced
 	p.retry = &retry
 	return m.guard(p)
 }
@@ -273,14 +283,19 @@ func (m *model) openSourceNode(t *queryTab, n *node) tea.Cmd {
 	c, path, limit := m.conn(n.conn), n.key, openLimit(m.conn(n.conn).Kind)
 	p := pendingRun{tab: t.id, conn: n.conn, readOnly: true, retarget: true,
 		exec: m.sourceExec(c, func(ctx context.Context, b source.Backend) (*db.Result, error) { return b.Open(ctx, path, limit) })}
-	// OpenSearch 미리 보기는 보낸 요청을 글로 남겨 기록에 싣고 정렬을 서버로 다시 읽을 수 있게 한다(R61.3)
-	if c.Kind == db.KindOpenSearch {
+	// 미리 보기도 보낸 요청을 Run 꼴 질의로 남겨 정렬·거르기를 서버로 다시 읽을 수 있게 한다(R61.3·R62.3). OpenSearch 는 기록에도 싣는다
+	switch c.Kind {
+	case db.KindOpenSearch:
 		p.sql = opensearch.OpenText(path, limit)
-	}
-	if c.Kind == db.KindDynamoDB {
+		p.src = &source.Query{Text: p.sql}
+	case db.KindLoki, db.KindGrafana:
+		if q, ok := obs.OpenQuery(c.Kind, path, limit); ok {
+			p.src = &q
+		}
+	case db.KindDynamoDB:
 		q := source.Query{Text: dynamoScanSQL(path), Limit: limit, Force: true}
 		retry := p
-		retry.sql = q.Text
+		retry.sql, retry.src = q.Text, &q
 		retry.exec = m.sourceExec(c, sourceRun(q))
 		p.retry = &retry
 	}

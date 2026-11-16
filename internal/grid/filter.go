@@ -234,10 +234,24 @@ func (m Model) UniqueCols() bool {
 // base 끝의 줄 주석이 닫는 괄호를 삼키지 않게 괄호 앞에 줄을 바꾼다. NULL 은 받은 행 정렬(R14.3)처럼 늘 뒤다.
 //   - 예: SELECT * FROM (\nselect …\n) AS _q WHERE "status"::text = 'PAID' ORDER BY "amount" DESC NULLS LAST
 func (m Model) ServerSQL(base string) string {
-	if m.res == nil {
+	where, order := m.serverClauses()
+	if where == "" && order == "" {
 		return base
 	}
-	var where, order string
+	return wrapSQL(base, where, order)
+}
+
+// PageSQL 은 ServerSQL 과 같은 정렬·거르기로 offset 행 뒤부터 읽는 SELECT 다(R14.7 더 읽기). 정렬·거르기가 없어도 감싼다.
+//   - 예: SELECT * FROM (\nselect …\n) AS _q ORDER BY "id" ASC NULLS LAST OFFSET 1000
+func (m Model) PageSQL(base string, offset int) string {
+	where, order := m.serverClauses()
+	return wrapSQL(base, where, order) + " OFFSET " + strconv.Itoa(offset)
+}
+
+func (m Model) serverClauses() (where, order string) {
+	if m.res == nil {
+		return "", ""
+	}
 	f := ParseFilter(m.filter, m.res.Cols)
 	switch {
 	case f.Col >= 0:
@@ -255,9 +269,10 @@ func (m Model) ServerSQL(base string) string {
 		}
 		order = db.QuoteIdent(q.SortCol) + " " + dir + " NULLS LAST"
 	}
-	if where == "" && order == "" {
-		return base
-	}
+	return where, order
+}
+
+func wrapSQL(base, where, order string) string {
 	s := "SELECT * FROM (\n" + base + "\n) AS _q"
 	if where != "" {
 		s += " WHERE " + where
@@ -266,4 +281,17 @@ func (m Model) ServerSQL(base string) string {
 		s += " ORDER BY " + order
 	}
 	return s
+}
+
+// Extend 는 지금 결과에 행을 덧붙인 결과 r 로 바꾼다(R14.7 더 읽기). SetResult 와 달리 정렬·거르기·커서·열 폭을 둔다.
+// 추가 행 자리(len(Rows) 뒤)가 밀리므로 통합이 Pending() 이 0 일 때만 부르고, 남은 빈 편집 기록은 비운다.
+func (m *Model) Extend(r *db.Result) {
+	if m.res == nil || r == nil || len(r.Cols) != len(m.res.Cols) {
+		return
+	}
+	m.res, m.folded = r, nil
+	m.edits, m.inserts, m.log = map[int]*rowEdit{}, 0, map[int][]snap{}
+	m.rebuild()
+	m.reflow()
+	m.follow()
 }

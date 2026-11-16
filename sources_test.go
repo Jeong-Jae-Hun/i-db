@@ -909,11 +909,14 @@ func TestConnCLI_평문_http_basic_은_경고를_찍는다(t *testing.T) {
 
 // ─── R61.3 OpenSearch 정렬 다시 읽기 ───
 
-func TestSource_OpenSearch_정렬은_본문_sort_를_바꿔_서버에서_다시_읽고_거르기는_받은_행에서_한다(t *testing.T) {
+func TestSource_OpenSearch_정렬과_거르기는_본문을_바꿔_서버에서_다시_읽는다(t *testing.T) {
 	f := newFake()
 	f.run = func(q source.Query) (*db.Result, error) {
 		rows := [][]string{{"a", "1"}, {"b", "2"}}
-		if strings.Contains(q.Text, `"order":"desc"`) {
+		switch {
+		case strings.Contains(q.Text, `"filter"`):
+			rows = [][]string{{"y", "98"}} // 서버가 거른 문서
+		case strings.Contains(q.Text, `"order":"desc"`):
 			rows = [][]string{{"z", "99"}, {"y", "98"}} // 받은 행 밖의 문서
 		}
 		return &db.Result{Cols: []string{"_id", "n"}, Rows: rows}, nil
@@ -938,19 +941,29 @@ func TestSource_OpenSearch_정렬은_본문_sort_를_바꿔_서버에서_다시_
 	}
 
 	m.Update(key("/"))
-	m.Update(key("y"))
-	_, cmd = m.Update(key("enter"))
-	if cmd != nil {
-		drive(m, cmd)
+	m.Update(key("n"))
+	m.Update(key("="))
+	m.Update(key("98"))
+	if runs, _, _ := f.snapshot(); len(runs) != 3 {
+		t.Fatal("치는 동안은 보내지 않는다")
 	}
-	if runs, _, _ := f.snapshot(); len(runs) != 3 || !strings.Contains(tab.grid.Summary(), "1/2행") {
-		t.Fatalf("거르기는 받은 행 안에서만: runs=%d %q", len(runs), tab.grid.Summary())
+	_, cmd = m.Update(key("enter"))
+	drive(m, cmd)
+	runs, _, _ = f.snapshot()
+	want := `{"query":{"bool":{"filter":[{"term":{"n":"98"}}],"must":[{"match_all":{}}]}},"size":2,"sort":[{"n":{"missing":"_last","order":"desc"}}]}`
+	if len(runs) != 4 || !strings.HasSuffix(runs[3].Text, want) || len(tab.res.Rows) != 1 || !strings.Contains(tab.grid.Summary(), "1/1행") {
+		t.Fatalf("거르기 확정은 bool.filter 로 다시 읽는다: %+v %q", runs, tab.grid.Summary())
+	}
+	if h := m.hist.List(history.Filter{}); h[0].SQL != runs[3].Text {
+		t.Fatalf("기록에는 보낸 글: %q", h[0].SQL)
 	}
 
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc}) // 거르기 해제 → 정렬만
+	drive(m, cmd)
 	_, cmd = m.Update(key("s")) // 정렬 없음 → 원래 요청
 	drive(m, cmd)
-	if runs, _, _ := f.snapshot(); len(runs) != 4 || runs[3].Text != "GET logs/_search\n{\"size\":2}" {
-		t.Fatalf("정렬을 풀면 원래 요청을 보낸다: %+v", runs)
+	if runs, _, _ := f.snapshot(); len(runs) != 6 || runs[5].Text != "GET logs/_search\n{\"size\":2}" || strings.Contains(runs[4].Text, "filter") {
+		t.Fatalf("둘 다 풀면 원래 요청을 보낸다: %+v", runs)
 	}
 }
 
@@ -985,5 +998,197 @@ func TestSource_OpenSearch_트리_미리_보기도_정렬을_서버로_다시_�
 	want := "POST logs-2026/_search\n" + `{"query":{"match_all":{}},"size":50,"sort":[{"_id":{"missing":"_last","order":"asc"}}]}`
 	if len(runs) != 1 || runs[0].Text != want {
 		t.Fatalf("미리 보기 요청에 sort 를 붙인다: %+v", runs)
+	}
+}
+
+// ─── R14.6 받은 행만 정렬·거르기 까닭 ───
+
+func TestSource_서버로_다시_읽지_못하면_까닭을_한_번만_알린다(t *testing.T) {
+	f := newFake()
+	registerFake(t, f)
+	m := sourceModel(t)
+	m.cur().conn = 0
+	editorRun(m, "SELECT * FROM logs")
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("value")
+	m.Update(key("s"))
+	if m.status != "받은 행만 정렬: SELECT 결과" || tab.grid.Summary() != "정렬 value ↑" {
+		t.Fatalf("까닭: %q %q", m.status, tab.grid.Summary())
+	}
+	m.status = ""
+	m.Update(key("j"))
+	if m.status != "" {
+		t.Fatalf("같은 정렬로는 다시 알리지 않는다: %q", m.status)
+	}
+
+	m.setConn(tab, 2) // Prometheus
+	editorRun(m, "up")
+	m.setFocus(fResult)
+	m.Update(key("/"))
+	m.Update(key("3"))
+	if strings.HasPrefix(m.status, "받은 행만") {
+		t.Fatalf("치는 동안은 알리지 않는다: %q", m.status)
+	}
+	m.Update(key("enter"))
+	if m.status != "받은 행만 거르기: 이 저장소는 서버 거르기 없음" {
+		t.Fatalf("거르기 까닭: %q", m.status)
+	}
+	tab.grid.FocusCol("time")
+	m.Update(key("s"))
+	if m.status != "받은 행만 정렬: 이 저장소는 서버 정렬 없음" {
+		t.Fatalf("정렬 까닭: %q", m.status)
+	}
+	if runs, _, _ := f.snapshot(); len(runs) != 2 {
+		t.Fatalf("다시 보내지 않는다: %d", len(runs))
+	}
+}
+
+// ─── R62.3 Loki time 정렬 ───
+
+func lokiRows(q source.Query) (*db.Result, error) {
+	rows := [][]string{{"2026-11-15 10:02:00.000", "api", "new"}, {"2026-11-15 10:01:00.000", "api", "mid"}}
+	if q.Direction == "forward" {
+		rows = [][]string{{"2026-11-15 09:00:00.000", "api", "old"}, {"2026-11-15 09:01:00.000", "api", "older2"}}
+	}
+	return &db.Result{Cols: []string{"time", "app", "line"}, Rows: rows}, nil
+}
+
+func TestSource_Loki_time_정렬은_방향을_바꿔_같은_범위로_다시_읽는다(t *testing.T) {
+	f := newFake()
+	f.run = lokiRows
+	registerFake(t, f)
+	m := sourceModel(t)
+	tab := m.cur()
+	m.setConn(tab, 1)
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket}) // 6h
+	editorRun(m, `{app="api"}`)
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket}) // 24h: 다시 읽기는 원래 실행의 범위를 쓴다
+	m.setFocus(fResult)
+	tab.grid.FocusCol("time")
+	_, cmd := m.Update(key("s")) // 오름 → forward
+	drive(m, cmd)
+	runs, _, _ := f.snapshot()
+	if len(runs) != 2 || runs[1].Direction != "forward" || runs[1].Since != 6*time.Hour || runs[1].Text != `{app="api"}` {
+		t.Fatalf("forward 로 다시 읽는다: %+v", runs)
+	}
+	if tab.res.Rows[0][2] != "old" || tab.grid.Summary() != "정렬 time ↑" {
+		t.Fatalf("범위의 오래된 줄부터: %q %q", tab.res.Rows[0][2], tab.grid.Summary())
+	}
+	_, cmd = m.Update(key("s")) // 내림 → backward
+	drive(m, cmd)
+	_, cmd = m.Update(key("s")) // 없음 → 이미 backward 라 보내지 않는다
+	drive(m, cmd)
+	runs, _, _ = f.snapshot()
+	if len(runs) != 3 || runs[2].Direction != "backward" || tab.res.Rows[0][2] != "new" {
+		t.Fatalf("내림은 backward, 정렬 없음은 그대로: %+v", runs)
+	}
+	tab.grid.FocusCol("app")
+	m.Update(key("s"))
+	if m.status != "받은 행만 정렬: time 열만 서버 정렬" {
+		t.Fatalf("다른 열: %q", m.status)
+	}
+}
+
+func TestSource_Loki_트리_미리_보기도_time_정렬을_서버로_다시_읽는다(t *testing.T) {
+	f := newFake()
+	f.run = lokiRows
+	f.open = func(string) (*db.Result, error) { return lokiRows(source.Query{}) }
+	f.children[""] = []source.Node{{Name: "app", Path: "app", HasChildren: true}}
+	f.children["app"] = []source.Node{{Name: "api", Path: "app/api", Openable: true}}
+	registerFake(t, f)
+	m := sourceModel(t)
+	ln := expandConn(t, m, 1)
+	app := childNamed(ln, "app")
+	m.selectNode(app)
+	drive(m, m.activate(app, true))
+	m.selectNode(childNamed(app, "api"))
+	_, cmd := m.Update(key("enter"))
+	drive(m, cmd)
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("time")
+	_, cmd = m.Update(key("s"))
+	drive(m, cmd)
+	runs, _, _ := f.snapshot()
+	if len(runs) != 1 || runs[0].Text != `{app="api"}` || runs[0].Limit != source.LokiOpenLimit || runs[0].Direction != "forward" {
+		t.Fatalf("미리 보기 질의를 forward 로: %+v", runs)
+	}
+}
+
+// ─── R63.3 DynamoDB 정렬 키 ───
+
+// fakeDynamo 는 정렬 키를 아는 가짜 DynamoDB 다(dynamo.Backend.SortKey 와 같은 꼴).
+type fakeDynamo struct {
+	*fakeSource
+	sk, reason string
+}
+
+func (f fakeDynamo) SortKey(string) (string, string) { return f.sk, f.reason }
+
+func dynamoModel(t *testing.T, sk, reason string) (*model, *fakeSource) {
+	t.Helper()
+	f := newFake()
+	f.run = func(source.Query) (*db.Result, error) {
+		return &db.Result{Cols: []string{"pk", "sk", "name"}, Rows: [][]string{{"a", "1", "x"}, {"a", "2", "y"}}}, nil
+	}
+	registerFake(t, f)
+	sourceOpeners[db.KindDynamoDB] = func(context.Context, db.Conn) (source.Backend, error) {
+		return fakeDynamo{f, sk, reason}, nil
+	}
+	m := sourceModel(t)
+	m.setConn(m.cur(), 3)
+	editorRun(m, `SELECT * FROM "orders" WHERE pk = 'a' -- 메모`)
+	m.setFocus(fResult)
+	return m, f
+}
+
+func TestSource_DynamoDB_정렬_키는_ORDER_BY_를_붙여_다시_읽는다(t *testing.T) {
+	m, f := dynamoModel(t, "sk", "")
+	tab := m.cur()
+	tab.grid.FocusCol("sk")
+	_, cmd := m.Update(key("s"))
+	drive(m, cmd)
+	_, cmd = m.Update(key("s"))
+	drive(m, cmd)
+	runs, _, _ := f.snapshot()
+	if len(runs) != 3 || runs[1].Text != `SELECT * FROM "orders" WHERE pk = 'a' ORDER BY "sk" ASC` ||
+		runs[2].Text != `SELECT * FROM "orders" WHERE pk = 'a' ORDER BY "sk" DESC` {
+		t.Fatalf("ORDER BY 를 붙인다: %+v", runs)
+	}
+	_, cmd = m.Update(key("s"))
+	drive(m, cmd)
+	if runs, _, _ := f.snapshot(); len(runs) != 4 || runs[3].Text != `SELECT * FROM "orders" WHERE pk = 'a' -- 메모` {
+		t.Fatalf("정렬을 풀면 원래 문장: %+v", runs)
+	}
+	tab.grid.FocusCol("name")
+	m.Update(key("s"))
+	if m.status != "받은 행만 정렬: 정렬 키(sk)가 아님" {
+		t.Fatalf("다른 열: %q", m.status)
+	}
+}
+
+func TestSource_DynamoDB_파티션_키_조건이_없으면_받은_행만_정렬한다(t *testing.T) {
+	m, f := dynamoModel(t, "", "파티션 키 = 조건 없음")
+	m.cur().grid.FocusCol("sk")
+	if _, cmd := m.Update(key("s")); cmd != nil || m.status != "받은 행만 정렬: 파티션 키 = 조건 없음" {
+		t.Fatalf("까닭: %q", m.status)
+	}
+	if runs, _, _ := f.snapshot(); len(runs) != 1 {
+		t.Fatal("다시 보내지 않는다")
+	}
+}
+
+// ─── R14.7 더 읽기 ───
+
+func TestSource_더_읽기는_PostgreSQL_결과만이다(t *testing.T) {
+	f := newFake()
+	registerFake(t, f)
+	m := sourceModel(t)
+	m.cur().conn = 0
+	editorRun(m, "GET logs/_search")
+	m.setFocus(fResult)
+	if _, cmd := m.Update(key("]")); cmd != nil || m.status != "더 읽지 않음: PostgreSQL 결과만 더 읽음" {
+		t.Fatalf("저장소 결과: %q", m.status)
 	}
 }

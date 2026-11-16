@@ -38,6 +38,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/plantree"
 	"github.com/Jeong-Jae-Hun/i-db/internal/redisview"
 	"github.com/Jeong-Jae-Hun/i-db/internal/session"
+	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 	"github.com/Jeong-Jae-Hun/i-db/internal/sqlfmt"
 	"github.com/Jeong-Jae-Hun/i-db/internal/statcrypt"
 	"github.com/Jeong-Jae-Hun/i-db/internal/tableview"
@@ -132,6 +133,7 @@ const (
 	rkSignal                    // 백엔드 취소·종료
 	rkImport                    // CSV 가져오기
 	rkRedisWrite                // 값 편집기가 만든 Redis 명령
+	rkMore                      // 일반 결과 더 읽기(R14.7). 결과에 행을 덧붙인다
 )
 
 // 확인 창이 묻는 것. 한 실행이 차례로 여러 단계를 거칠 수 있다(편집 버리기 → ANALYZE → prod·제출)
@@ -304,7 +306,7 @@ var helpSections = []struct {
 		{"칸 고치는 중", "space bool 순환 · now/today · Ctrl+O 큰 편집기 · enum 은 고르기 창", ""},
 		{"i / U", "행을 INSERT / UPDATE 문으로 복사", "i"},
 		{"o", "셀 전체 값", "o"},
-		{"[ / ] · #", "테이블 보기 이전·다음 페이지 · 정확한 개수", "]"},
+		{"[ / ] · #", "테이블 보기 이전·다음 페이지 · 정확한 개수 (일반 결과 ] 는 다음 1,000행 더 읽기)", "]"},
 		{"p / P · { / }", "결과 고정 / 풀기 · 결과 탭 이동", "p"},
 		{"K / X", "pid 행의 쿼리 취소 / 연결 종료", "K"},
 		{"t · esc", "실행 계획 나무 ↔ JSON · 닫기", "t"},
@@ -408,6 +410,7 @@ type resultMsg struct {
 	params  map[string]string // 파라미터 실행의 이름 → 값. 성공하면 기억한다(R55)
 	retry   *pendingRun       // 읽기 전용 저장소의 비싼 질의를 확인 뒤 다시 보낼 실행(R60.2)
 	keep    *grid.Query       // pendingRun.keep
+	src     *source.Query     // pendingRun.src
 }
 
 // redisValueMsg 는 값 편집기에 넣을 키 하나를 읽은 결과다.
@@ -602,6 +605,8 @@ type pendingRun struct {
 	note     string            // 시작할 때 상태 줄 앞에 붙일 글(enc() 확장, R52)
 	changes  *db.ChangeSet     // rkSubmit 이 낸 묶음(R50)
 	keep     *grid.Query       // 정렬·거르기 다시 읽기(R14.5). 결과에 다시 붙이고 실패하면 보던 결과를 둔다
+	src      *source.Query     // 저장소 실행의 질의. 정렬·거르기를 서버로 다시 읽을 때 바꿔 보낸다(R61.3·R62.3·R63.3)
+	sent     *string           // exec 가 실제로 보낸 글을 적는 자리. 비지 않았으면 sql 대신 기록한다(OpenSearch keyword 바꿈)
 	undo     *undoEntry        // rkSubmit 이 되돌리기 묶음을 낸다(R50)
 	params   map[string]string // 파라미터 실행의 이름 → 값(R55)
 	// 읽기 전용 저장소가 ErrNeedsConfirm 을 돌려주면 확인 뒤 대신 시작할 실행(Force, R60.2)
@@ -693,6 +698,9 @@ type queryTab struct {
 	// requeryLast 는 그 실행이 성공하면 t.last(제출 뒤 새로고침)로 올릴 실행이다. 실패한 감싼 문장을 다시 보내지 않게 한다
 	requerying  bool
 	requeryLast *pendingRun
+	// baseSrc 는 저장소 결과를 만든 질의다(baseSQL 의 저장소 판). noted 는 받은 행만 정렬·거르기 까닭을 이미 알린 정렬·거르기다(R14.6)
+	baseSrc *source.Query
+	noted   grid.Query
 	// 연 파일을 마지막으로 읽거나 쓴 내용과 편집 판(R45.2). 디스크가 이 내용과 달라지면 autoStop 으로 자동 저장을 멈춘다
 	diskText string
 	editRev  int
@@ -1585,7 +1593,10 @@ func (m *model) start(p pendingRun) tea.Cmd {
 		defer cancel()
 		res, err := exec(ctx)
 		msg := resultMsg{tab: id, seq: seq, conn: p.conn, sql: p.sql, stmts: p.stmts, res: res, err: err, kind: p.kind, key: p.key, old: p.old,
-			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params, retry: p.retry, keep: p.keep}
+			session: session, rev: rev, start: began, changes: p.changes, undo: p.undo, params: p.params, retry: p.retry, keep: p.keep, src: p.src}
+		if p.sent != nil && *p.sent != "" {
+			msg.sql = *p.sent
+		}
 		if p.all != nil {
 			msg.all = *p.all
 		}
@@ -2362,10 +2373,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				t.exportSQL = msg.sql
 			}
 			if msg.keep == nil {
-				t.baseSQL = t.exportSQL
-				// OpenSearch 결과는 정렬을 서버로 다시 읽을 때 원래 요청 글의 sort 를 바꾼다(R61.3)
-				if msg.kind == rkGrid && msg.err == nil && !t.cancelled && c.Kind == db.KindOpenSearch {
-					t.baseSQL = msg.sql
+				t.baseSQL, t.baseSrc, t.noted = t.exportSQL, nil, grid.Query{}
+				// 저장소 결과는 정렬·거르기를 서버로 다시 읽을 때 원래 질의를 바꿔 보낸다(R61.3·R62.3·R63.3)
+				if msg.kind == rkGrid && msg.err == nil && !t.cancelled && c.Kind.IsSource() {
+					t.baseSQL, t.baseSrc = msg.sql, msg.src
 				}
 			}
 			if msg.kind != rkTable {
@@ -2395,8 +2406,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if requeryLast != nil {
 					t.last = requeryLast
 				}
-				// OpenSearch 는 정렬만 서버로 읽어 거르기는 받은 행 안에서 다시 건다(R61.3)
-				keep, server := *msg.keep, c.Kind == db.KindPG
+				// Loki·DynamoDB 는 정렬만 서버로 읽어 거르기는 받은 행 안에서 다시 건다(R62.3·R63.3)
+				keep, server := *msg.keep, c.Kind == db.KindPG || c.Kind == db.KindOpenSearch
 				if !server {
 					keep.Filter = now.Filter
 				}
@@ -2526,6 +2537,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case rkRedisWrite:
 			if status == "" {
 				status, cmd = m.afterRedisWrite(t, msg)
+			}
+		case rkMore:
+			if status == "" {
+				status, cmd = m.appendMore(t, msg.res)
+			} else {
+				status = "더 읽기 " + status
 			}
 		default:
 			if status == "" {
@@ -3825,6 +3842,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t.view = (t.view+1+d+n)%n - 1
 			t.grid.SetResult(t.shown())
 			return m, nil
+		case "]":
+			// 테이블 보기는 다음 페이지(R16.1)이고 일반 결과는 더 읽기다(R14.7)
+			if t.tv == nil {
+				return m, m.loadMore(t)
+			}
 		case "K", "X":
 			// ─── 백엔드 신호 ───
 			// pid 열이 있는 결과(Activity·Locks 등)에서 고른 행의 백엔드에 K 취소·X 종료를 보낸다. 늘 묻는다.

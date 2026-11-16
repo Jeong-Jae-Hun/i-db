@@ -165,3 +165,37 @@ func TestParseFilter_대소문자까지_같은_열을_먼저_고른다(t *testin
 		t.Fatalf("없으면 대소문자 무시로 앞 열: %+v", f)
 	}
 }
+
+// ─── R14.7 더 읽기 ───
+
+func TestPageSQL_정렬_거르기가_없어도_감싸고_OFFSET_을_붙인다(t *testing.T) {
+	m := newGrid(filterResult(), [2]int{80, 12})
+	if got := m.PageSQL("select 1 -- c", 1000); got != "SELECT * FROM (\nselect 1 -- c\n) AS _q OFFSET 1000" {
+		t.Fatalf("감싸기: %q", got)
+	}
+	m.FocusCol("n")
+	m.CycleSort()
+	m, _ = press(m, "/", "n>1", "enter")
+	want := "SELECT * FROM (\nb\n) AS _q WHERE \"n\" > 1 ORDER BY \"n\" ASC NULLS LAST OFFSET 2000"
+	if got := m.PageSQL("b", 2000); got != want {
+		t.Fatalf("정렬·거르기와 같이: %q", got)
+	}
+}
+
+func TestExtend_행을_덧붙여도_정렬_거르기_커서를_둔다(t *testing.T) {
+	r := filterResult()
+	m := newGrid(r, [2]int{80, 12})
+	m.FocusCol("n")
+	m.SetQuery(Query{SortCol: "n", Desc: true}, true)
+	m, _ = press(m, "j")
+	before := m.CurrentRow()
+	more := *r
+	more.Rows = append(append([][]string{}, r.Rows...), r.Rows[0])
+	m.Extend(&more)
+	if m.CurrentCol() != "n" || strings.Join(m.CurrentRow(), ",") != strings.Join(before, ",") || m.Summary() != "정렬 n ↓" {
+		t.Fatalf("커서·정렬을 둔다: %q %v %q", m.CurrentCol(), m.CurrentRow(), m.Summary())
+	}
+	if len(viewed(m, 0)) != len(more.Rows) {
+		t.Fatalf("덧붙인 행이 보인다: %d", len(viewed(m, 0)))
+	}
+}

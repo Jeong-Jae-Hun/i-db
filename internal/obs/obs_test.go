@@ -536,3 +536,51 @@ func TestRedirect_를_따라가지_않고_토큰을_다시_보내지_않는다(t
 		t.Fatalf("리다이렉트를 따라 %d번 더 보냈다", n)
 	}
 }
+
+// ─── R62.3 Loki time 정렬 방향 ───
+
+func TestLoki_forward_는_방향을_보내고_오래된_것부터_편다(t *testing.T) {
+	f := newFake(t, map[string]func(url.Values) (int, string){
+		"/loki/api/v1/query_range": success(`{"resultType":"streams","result":[
+			{"stream":{"a":"1"},"values":[["3000000000","c"],["1000000000","a"]]},
+			{"stream":{"a":"2"},"values":[["2000000000","b"]]}]}`),
+	})
+	l := newLokiAt(t, f.srv.URL, db.Conn{})
+	res, err := l.Run(context.Background(), source.Query{Text: `{a=~".+"}`, Direction: "forward"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "direction", f.last(t).query.Get("direction"), "forward")
+	var lines []string
+	for _, r := range res.Rows {
+		lines = append(lines, r[len(r)-1])
+	}
+	eq(t, "order", strings.Join(lines, ","), "a,b,c")
+
+	if _, err := l.Run(context.Background(), source.Query{Text: `{a="1"}`, Direction: "sideways"}); err == nil {
+		t.Error("모르는 방향은 보내지 않는다")
+	}
+}
+
+func TestOpenQuery_미리_보기와_같은_질의이고_Grafana_는_지시줄을_싣는다(t *testing.T) {
+	q, ok := OpenQuery(db.KindLoki, "app/a/b", 0)
+	if !ok || q.Text != `{app="a/b"}` || q.Limit != source.LokiOpenLimit {
+		t.Fatalf("loki: %v %+v", ok, q)
+	}
+	q, ok = OpenQuery(db.KindGrafana, "lk1/app/api", 30)
+	if !ok || q.Text != "# datasource: lk1\n{app=\"api\"}" || q.Limit != 30 {
+		t.Fatalf("grafana: %v %+v", ok, q)
+	}
+	if _, ok := OpenQuery(db.KindGrafana, "pr1/up", 0); ok {
+		t.Error("지표 경로는 Loki 질의가 아니다")
+	}
+
+	f, g := newGrafanaFake(t)
+	q.Direction = "forward"
+	if _, err := g.Run(context.Background(), q); err != nil {
+		t.Fatal(err)
+	}
+	r := f.last(t)
+	eq(t, "proxy", r.path, "/grafana/api/datasources/proxy/uid/lk1/loki/api/v1/query_range")
+	eq(t, "direction", r.query.Get("direction"), "forward")
+}
