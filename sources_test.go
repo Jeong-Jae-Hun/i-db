@@ -461,7 +461,7 @@ func TestTestConn_저장소는_Children_로_시험하고_오류에서_비밀값�
 
 // ─── 접속 창 ───
 
-func TestConnForm_종류는_7개를_돌고_종류마다_칸이_다르다(t *testing.T) {
+func TestConnForm_종류를_모두_돌고_종류마다_칸이_다르다(t *testing.T) {
 	m := connTestModel(t)
 	m.openConnForm(nil, false)
 	f := m.connForm
@@ -471,7 +471,7 @@ func TestConnForm_종류는_7개를_돌고_종류마다_칸이_다르다(t *test
 		kinds = append(kinds, f.kind)
 		m.Update(key(" "))
 	}
-	if f.kind != db.KindPG || len(kinds) != 7 || kinds[2] != db.KindOpenSearch || kinds[6] != db.KindDynamoDB {
+	if f.kind != db.KindPG || len(kinds) != 2+len(db.SourceKinds) || kinds[2] != db.KindOpenSearch || kinds[6] != db.KindDynamoDB || kinds[7] != db.KindAthena {
 		t.Fatalf("순환: %v", kinds)
 	}
 	labels := func() string {
@@ -495,6 +495,7 @@ func TestConnForm_종류는_7개를_돌고_종류마다_칸이_다르다(t *test
 		{db.KindLoki, "basic", "이름,그룹,종류,URL,인증,사용자,비밀번호"},
 		{db.KindGrafana, "token", "이름,그룹,종류,URL,인증,비밀번호"},
 		{db.KindDynamoDB, "", "이름,그룹,종류,URL,리전,프로필"},
+		{db.KindAthena, "", "이름,그룹,종류,리전,프로필,작업 그룹,결과 위치"},
 	}
 	for _, c := range cases {
 		f.kind, f.auth = c.kind, c.auth

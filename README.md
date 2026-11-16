@@ -17,7 +17,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - Redis: key browser, value editor for every type, TTL/rename, monitor (INFO, SLOWLOG, big keys), pattern bulk delete
 - `queries/` folder integration: files are attached to connections via DataGrip's `data_source_mapping.xml`, auto-save, session restore
 - Optional client-side decryption view and `enc('...')` expansion for AES-CBC values stored as `<iv hex>^|^<ciphertext hex>` (pgcrypto `encrypt_iv` compatible). Keys come from `.env` (`<GROUP>_AES_KEY`, `<GROUP>_AES_IV`); nothing is installed in your database. Without a key/IV, `enc(...)` is sent as a call to an existing `staticEncrypt(...)` function, so it only works if your database already has one
-- Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources) and DynamoDB in the same tree, editor and results grid (see Sources)
+- Read-only sources next to the databases: OpenSearch, Loki, Prometheus, Grafana (Loki/Prometheus data sources), DynamoDB and Athena in the same tree, editor and results grid (see Sources)
 - Dashboard (`Ctrl+G`) and `db status`: every connection's state, latency, version and key numbers at a glance (see Dashboard)
 - Optional "user lookup" that runs a configurable set of read-only queries across several databases from one email/uid/id/nickname (see [examples/user360.json](examples/user360.json))
 
@@ -117,15 +117,16 @@ db conn folder --rename mon monitoring
 
 ### Sources
 
-OpenSearch, Loki, Prometheus, Grafana and DynamoDB connections are read-only and live only in `.dbtui/connections.json` (DataGrip sources are unchanged). Fields are `url` (DynamoDB: optional endpoint), `auth` (`basic`, `sigv4` for OpenSearch, `token` for Grafana, or none), `user`, and `region`/`profile` for SigV4 and DynamoDB. Secrets go to `.env` as `OS_<NAME>_PASSWORD`, `LOKI_<NAME>_PASSWORD`, `PROM_<NAME>_PASSWORD` or `GRAFANA_<NAME>_TOKEN`; AWS credentials are never stored and come from `profile` or the standard chain.
+OpenSearch, Loki, Prometheus, Grafana, DynamoDB and Athena connections are read-only and live only in `.dbtui/connections.json` (DataGrip sources are unchanged). Fields are `url` (DynamoDB: optional endpoint), `auth` (`basic`, `sigv4` for OpenSearch, `token` for Grafana, or none), `user`, `region`/`profile` for SigV4, DynamoDB and Athena, and `workgroup` (default `primary`)/`output` (`s3://…`, default: the workgroup's result location) for Athena. Secrets go to `.env` as `OS_<NAME>_PASSWORD`, `LOKI_<NAME>_PASSWORD`, `PROM_<NAME>_PASSWORD` or `GRAFANA_<NAME>_TOKEN`; AWS credentials are never stored and come from `profile` or the standard chain.
 
 ```json
 [{"uuid":"…","name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"},
  {"uuid":"…","name":"logs-stg","kind":"loki","url":"http://loki.stg.internal:3100"},
- {"uuid":"…","name":"orders","kind":"dynamodb","region":"ap-northeast-2"}]
+ {"uuid":"…","name":"orders","kind":"dynamodb","region":"ap-northeast-2"},
+ {"uuid":"…","name":"athena-prod","group":"data","kind":"athena","region":"ap-northeast-2","profile":"team","workgroup":"primary","output":"s3://bucket/prefix/"}]
 ```
 
-In the connection form the kind field cycles through all seven kinds and shows only the fields that kind needs; pasting an `https://user:pw@host:9200` URL fills url, user and password. In the tree, these connections expand lazily (indices and mapping fields, Loki labels and values, Prometheus metrics, Grafana data sources, DynamoDB tables and keys) with details dimmed on the right. `Enter` previews an index, label value, metric or table in a result tab, `l` expands, `r` reloads. `Ctrl+R` sends the editor text as the source's own query language (`GET idx/_search` + JSON body or `SELECT …` for OpenSearch, LogQL, PromQL, PartiQL `SELECT`). Anything that looks like a write is refused before sending (`읽기 전용 저장소라 보내지 않음`), and expensive queries (DynamoDB full scan, OpenSearch `size` over 10,000, Loki/Prometheus ranges over 7 days) ask `비싼 질의: y/N` first. Loki/Prometheus/Grafana tabs show the range (`최근 1h`) above the editor; `Ctrl+]` cycles 15m, 1h, 6h, 24h, 7d per tab. Results are ordinary grids, so `c` charts metric series. Table view, editing and transactions do not apply.
+In the connection form the kind field cycles through all eight kinds and shows only the fields that kind needs; pasting an `https://user:pw@host:9200` URL fills url, user and password. In the tree, these connections expand lazily (indices and mapping fields, Loki labels and values, Prometheus metrics, Grafana data sources, DynamoDB tables and keys, Athena databases, tables and columns) with details dimmed on the right. `Enter` previews an index, label value, metric or table in a result tab, `l` expands, `r` reloads. `Ctrl+R` sends the editor text as the source's own query language (`GET idx/_search` + JSON body or `SELECT …` for OpenSearch, LogQL, PromQL, PartiQL `SELECT`, Athena SQL). Anything that looks like a write is refused before sending (`읽기 전용 저장소라 보내지 않음`), and expensive queries (DynamoDB full scan, OpenSearch `size` over 10,000, Loki/Prometheus ranges over 7 days, Athena `SELECT` with neither `LIMIT` nor `WHERE`, previewing a partitioned Athena table) ask `비싼 질의: y/N` first. Loki/Prometheus/Grafana tabs show the range (`최근 1h`) above the editor; `Ctrl+]` cycles 15m, 1h, 6h, 24h, 7d per tab. Results are ordinary grids, so `c` charts metric series. Table view, editing and transactions do not apply.
 
 ```sh
 db conn add logs-stg --kind loki --url http://loki.stg.internal:3100
@@ -136,7 +137,11 @@ db query -c search-stg 'GET logs-*/_search
 db logs -c logs-stg '{app="api"} |= "error"' --since 6h
 db metrics -c prom 'sum by (status) (rate(http_requests_total[5m]))' --since 24h --until 1h
 db query -c orders 'SELECT * FROM "orders"' --force   # full scan needs --force (exit 3 without)
+db conn add athena-prod --kind athena --region ap-northeast-2 --profile team --output s3://bucket/prefix/
+db query -c athena-prod --prod $'-- database: sales\nSELECT * FROM orders WHERE dt = \'2026-11-01\' LIMIT 100'
 ```
+
+Athena accepts only one `SELECT`, `WITH … SELECT`, `SHOW`, `DESCRIBE` or `EXPLAIN` statement; CTAS, `INSERT`, `UNLOAD`, `MSCK` and the like are refused. Source tabs have no selected database, so write `"db"."table"` or put `-- database: <name>` on the first line. Queries reuse results from the last 60 minutes to avoid paying for the same scan twice, the line above the grid shows `스캔 1.2GB · 엔진 0.6초`, and cancelling a running query sends `StopQueryExecution` so it stops scanning. The dashboard shows the workgroup state and per-query scan cutoff. IAM needs `athena:ListDatabases`, `ListTableMetadata`, `GetTableMetadata`, `StartQueryExecution`, `GetQueryExecution`, `GetQueryResults`, `StopQueryExecution`, `GetWorkGroup`, Glue catalog reads, S3 reads on the data and writes on the result location.
 
 `--max-rows` defaults to 1,000 for sources. Prod sources need `--prod` like everything else; write-looking queries and unconfirmed expensive queries exit with 3. `describe`, `ddl`, `explain`, `redis`, `search`, `schemas` and `schema-diff` are usage errors on these connections.
 

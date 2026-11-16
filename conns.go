@@ -37,6 +37,8 @@ const (
 	cfPassword
 	cfRegion
 	cfProfile
+	cfWorkgroup // Athena(R68)
+	cfOutput
 	cfCount
 
 	connTestTimeout = 10 * time.Second
@@ -44,7 +46,7 @@ const (
 )
 
 var (
-	connFieldLabels = [cfCount]string{"이름", "그룹", "종류", "URL", "인증", "호스트", "포트", "DB", "사용자", "비밀번호", "리전", "프로필"}
+	connFieldLabels = [cfCount]string{"이름", "그룹", "종류", "URL", "인증", "호스트", "포트", "DB", "사용자", "비밀번호", "리전", "프로필", "작업 그룹", "결과 위치"}
 	// 이름 칸 끝에 붙인 접속 URL. 앞의 글은 이름으로 남긴다
 	connURLRe = regexp.MustCompile(`(?i)(?:postgres|postgresql|redis|rediss|https?)://\S*$`)
 	// 접속 창 종류 칸이 도는 순서
@@ -132,7 +134,7 @@ func connRoots(conns []db.Conn, reuse map[int]*node, groupOpen map[string]bool) 
 // envRank 는 폴더 안 환경 순서다(R66.1). Env 는 이 셋만 돌려준다
 var envRank = map[string]int{"local": 0, "stg": 1, "prod": 2}
 
-// connRank 는 같은 환경 안의 순서다: 쓰기 DB → 읽기 DB → Redis → 검색 → 로그·지표 → DynamoDB(R66.1).
+// connRank 는 같은 환경 안의 순서다: 쓰기 DB → 읽기 DB → Redis → 검색 → 로그·지표 → DynamoDB → Athena(R66.1).
 func connRank(c db.Conn) int {
 	read := strings.Contains(c.Name, "-read") || strings.HasPrefix(c.Host, "read.") || strings.Contains(c.Host, ".cluster-ro-")
 	switch c.Kind {
@@ -144,6 +146,8 @@ func connRank(c db.Conn) int {
 		return 5
 	case db.KindLoki, db.KindPrometheus, db.KindGrafana:
 		return 6
+	case db.KindAthena:
+		return 8
 	}
 	return 7
 }
@@ -182,7 +186,7 @@ func (m *model) openConnForm(n *node, edit bool) {
 		}
 		f.edit, f.kind, f.auth, f.sslMode = n.conn, c.Kind, c.Auth, c.SSLMode
 		for i, v := range map[int]string{cfName: c.Name, cfGroup: c.Group, cfHost: c.Host, cfDB: c.DB, cfUser: c.User,
-			cfURL: c.URL, cfRegion: c.Region, cfProfile: c.Profile} {
+			cfURL: c.URL, cfRegion: c.Region, cfProfile: c.Profile, cfWorkgroup: c.Workgroup, cfOutput: c.Output} {
 			f.inputs[i].SetValue(v)
 		}
 		if c.Port > 0 {
@@ -230,7 +234,7 @@ func (f *connForm) visible(i int) bool {
 	case cfHost, cfPort, cfDB:
 		return !f.kind.IsSource()
 	case cfURL:
-		return f.kind.IsSource()
+		return f.kind.IsSource() && f.kind != db.KindAthena
 	case cfAuth:
 		return f.kind.IsHTTP()
 	case cfUser:
@@ -238,7 +242,9 @@ func (f *connForm) visible(i int) bool {
 	case cfPassword:
 		return !f.kind.IsSource() || f.auth == "basic" || f.auth == "token"
 	case cfRegion, cfProfile:
-		return f.kind == db.KindDynamoDB || f.auth == "sigv4"
+		return f.kind == db.KindDynamoDB || f.kind == db.KindAthena || f.auth == "sigv4"
+	case cfWorkgroup, cfOutput:
+		return f.kind == db.KindAthena
 	}
 	return false
 }
@@ -348,7 +354,10 @@ func (f *connForm) conn() (db.Conn, error) {
 	}
 	if f.kind.IsSource() {
 		// 보이지 않는 칸 값은 저장하지 않는다(인증을 바꾸면 이전 사용자·비밀번호가 남지 않게)
-		c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, URL: v[cfURL], Auth: f.auth}
+		c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, Auth: f.auth}
+		if f.visible(cfURL) {
+			c.URL = v[cfURL]
+		}
 		if f.visible(cfUser) {
 			c.User = v[cfUser]
 		}
@@ -357,6 +366,9 @@ func (f *connForm) conn() (db.Conn, error) {
 		}
 		if f.visible(cfRegion) {
 			c.Region, c.Profile = v[cfRegion], v[cfProfile]
+		}
+		if f.visible(cfWorkgroup) {
+			c.Workgroup, c.Output = v[cfWorkgroup], v[cfOutput]
 		}
 		switch {
 		case f.kind.IsHTTP() && c.URL == "":
@@ -848,6 +860,11 @@ func (m *model) connFormView() string {
 		case cfProfile:
 			if f.inputs[i].Value() == "" {
 				f.inputs[i].Placeholder = "비우면 표준 체인"
+			}
+			v = f.inputs[i].View()
+		case cfWorkgroup, cfOutput:
+			if f.inputs[i].Value() == "" {
+				f.inputs[i].Placeholder = map[int]string{cfWorkgroup: "비우면 primary", cfOutput: "s3://… (비우면 작업 그룹 설정)"}[i]
 			}
 			v = f.inputs[i].View()
 		case cfPort:

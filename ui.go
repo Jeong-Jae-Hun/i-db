@@ -265,7 +265,7 @@ var helpSections = []struct {
 		{"Enter (테이블)", "테이블 보기 (서버 페이지·거르기·정렬)", "enter"},
 		{"Enter (접속)", "펼치기 · 그 접속을 쓰는 탭이 없으면 최근 파일 열기", "enter"},
 		{"Enter (쿼리 파일)", "파일 열기 (이미 열린 탭이면 그 탭으로)", "enter"},
-		{"Enter (저장소)", "인덱스·라벨 값·지표·테이블 미리 보기 (OpenSearch·Loki·Prometheus·Grafana·DynamoDB, 펼치기는 l)", "enter"},
+		{"Enter (저장소)", "인덱스·라벨 값·지표·테이블 미리 보기 (OpenSearch·Loki·Prometheus·Grafana·DynamoDB·Athena, 펼치기는 l)", "enter"},
 		{"d / D", "테이블 구조 / DDL 을 새 탭에", "d"},
 		{"I", "CSV 가져오기 (테이블)", "I"},
 		{"A / L / S", "활동 / 잠금 / 테이블 크기 (PostgreSQL 접속)", "A"},

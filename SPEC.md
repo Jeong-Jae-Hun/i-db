@@ -19,7 +19,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `.idea/data_source_mapping.xml` | `queries/` 파일별 접속 uuid |
 | `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 저장소 비밀값 `OS_`·`LOKI_`·`PROM_<이름>_PASSWORD`·`GRAFANA_<이름>_TOKEN`(R60.1), 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
 | `.dbtui/user360.json` | 사용자 한눈에 보기 조회 목록(R51, 없으면 빈 목록) |
-| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`, R60.1) |
+| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`athena`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`·`workgroup`·`output`, R60.1·R68) |
 
 `<이름>`은 접속 이름을 대문자로 바꾸고 영숫자 외 문자를 `_`로 바꾼 것이다.
 
@@ -550,11 +550,11 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R60 읽기 전용 저장소 공통
 
-- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
+- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`athena`를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB·Athena), `workgroup`·`output`(Athena, R68)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
   - 예: `{"name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"}`.
   - 접속을 시험·저장할 때 `basic`·`token`(Grafana 포함)이 `http://` 주소면 `경고: 비밀번호가 평문 http 로 감`을, DynamoDB `url`이 `localhost`·`*.amazonaws.com`이 아니면 `경고: AWS 서명을 AWS 밖 주소로 보냄`을 보인다(막지는 않음). 인증 없음인데 주소에 `user:pass@`가 있으면 오류다.
   - HTTP 요청은 리다이렉트를 따라가지 않는다. 3xx는 `redirect not followed: 302 Found` 같은 오류다(인증 헤더를 다른 주소로 다시 보내거나 허용 경로를 우회하지 않게). 응답 본문은 16 MiB까지 받는다.
-- R60.2 이 저장소들은 읽기 전용이다. 쓰기로 보이는 질의는 보내기 전에 거절한다(`읽기 전용 저장소라 보내지 않음`). 비싼 질의(DynamoDB 전체 스캔, OpenSearch `size`·`from+size` 1만 초과, Loki·Prometheus 범위 7일 초과)는 까닭을 붙여 확인을 받는다(`비싼 질의: 전체 스캔: y/N`, CLI는 `비싼 질의: 범위 7일 초과 (--force)`로 3). prod 판정(R6.2)과 CLI `--prod`(R58.2)는 같다.
+- R60.2 이 저장소들은 읽기 전용이다. 쓰기로 보이는 질의는 보내기 전에 거절한다(`읽기 전용 저장소라 보내지 않음`). 비싼 질의(DynamoDB 전체 스캔, OpenSearch `size`·`from+size` 1만 초과, Loki·Prometheus 범위 7일 초과, Athena `LIMIT`·`WHERE` 없는 `SELECT`와 파티션 테이블 미리 보기)는 까닭을 붙여 확인을 받는다(`비싼 질의: 전체 스캔: y/N`, CLI는 `비싼 질의: 범위 7일 초과 (--force)`로 3). prod 판정(R6.2)과 CLI `--prod`(R58.2)는 같다.
   - OpenSearch `size`·`from`은 본문(문자열 `"20"`·실수·지수 꼴도)과 질의 문자열을 모두 읽는다. 읽을 수 없거나 같은 키가 두 번 나오면(본문과 질의 문자열에 함께 있어도) `size·from 을 읽을 수 없음`으로 확인을 받는다.
   - 단, 다른 비싼 꼴(집계 `terms.size`, `track_total_hits`, 큰 `_source`, 넓은 인덱스 패턴)은 보지 않는다. 응답 16 MiB 상한과 서버 설정이 막는다.
 - R60.3 트리·편집기·결과 표·CLI(`db query -c`)는 PostgreSQL과 같은 자리에서 쓴다. 결과는 표(`db.Result`)이고 중첩 값은 JSON 칸이라 값 보기(R32)로 연다. 실행 기록(R8)·알림(R30)은 같다. 표 편집(R15)·트랜잭션(R17)·테이블 보기(R16)는 없다.
@@ -587,10 +587,10 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 ### R64 대시보드
 
 - R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 아직 결과 없음)·지연(ms)·버전·주요 수치다. 다시 확인하는 동안에는 줄·수치·요약이 마지막 결과를 그대로 보이고 머리에 `확인 중 N`만 센다. 표가 다섯 줄을 못 얻을 만큼 낮으면 요약 카드를 한 줄 글로 접는다.
-  - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`.
+  - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`, Athena `ENABLED · 스캔 상한 10.0GB`(버전 열은 엔진 판).
   - 예: PostgreSQL `활성`은 확인하는 연결 자신을 뺀다. Redis 메모리는 `maxmemory:0`이면 `1.1GB/제한 없음`, `maxmemory` 필드를 숨긴 서버는 사용량만 `1.1GB`다.
   - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있으면 그 칸을 경고 색으로 그린다.
-- R64.2 확인은 모든 접속에 동시에, 접속마다 질의 5초 제한으로 보낸다. 아직 열지 않은 접속을 여는 데는 15초까지 따로 준다(Redis 는 평문 3초 뒤 TLS 로 다시 붙고, PostgreSQL `connect_timeout` 이 8초다). 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 다시 볼 때와 대시보드 탭을 닫을 때는 진행 중인 이전 확인을 취소한다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO server clients memory keyspace`(Redis 7 미만이 거절하면 `INFO`), OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
+- R64.2 확인은 모든 접속에 동시에, 접속마다 질의 5초 제한으로 보낸다. 아직 열지 않은 접속을 여는 데는 15초까지 따로 준다(Redis 는 평문 3초 뒤 TLS 로 다시 붙고, PostgreSQL `connect_timeout` 이 8초다). 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 다시 볼 때와 대시보드 탭을 닫을 때는 진행 중인 이전 확인을 취소한다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO server clients memory keyspace`(Redis 7 미만이 거절하면 `INFO`), OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수, Athena `GetWorkGroup` 상태·스캔 상한). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
   - 단, 아직 열지 않은 접속도 확인 때문에 연결을 연다(풀 연결 하나). 확인 오류는 비밀값을 지워 한 줄로 보인다.
 - R64.3 CLI `db status [--format table|tsv|json] [--prod] [-c 이름…]`는 같은 확인을 한 번 돌려 표를 찍는다. prod 접속은 `--prod`가 없으면 확인하지 않고 `--prod 로 확인`으로 보인다(R58.2). 하나라도 실패하면 종료 코드 1이다.
   - 예: 열은 `group`·`name`·`env`·`kind`·`ok`·`latency_ms`·`version`·`metrics`다. json 은 접속마다 객체인 배열이고 `metrics`는 `{name,value,warn}` 배열, 확인하지 않은 prod 는 `"ok":null`·`"note":"--prod 로 확인"`이다. `-c`는 여러 번 줄 수 있고 없으면 모든 접속이다.
@@ -606,12 +606,27 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R66 트리 정렬
 
-- R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
+- R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB → Athena, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
   - 예: `shop` 폴더 → `shop-local`, `shop-local-redis`, `shop-stg`, `shop-stg-read`, `shop-stg-redis`, `shop-stg-os`, `shop-prod`, `shop-prod-read-redis`, `shop-prod-os`.
 - R66.2 폴더는 보이는 묶음이고 접속의 `group`과 따로 둘 수 있다. 옮긴 폴더는 db 전용 파일 `.dbtui/folders.json`(`{"<접속 uuid>": "폴더"}`, uuid 가 없으면 `"name:<이름>"`)에 두고 DataGrip 접속도 같은 파일로 옮긴다. `.idea`·`connections.json`의 `group`은 고치지 않는다. 트리·정렬(R66.1)·대시보드(R64)·`db status`·`db conns`의 `folder` 열은 옮긴 폴더를, 암호화 키(`<GROUP>_AES_KEY`, R37)·접속 창의 그룹 칸·MCP는 `group`을 쓴다. 폴더가 원래 그룹과 같아지면 기록을 지운다.
   - 예: `dg-stg`(그룹 `grp`)를 `ops`로 옮기면 트리에선 `ops` 폴더에 보이고 `enc()`는 여전히 `GRP_AES_KEY`로 암호화한다.
 - R66.3 폴더 줄 `E`는 `폴더 이름: <지금 이름>` 한 줄 입력을 열고, Enter 면 그 폴더에 보이는 접속을 모두 새 폴더로 옮긴 뒤 `폴더 이름 바꿈: mon → monitoring (접속 3)`을 보인다. 이미 있는 폴더 이름이면 합쳐진다. 접속 줄 `M`은 `옮길 폴더: <지금 폴더>`를 열고 빈 값이면 원래 그룹으로 되돌린다. 펼침 상태는 새 이름으로 이어받고 옮긴 접속(또는 폴더)을 고른다. 폴더만 바뀐 접속은 연결·자동완성 목록을 닫지 않는다. `folders.json`이 깨졌으면 경고만 하고 그룹대로 보이며, 덮어쓰지 않고 `폴더를 옮기지 못함`을 보인다. 폴더 이름은 64자 이하, 제어 문자 없음.
 - R66.4 CLI `db conn folder <이름> <폴더>` · `db conn folder <이름> --reset` · `db conn folder --rename <옛 폴더> <새 폴더>`. 접속에 붙지 않아 `--prod`가 필요 없다. 없는 접속·폴더는 종료 코드 2다.
+
+### R68 Athena
+
+- R68.1 접속은 `{"name":"athena-prod","group":"data","kind":"athena","region":"ap-northeast-2","profile":"team","workgroup":"primary","output":"s3://bucket/prefix/"}`이다. `region`은 꼭 있어야 하고 `url`·`auth`·비밀값은 없다(자격 증명은 R60.1처럼 `profile`). `workgroup`이 비면 `primary`, `output`이 비면 작업 그룹의 결과 위치 설정을 따르고, 둘 다 없어 Athena가 거절하면 그 오류를 그대로 보인다. 접속 창 칸은 이름·그룹·종류·리전·프로필·작업 그룹·결과 위치, CLI는 `db conn add <이름> --kind athena --region R [--profile P] [--workgroup W] [--output s3://…]`이다.
+  - 트리는 데이터 카탈로그 `AwsDataCatalog`의 데이터베이스 → 테이블(오른쪽에 `EXTERNAL_TABLE`·`VIRTUAL_VIEW`) → 열(`이름 타입`, 파티션 키는 타입 뒤 `(파티션)`)이다. 테이블 `Enter`는 `SELECT * FROM "<db>"."<테이블>" LIMIT 50`이고, 파티션 테이블이면 `비싼 질의: 파티션 조건 없음: y/N`을 먼저 묻는다(Athena는 LIMIT이 있어도 연 파일만큼 요금을 매긴다).
+  - 예: `output`이 `s3://`로 시작하지 않으면 `athena output must be s3://bucket/prefix/`로 저장하지 않는다. `url`을 주면 `athena does not use url`이다.
+- R68.2 편집기는 `SELECT`·`WITH … SELECT`·`SHOW`·`DESCRIBE`·`EXPLAIN`으로 시작하는 문장 하나만 보낸다. 다른 첫 낱말(`INSERT`·`CREATE TABLE AS`·`UNLOAD`·`DROP`·`ALTER`·`MSCK` 등)이나 끝의 `;` 뒤 다른 문장은 R60.2로 거절하고, `SELECT`·`WITH`·`EXPLAIN` 문장 안 어디에(하위 질의 포함) `insert`·`update`·`delete`·`merge`·`create`·`drop`·`alter`·`truncate`·`msck`·`unload`·`vacuum`·`optimize`·`grant`·`revoke`·`call`·`prepare`·`execute`·`deallocate` 낱말이 있어도 거절한다(`EXPLAIN ANALYZE INSERT …`는 실제로 쓴다). 문자열·주석·`"따옴표 이름"` 안의 낱말은 보지 않는다. `SHOW CREATE TABLE`은 받는다.
+  - 저장소 탭에는 고른 데이터베이스가 없다. 이름을 `"db"."table"`로 다 적거나, 첫 줄에 `-- database: <이름>`을 쓰면 질의 맥락(`QueryExecutionContext`)으로 싣고 그 줄은 떼고 보낸다(Athena는 앞머리 주석이 있는 DDL을 읽지 못하는 일이 있다).
+  - `SELECT`·`WITH`·`EXPLAIN ANALYZE` 문장에 `LIMIT`도 `WHERE`도 없으면 `비싼 질의: 전체 스캔: y/N`(CLI `--force`)이다. 문장 어디든 두 낱말 가운데 하나가 있으면 넘긴다. 파티션 조건인지까지는 보지 않고 작업 그룹의 질의당 스캔 상한이 나머지를 막는다.
+  - 예: `SELECT * FROM "sales"."orders"` → 확인. `SELECT * FROM "sales"."orders" WHERE dt = '2026-11-01' LIMIT 100` → 바로. `CREATE TABLE t2 AS SELECT …` → `읽기 전용 저장소라 보내지 않음`.
+  - 단, `$태그$`는 문자열로 보고 넘긴다(Athena SQL에 없는 꼴이라 서버가 문법 오류로 거절한다).
+- R68.3 실행은 `StartQueryExecution`(작업 그룹, `output`이 있으면 결과 위치, 결과 재사용 60분) → `GetQueryExecution`을 0.2초에서 두 배씩 2초까지 늘려 묻기 → `GetQueryResults`를 이어 `--max-rows`(기본 1,000)까지다. `SELECT` 결과의 첫 줄은 열 이름 머리라 빼고, `SHOW`·`DESCRIBE` 결과는 그대로 둔다. 결과 표 위 한 줄(CLI tsv·csv는 stderr)에 `스캔 1.2GB · 엔진 0.6초`를, 재사용한 결과면 ` · 이전 결과 재사용`을 붙인다. 실패하면 `athena: query failed: <Athena 까닭>`이다.
+  - 결과 재사용은 같은 질의를 60분 안에 다시 보내면 이전 결과를 돌려줘 다시 스캔하지 않는다(요금 아낌). 작업 그룹이 재사용을 받지 않아(엔진 v2) `InvalidRequestException`으로 거절하면 재사용 없이 한 번 더 보낸다.
+  - 실행 중 취소(R3.4, CLI `--timeout`)하면 `StopQueryExecution`을 따로 5초 기한으로 보낸다. 읽기 전용 저장소에서 유일하게 읽기가 아닌 호출이고, 보내지 않으면 서버에서 질의가 끝까지 돌며 스캔 요금을 쌓는다. `StartQueryExecution` 응답 전에 취소하면 질의 id가 없어 멈추지 못한다.
+  - 필요한 IAM 권한: `athena:ListDatabases`·`ListTableMetadata`·`GetTableMetadata`·`StartQueryExecution`·`GetQueryExecution`·`GetQueryResults`·`StopQueryExecution`·`GetWorkGroup`, Glue 카탈로그 읽기(`glue:GetDatabases`·`GetTables`·`GetTable`·`GetPartitions`), 데이터 S3 읽기와 결과 위치 S3 쓰기(`s3:GetObject`·`ListBucket`·`PutObject`·`GetBucketLocation`).
 
 ## 4. 화면과 키
 
@@ -646,7 +661,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |
 | 트리 `Enter` `/` `r` `d` `D` `I` `A` `L` `S` | 펼치기·테이블 보기·값 편집·쿼리 파일 열기(접속은 최근 파일 자동 열기, R44) / 거르기 / 새로고침(쿼리 파일 목록도) / 구조 / DDL / CSV 가져오기 / 활동·잠금·크기(Redis 는 INFO·SLOWLOG·큰 키) |
-| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔) / 펼치기(R60~R63) |
+| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔, Athena 파티션 테이블은 `비싼 질의: 파티션 조건 없음: y/N` 뒤 `LIMIT 50`) / 펼치기(R60~R63·R68) |
 | 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄) |
 | 트리 `X` | Redis 패턴 키 일괄 삭제(접속·이름공간 줄, `esc` 멈춤, R42). db 전용 PostgreSQL 접속 줄은 접속 지우기(R59.3) |
 | 트리 `N` `E` `Alt+X` | 새 접속(URL 붙여넣기·`Ctrl+T` 시험) / db 전용 접속 고치기 / 지우기(Redis 포함, 팔레트 `접속 지우기`, R59) |

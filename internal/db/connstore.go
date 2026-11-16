@@ -61,6 +61,9 @@ type connEntry struct {
 	Region  string `json:"region,omitempty"`
 	Profile string `json:"profile,omitempty"`
 	SSLMode string `json:"sslmode,omitempty"`
+	// R68 Athena
+	Workgroup string `json:"workgroup,omitempty"`
+	Output    string `json:"output,omitempty"`
 }
 
 func connsPath(dir string) string { return filepath.Join(dir, ".dbtui", "connections.json") }
@@ -156,12 +159,14 @@ func (p *Project) loadDBConns(env map[string]string) error {
 
 func (e connEntry) conn() Conn {
 	return Conn{UUID: e.UUID, Name: e.Name, Group: e.Group, Kind: e.Kind, Host: e.Host, Port: e.Port, DB: e.DB, User: e.User,
-		URL: e.URL, Auth: e.Auth, Region: e.Region, Profile: e.Profile, SSLMode: e.SSLMode, Source: SourceDB}
+		URL: e.URL, Auth: e.Auth, Region: e.Region, Profile: e.Profile, SSLMode: e.SSLMode, Source: SourceDB,
+		Workgroup: e.Workgroup, Output: e.Output}
 }
 
 func entryOf(c Conn) connEntry {
 	return connEntry{UUID: c.UUID, Name: c.Name, Group: c.Group, Kind: c.Kind, Host: c.Host, Port: c.Port, DB: c.DB, User: c.User,
-		URL: c.URL, Auth: c.Auth, Region: c.Region, Profile: c.Profile, SSLMode: c.SSLMode}
+		URL: c.URL, Auth: c.Auth, Region: c.Region, Profile: c.Profile, SSLMode: c.SSLMode,
+		Workgroup: c.Workgroup, Output: c.Output}
 }
 
 // authOptions 는 종류별로 받는 auth 값이다(R60.1). 첫 값이 접속 창의 기본값이다.
@@ -171,6 +176,7 @@ var authOptions = map[Kind][]string{
 	KindPrometheus: {"", "basic"},
 	KindGrafana:    {"token"},
 	KindDynamoDB:   {""},
+	KindAthena:     {""},
 }
 
 // AuthOptions 는 종류 k 가 받는 auth 값이다. "" 는 인증 없음이다.
@@ -212,7 +218,7 @@ func ValidateConn(c Conn) error {
 	}
 	switch {
 	case c.Kind != KindPG && c.Kind != KindRedis:
-		return fmt.Errorf("kind must be postgresql, redis, opensearch, loki, prometheus, grafana or dynamodb: %q", c.Kind)
+		return fmt.Errorf("kind must be postgresql, redis, opensearch, loki, prometheus, grafana, dynamodb or athena: %q", c.Kind)
 	case c.Host == "":
 		return errors.New("host is required")
 	case c.Port < 0 || c.Port > 65535:
@@ -239,8 +245,14 @@ func validateSource(c Conn) error {
 			return err
 		}
 	}
-	if (c.Kind == KindDynamoDB || c.Auth == "sigv4") && c.Region == "" {
-		return errors.New("region is required (dynamodb, sigv4)")
+	if (c.Kind == KindDynamoDB || c.Kind == KindAthena || c.Auth == "sigv4") && c.Region == "" {
+		return errors.New("region is required (dynamodb, athena, sigv4)")
+	}
+	switch {
+	case c.Kind == KindAthena && c.URL != "":
+		return errors.New("athena does not use url (region, profile, workgroup, output)")
+	case c.Kind == KindAthena && c.Output != "" && !strings.HasPrefix(c.Output, "s3://"):
+		return errors.New("athena output must be s3://bucket/prefix/")
 	}
 	return nil
 }

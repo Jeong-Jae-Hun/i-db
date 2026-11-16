@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.2
 	github.com/aws/aws-sdk-go-v2/config v1.32.10
+	github.com/aws/aws-sdk-go-v2/service/athena v1.57.1
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.56.0
 	github.com/aws/smithy-go v1.24.1
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1

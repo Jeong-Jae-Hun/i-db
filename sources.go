@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/athena"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/dynamo"
 	"github.com/Jeong-Jae-Hun/i-db/internal/obs"
@@ -28,6 +29,7 @@ var sourceOpeners = map[db.Kind]func(context.Context, db.Conn) (source.Backend, 
 	db.KindPrometheus: func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewPrometheus(c) },
 	db.KindGrafana:    func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewGrafana(c) },
 	db.KindDynamoDB:   dynamo.New,
+	db.KindAthena:     athena.New,
 }
 
 const (
@@ -273,8 +275,12 @@ func (m *model) openSourceNode(t *queryTab, n *node) tea.Cmd {
 	c, path, limit := m.conn(n.conn), n.key, openLimit(m.conn(n.conn).Kind)
 	p := pendingRun{tab: t.id, conn: n.conn, readOnly: true, retarget: true,
 		exec: m.sourceExec(c, func(ctx context.Context, b source.Backend) (*db.Result, error) { return b.Open(ctx, path, limit) })}
-	if c.Kind == db.KindDynamoDB {
+	// Athena 파티션 테이블은 확인 뒤 `SELECT * FROM "db"."테이블" LIMIT 50` 을 Force 로 보낸다(R68.1)
+	if c.Kind == db.KindDynamoDB || c.Kind == db.KindAthena {
 		q := source.Query{Text: dynamoScanSQL(path), Limit: limit, Force: true}
+		if c.Kind == db.KindAthena {
+			q.Text = athena.OpenSQL(path, limit)
+		}
 		retry := p
 		retry.sql = q.Text
 		retry.exec = m.sourceExec(c, sourceRun(q))
