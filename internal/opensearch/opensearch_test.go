@@ -499,3 +499,42 @@ func TestRedirect_를_따라가지_않고_오류로_본다(t *testing.T) {
 		t.Fatalf("리다이렉트를 따라갔다: 두 번째 요청 %d, 인증 헤더 %d", second, leaked)
 	}
 }
+
+// ─── R61.3 정렬 다시 읽기 ───
+
+func TestSortedSearch_본문_sort_만_바꾸고_다른_키는_둔다(t *testing.T) {
+	cases := []struct {
+		name, text, field string
+		desc              bool
+		want              string
+	}{
+		{"본문 없음", "GET logs/_search", "status", false,
+			"GET logs/_search\n" + `{"sort":[{"status":{"missing":"_last","order":"asc"}}]}`},
+		{"기존 sort 를 바꾼다", "GET logs/_search\n" + `{"size":20,"sort":["_doc"]}`, "status", true,
+			"GET logs/_search\n" + `{"size":20,"sort":[{"status":{"missing":"_last","order":"desc"}}]}`},
+		{"_score 는 missing 이 없다", "POST _search\n{}", "_score", true,
+			"POST _search\n" + `{"sort":[{"_score":{"order":"desc"}}]}`},
+		{"미리 보기 글", OpenText("logs", 0), "_id", false,
+			"POST logs/_search\n" + `{"query":{"match_all":{}},"size":50,"sort":[{"_id":{"missing":"_last","order":"asc"}}]}`},
+	}
+	for _, c := range cases {
+		got, ok := SortedSearch(c.text, c.field, c.desc)
+		if !ok || got != c.want {
+			t.Errorf("%s: %v %q", c.name, ok, got)
+		}
+	}
+}
+
+func TestSortedSearch_search_가_아니면_바꾸지_않는다(t *testing.T) {
+	for _, text := range []string{
+		"SELECT * FROM logs",
+		"GET logs/_count",
+		"GET _cat/indices",
+		"GET logs/_search\n[1]",
+		"GET logs/_search\n{bad",
+	} {
+		if got, ok := SortedSearch(text, "status", false); ok {
+			t.Errorf("%q → %q", text, got)
+		}
+	}
+}

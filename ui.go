@@ -2363,6 +2363,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.keep == nil {
 				t.baseSQL = t.exportSQL
+				// OpenSearch 결과는 정렬을 서버로 다시 읽을 때 원래 요청 글의 sort 를 바꾼다(R61.3)
+				if msg.kind == rkGrid && msg.err == nil && !t.cancelled && c.Kind == db.KindOpenSearch {
+					t.baseSQL = msg.sql
+				}
 			}
 			if msg.kind != rkTable {
 				t.tv = nil
@@ -2391,16 +2395,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if requeryLast != nil {
 					t.last = requeryLast
 				}
-				t.grid.SetQuery(*msg.keep, true)
-				t.fetched = *msg.keep
+				// OpenSearch 는 정렬만 서버로 읽어 거르기는 받은 행 안에서 다시 건다(R61.3)
+				keep, server := *msg.keep, c.Kind == db.KindPG
+				if !server {
+					keep.Filter = now.Filter
+				}
+				t.grid.SetQuery(keep, server)
+				t.fetched = keep
 				// 오는 사이 정렬·거르기를 또 바꿨으면 그것을 받은 행에 다시 걸고, 치던 거르기는 이어 간다. 확정되면 다시 읽는다
-				if now != *msg.keep {
+				if now != keep {
 					t.grid.SetQuery(now, false)
-					if typing {
-						t.grid.ResumeTyping()
-					} else {
+					if !typing {
 						tick = tea.Batch(tick, m.requery(t))
 					}
+				}
+				if typing {
+					t.grid.ResumeTyping()
 				}
 				t.grid.FocusCol(keepCol)
 			} else {

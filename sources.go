@@ -273,6 +273,10 @@ func (m *model) openSourceNode(t *queryTab, n *node) tea.Cmd {
 	c, path, limit := m.conn(n.conn), n.key, openLimit(m.conn(n.conn).Kind)
 	p := pendingRun{tab: t.id, conn: n.conn, readOnly: true, retarget: true,
 		exec: m.sourceExec(c, func(ctx context.Context, b source.Backend) (*db.Result, error) { return b.Open(ctx, path, limit) })}
+	// OpenSearch 미리 보기는 보낸 요청을 글로 남겨 기록에 싣고 정렬을 서버로 다시 읽을 수 있게 한다(R61.3)
+	if c.Kind == db.KindOpenSearch {
+		p.sql = opensearch.OpenText(path, limit)
+	}
 	if c.Kind == db.KindDynamoDB {
 		q := source.Query{Text: dynamoScanSQL(path), Limit: limit, Force: true}
 		retry := p

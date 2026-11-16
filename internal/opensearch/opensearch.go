@@ -286,7 +286,7 @@ func (b *backend) Open(ctx context.Context, path string, limit int) (*db.Result,
 	}
 	index, _, _ := strings.Cut(path, "/")
 	start := time.Now()
-	body := fmt.Appendf(nil, `{"query":{"match_all":{}},"size":%d}`, limit)
+	body := fmt.Appendf(nil, openBody, limit)
 	data, err := b.do(ctx, http.MethodPost, url.PathEscape(index)+"/_search", body)
 	if err != nil {
 		return nil, err
@@ -297,6 +297,60 @@ func (b *backend) Open(ctx context.Context, path string, limit int) (*db.Result,
 	}
 	res.Elapsed = time.Since(start)
 	return res, nil
+}
+
+// openBody 는 트리 Enter 미리 보기(Open)의 본문이다.
+const openBody = `{"query":{"match_all":{}},"size":%d}`
+
+// OpenText 는 Open(path, limit) 과 같은 요청을 편집기 꼴(`POST <인덱스>/_search` + 본문)로 쓴 글이다.
+// 미리 보기 결과도 정렬을 서버로 다시 읽을 수 있게 결과의 원래 요청으로 남긴다(R61.3).
+func OpenText(path string, limit int) string {
+	if limit <= 0 {
+		limit = source.OpenLimit
+	}
+	index, _, _ := strings.Cut(path, "/")
+	return "POST " + index + "/_search\n" + fmt.Sprintf(openBody, limit)
+}
+
+// SortedSearch 는 `_search` 요청 글의 본문 sort 를 field 하나로 바꾼 글이다(R61.3). 본문의 다른 키는 그대로 두고
+// 값이 없는 문서는 오름·내림 모두 뒤로 보낸다. _search 가 아니거나(SELECT·_count·_cat 등) 본문이 JSON 객체가 아니면 ok 가 false 다.
+//   - 예: `GET logs/_search` + `{"size":20}`, "status", true → `GET logs/_search` + `{"size":20,"sort":[{"status":{"missing":"_last","order":"desc"}}]}`
+func SortedSearch(text, field string, desc bool) (string, bool) {
+	method, path, body, ok := parseRequest(text)
+	if !ok || field == "" {
+		return "", false
+	}
+	p, _, _ := strings.Cut(strings.TrimLeft(path, "/"), "?")
+	if endpoint, allowed := allowedPath(method, p); !allowed || endpoint != "_search" {
+		return "", false
+	}
+	var obj map[string]json.RawMessage
+	if body != "" {
+		if err := json.Unmarshal([]byte(body), &obj); err != nil {
+			return "", false
+		}
+	}
+	if obj == nil {
+		obj = map[string]json.RawMessage{}
+	}
+	key := map[string]string{"order": "asc", "missing": "_last"}
+	if desc {
+		key["order"] = "desc"
+	}
+	// _score 정렬은 missing 을 받지 않는다(모든 문서에 점수가 있다)
+	if field == "_score" {
+		delete(key, "missing")
+	}
+	sort, err := json.Marshal([]map[string]map[string]string{{field: key}})
+	if err != nil {
+		return "", false
+	}
+	obj["sort"] = sort
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return "", false
+	}
+	return method + " " + path + "\n" + string(out), true
 }
 
 // Run 은 SELECT 면 SQL 플러그인으로, `GET|POST <경로>` 첫 줄이면 허용한 REST 읽기 경로로 보낸다(R61.2).

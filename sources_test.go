@@ -906,3 +906,84 @@ func TestConnCLI_평문_http_basic_은_경고를_찍는다(t *testing.T) {
 		t.Fatalf("test: %d %q", code, errw.String())
 	}
 }
+
+// ─── R61.3 OpenSearch 정렬 다시 읽기 ───
+
+func TestSource_OpenSearch_정렬은_본문_sort_를_바꿔_서버에서_다시_읽고_거르기는_받은_행에서_한다(t *testing.T) {
+	f := newFake()
+	f.run = func(q source.Query) (*db.Result, error) {
+		rows := [][]string{{"a", "1"}, {"b", "2"}}
+		if strings.Contains(q.Text, `"order":"desc"`) {
+			rows = [][]string{{"z", "99"}, {"y", "98"}} // 받은 행 밖의 문서
+		}
+		return &db.Result{Cols: []string{"_id", "n"}, Rows: rows}, nil
+	}
+	registerFake(t, f)
+	m := sourceModel(t)
+	m.cur().conn = 0
+	editorRun(m, "GET logs/_search\n{\"size\":2}")
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("n")
+	_, cmd := m.Update(key("s")) // 오름
+	drive(m, cmd)
+	_, cmd = m.Update(key("s")) // 내림
+	drive(m, cmd)
+	runs, _, _ := f.snapshot()
+	if len(runs) != 3 || !strings.Contains(runs[2].Text, `{"size":2,"sort":[{"n":{"missing":"_last","order":"desc"}}]}`) {
+		t.Fatalf("정렬마다 sort 를 바꿔 보낸다: %+v", runs)
+	}
+	if tab.res.Rows[0][0] != "z" || tab.grid.Summary() != "정렬 n ↓" || tab.baseSQL != "GET logs/_search\n{\"size\":2}" {
+		t.Fatalf("서버에서 다시 읽은 행: %q %q %q", tab.res.Rows[0][0], tab.grid.Summary(), tab.baseSQL)
+	}
+
+	m.Update(key("/"))
+	m.Update(key("y"))
+	_, cmd = m.Update(key("enter"))
+	if cmd != nil {
+		drive(m, cmd)
+	}
+	if runs, _, _ := f.snapshot(); len(runs) != 3 || !strings.Contains(tab.grid.Summary(), "1/2행") {
+		t.Fatalf("거르기는 받은 행 안에서만: runs=%d %q", len(runs), tab.grid.Summary())
+	}
+
+	_, cmd = m.Update(key("s")) // 정렬 없음 → 원래 요청
+	drive(m, cmd)
+	if runs, _, _ := f.snapshot(); len(runs) != 4 || runs[3].Text != "GET logs/_search\n{\"size\":2}" {
+		t.Fatalf("정렬을 풀면 원래 요청을 보낸다: %+v", runs)
+	}
+}
+
+func TestSource_OpenSearch_SELECT_결과는_받은_행_안에서만_정렬한다(t *testing.T) {
+	f := newFake()
+	registerFake(t, f)
+	m := sourceModel(t)
+	m.cur().conn = 0
+	editorRun(m, "SELECT * FROM logs")
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("value")
+	if _, cmd := m.Update(key("s")); cmd != nil || tab.running != nil {
+		t.Fatal("SQL 플러그인 결과는 다시 읽지 않는다")
+	}
+}
+
+func TestSource_OpenSearch_트리_미리_보기도_정렬을_서버로_다시_읽는다(t *testing.T) {
+	f := newFake()
+	registerFake(t, f)
+	m := sourceModel(t)
+	cn := expandConn(t, m, 0)
+	m.selectNode(childNamed(cn, "logs-2026"))
+	_, cmd := m.Update(key("enter"))
+	drive(m, cmd)
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("_id")
+	_, cmd = m.Update(key("s"))
+	drive(m, cmd)
+	runs, _, _ := f.snapshot()
+	want := "POST logs-2026/_search\n" + `{"query":{"match_all":{}},"size":50,"sort":[{"_id":{"missing":"_last","order":"asc"}}]}`
+	if len(runs) != 1 || runs[0].Text != want {
+		t.Fatalf("미리 보기 요청에 sort 를 붙인다: %+v", runs)
+	}
+}

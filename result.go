@@ -7,7 +7,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
+	"github.com/Jeong-Jae-Hun/i-db/internal/grid"
+	"github.com/Jeong-Jae-Hun/i-db/internal/opensearch"
 	"github.com/Jeong-Jae-Hun/i-db/internal/params"
+	"github.com/Jeong-Jae-Hun/i-db/internal/source"
 	"github.com/Jeong-Jae-Hun/i-db/internal/textutil"
 )
 
@@ -85,8 +88,18 @@ func (m *model) requery(t *queryTab) tea.Cmd {
 	conn := t.exportConn
 	// 다른 실행이 돌고 있으면 받은 행 안에서만 한다. 돌고 있는 것이 다시 읽기면 start 가 그것을 취소하고 새로 보낸다.
 	// 탭 접속을 바꾼 뒤의 옛 결과(staleView)는 옛 접속에 조용히 보내지 않는다
-	if q == t.fetched || t.grid.FilterTyping() || t.tv != nil || t.view >= 0 || (t.running != nil && !t.requerying) || t.baseSQL == "" ||
-		conn < 0 || conn != t.conn || conn != t.viewConn || m.conn(conn).Kind != db.KindPG || t.viewDB != m.conn(conn).DB || !t.grid.UniqueCols() {
+	if t.grid.FilterTyping() || t.tv != nil || t.view >= 0 || (t.running != nil && !t.requerying) || t.baseSQL == "" ||
+		conn < 0 || conn != t.conn || conn != t.viewConn || t.viewDB != m.conn(conn).DB {
+		return nil
+	}
+	switch m.conn(conn).Kind {
+	case db.KindOpenSearch:
+		return m.requerySearch(t, conn, q)
+	case db.KindPG:
+	default:
+		return nil
+	}
+	if q == t.fetched || !t.grid.UniqueCols() {
 		return nil
 	}
 	stmts := db.SplitStatements(t.baseSQL)
@@ -107,4 +120,30 @@ func (m *model) requery(t *queryTab) tea.Cmd {
 	// 읽기 판정은 첫 낱말이라 CTE 쓰기·부수효과 함수가 지날 수 있다. 정렬마다 조용히 다시 도는 실행이라 늘 READ ONLY 로 보낸다
 	return m.guard(pendingRun{tab: t.id, conn: conn, readOnly: true, kind: rkGrid, tx: true, sql: sql, stmts: 1, note: note, keep: &q,
 		exec: execScript(m.clients, script{conn: m.conn(conn), stmts: []string{sent}, readOnlyTx: true})})
+}
+
+// requerySearch 는 OpenSearch `_search` 결과의 정렬을 본문 sort 로 바꿔 서버에서 다시 읽는다(R61.3).
+// 거르기는 서버 꼴이 없어 받은 행 안에서만 하므로 정렬이 그대로면 보내지 않는다. 정렬을 풀면 원래 요청을 보낸다.
+func (m *model) requerySearch(t *queryTab, conn int, q grid.Query) tea.Cmd {
+	if q.SortCol == t.fetched.SortCol && q.Desc == t.fetched.Desc {
+		return nil
+	}
+	text := t.baseSQL
+	if q.SortCol != "" {
+		var ok bool
+		if text, ok = opensearch.SortedSearch(t.baseSQL, q.SortCol, q.Desc); !ok {
+			return nil
+		}
+	}
+	t.fetched = q
+	sq := source.Query{Text: text}
+	c := m.conn(conn)
+	p := pendingRun{tab: t.id, conn: conn, readOnly: true, kind: rkGrid, sql: text, stmts: 1, keep: &q, exec: m.sourceExec(c, sourceRun(sq))}
+	// 원래 요청을 비싼 질의 확인 뒤 보냈으면 다시 읽기도 같은 확인을 받는다(runSource 와 같다)
+	forced := sq
+	forced.Force = true
+	retry := p
+	retry.exec = m.sourceExec(c, sourceRun(forced))
+	p.retry = &retry
+	return m.guard(p)
 }
