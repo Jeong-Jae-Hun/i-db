@@ -702,6 +702,8 @@ type queryTab struct {
 	// baseSQL 은 사용자가 실행한 원래 문장이다. 정렬·거르기를 서버로 다시 읽을 때 감싼다(R14.5). fetched 는 지금 결과를 만든 정렬·거르기다
 	baseSQL string
 	fetched grid.Query
+	// asked 는 마지막으로 서버에 보내려 한 정렬·거르기다. 확인을 거절하거나 실패한 것을 거듭 묻지 않는 데만 쓴다
+	asked grid.Query
 	// requerying 은 돌고 있는 실행이 정렬·거르기 다시 읽기라는 뜻이다. 그 사이 또 바꾸면 이전 것을 취소하고 새로 보낸다.
 	// requeryLast 는 그 실행이 성공하면 t.last(제출 뒤 새로고침)로 올릴 실행이다. 실패한 감싼 문장을 다시 보내지 않게 한다
 	requerying  bool
@@ -2422,7 +2424,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					keep.Filter = now.Filter
 				}
 				t.grid.SetQuery(keep, server)
-				t.fetched = keep
+				t.fetched, t.asked = keep, keep
 				// 오는 사이 정렬·거르기를 또 바꿨으면 그것을 받은 행에 다시 걸고, 치던 거르기는 이어 간다. 확정되면 다시 읽는다
 				if now != keep {
 					t.grid.SetQuery(now, false)
@@ -2436,6 +2438,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				t.grid.FocusCol(keepCol)
 			} else {
 				t.fetched = t.grid.Query()
+				t.asked = t.fetched
 			}
 			// 테이블 보기는 정렬·페이지를 바꿔 다시 읽어도 커서 열을 지켜 s 를 거듭 누르면 같은 열이 돈다
 			if msg.kind == rkTable {

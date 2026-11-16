@@ -148,3 +148,26 @@ func TestRequery_더_읽기는_같은_정렬로_다음_1000행을_덧붙인다(t
 		t.Fatalf("첫 페이지부터: rows=%d %q", len(tab.res.Rows), tab.res.Rows[0][0])
 	}
 }
+
+func TestRequery_다시_읽기가_실패하면_더_읽기는_다른_정렬의_행을_덧붙이지_않는다(t *testing.T) {
+	m := pgModel(t, "it-local")
+	it := pgTest{t, m}
+	it.sql("drop table if exists public.rq_fail; create table public.rq_fail (id int primary key)")
+	it.sql("insert into public.rq_fail select g from generate_series(1, 2500) g")
+	t.Cleanup(func() { it.sql("drop table if exists public.rq_fail") })
+	m.cur().conn = 0
+	drive(m, m.run("select id from public.rq_fail"))
+	tab := m.cur()
+	m.setFocus(fResult)
+	tab.grid.FocusCol("id")
+	it.sql("alter table public.rq_fail rename to rq_fail_x")
+	_, cmd := m.Update(key("s"))
+	drive(m, cmd)
+	it.sql("alter table public.rq_fail_x rename to rq_fail")
+	if !strings.HasPrefix(m.status, "다시 읽지 못함") || len(tab.res.Rows) != 1000 {
+		t.Fatalf("다시 읽기 실패: %q rows=%d", m.status, len(tab.res.Rows))
+	}
+	if _, cmd = m.Update(key("]")); cmd != nil || m.status != "더 읽지 않음: 정렬·거르기가 받은 행에만 걸림" {
+		t.Fatalf("받은 행이 그 정렬로 읽힌 것이 아니므로 더 읽지 않는다: %q", m.status)
+	}
+}

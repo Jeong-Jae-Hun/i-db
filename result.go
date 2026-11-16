@@ -86,11 +86,11 @@ func (m *model) tick() tea.Cmd {
 // ─── 정렬·거르기 서버로 다시 읽기 (R14.5·R14.6) ───
 
 // requery 는 일반 결과의 정렬·거르기가 지금 결과를 만든 것(t.fetched)과 달라졌으면 서버에서 다시 읽는다.
-// 거르기 글을 치는 동안·테이블 보기·바뀐 것이 없으면 아무것도 하지 않는다. 다시 읽을 수 없으면 받은 행 안의 결과가 남고
+// 거르기 글을 치는 동안·테이블 보기·바뀐 것이 없거나 마지막으로 보낸(묻은) 것(t.asked)과 같으면 아무것도 하지 않는다. 다시 읽을 수 없으면 받은 행 안의 결과가 남고
 // 같은 정렬·거르기에 한 번만 `받은 행만 정렬: <이유>` 를 알린다(R14.6). 키마다 불리므로 같은 알림을 거듭 덮어쓰지 않는다.
 func (m *model) requery(t *queryTab) tea.Cmd {
 	q := t.grid.Query()
-	if t.grid.FilterTyping() || t.tv != nil || q == t.fetched {
+	if t.grid.FilterTyping() || t.tv != nil || q == t.fetched || q == t.asked {
 		return nil
 	}
 	sorting := q.SortCol != t.fetched.SortCol || q.Desc != t.fetched.Desc
@@ -169,8 +169,8 @@ func (m *model) requerySQL(t *queryTab, conn int, q grid.Query) (tea.Cmd, string
 	if reason != "" {
 		return nil, reason
 	}
-	// 확인을 거절하거나 실패해도 같은 정렬·거르기로 거듭 묻지 않게 지금 것을 적는다
-	t.fetched = q
+	// 확인을 거절하거나 실패해도 같은 정렬·거르기로 거듭 묻지 않게 보낸 것만 적는다. t.fetched 는 성공한 결과가 붙을 때 바뀐다
+	t.asked = q
 	sql := t.grid.ServerSQL(base)
 	sent, note, err := m.expandEnc(conn, sql)
 	if err != nil {
@@ -197,7 +197,7 @@ func (m *model) requerySearch(t *queryTab, conn int, q grid.Query) (tea.Cmd, str
 	if q.Filter != "" {
 		r.Filter = searchFilter(grid.ParseFilter(q.Filter, t.res.Cols))
 	}
-	t.fetched = q
+	t.asked = q
 	if r.Sort == "" && r.Filter == nil {
 		return m.sourceRequery(t, conn, q, *t.baseSrc, sourceRun, nil), ""
 	}
@@ -236,7 +236,7 @@ func (m *model) requeryLogs(t *queryTab, conn int, q grid.Query) (tea.Cmd, strin
 	if logDirection(q) == logDirection(t.fetched) {
 		return nil, ""
 	}
-	t.fetched = q
+	t.asked = q
 	sq := *t.baseSrc
 	sq.Direction = logDirection(q)
 	return m.sourceRequery(t, conn, q, sq, sourceRun, nil), ""
@@ -274,7 +274,7 @@ func (m *model) requeryDynamo(t *queryTab, conn int, q grid.Query) (tea.Cmd, str
 	} else if t.fetched.SortCol == "" {
 		return nil, ""
 	}
-	t.fetched = q
+	t.asked = q
 	return m.sourceRequery(t, conn, q, sq, sourceRun, nil), ""
 }
 
