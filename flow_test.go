@@ -731,3 +731,13 @@ func TestFlowCLI_종류가_잘리면_아웃박스_수치에_알린다(t *testing
 		t.Fatalf("잘림: %s", out)
 	}
 }
+
+func TestFlowBoxes_종류가_잘리면_빠진_설정_종류를_0건으로_그리지_않는다(t *testing.T) {
+	st := typeStat()
+	st.Truncated = true
+	for _, b := range flowBoxes(typeFlow(), flowSnap{outbox: &st}, true) {
+		if b.name == "IDLE" {
+			t.Fatalf("잘린 결과에 없는 설정 종류를 0건으로 그렸다: %+v", b)
+		}
+	}
+}

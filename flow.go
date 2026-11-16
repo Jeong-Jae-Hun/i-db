@@ -223,7 +223,11 @@ func flowBoxes(f flows.Flow, s flowSnap, done bool) []flowBox {
 	}
 	// 종류 줄(R69.6)은 설정의 종류 ∪ 테이블에 있는 종류다. 한도 소진 많은 순 → 대기 많은 순 → 이름 순이고 행 없는 설정 종류는 맨 뒤다
 	o, types := f.Outbox, slices.Clone(s.outbox.Types)
+	// 종류가 잘렸으면 빠진 설정 종류에도 행이 있을 수 있어 0건으로 그리지 않는다
 	for _, k := range slices.Sorted(maps.Keys(o.Types)) {
+		if s.outbox.Truncated {
+			break
+		}
 		if !slices.ContainsFunc(types, func(t flows.TypeStat) bool { return !t.Null && t.Name == k }) {
 			types = append(types, flows.TypeStat{Name: k, Retrying: min(s.outbox.Retry, 0), Exhausted: min(s.outbox.Exhausted, 0)})
 		}
