@@ -171,6 +171,7 @@ var authOptions = map[Kind][]string{
 	KindPrometheus: {"", "basic"},
 	KindGrafana:    {"token"},
 	KindDynamoDB:   {""},
+	KindAWS:        {""},
 }
 
 // AuthOptions 는 종류 k 가 받는 auth 값이다. "" 는 인증 없음이다.
@@ -212,7 +213,7 @@ func ValidateConn(c Conn) error {
 	}
 	switch {
 	case c.Kind != KindPG && c.Kind != KindRedis:
-		return fmt.Errorf("kind must be postgresql, redis, opensearch, loki, prometheus, grafana or dynamodb: %q", c.Kind)
+		return fmt.Errorf("kind must be postgresql, redis, opensearch, loki, prometheus, grafana, dynamodb or aws: %q", c.Kind)
 	case c.Host == "":
 		return errors.New("host is required")
 	case c.Port < 0 || c.Port > 65535:
@@ -234,13 +235,15 @@ func validateSource(c Conn) error {
 	switch {
 	case c.Kind.IsHTTP() && c.URL == "":
 		return errors.New("url is required")
+	case c.Kind == KindAWS && c.URL != "":
+		return errors.New("aws connection has no url")
 	case c.URL != "":
 		if err := checkHTTPURL(c.URL); err != nil {
 			return err
 		}
 	}
-	if (c.Kind == KindDynamoDB || c.Auth == "sigv4") && c.Region == "" {
-		return errors.New("region is required (dynamodb, sigv4)")
+	if (c.Kind.UsesRegion() || c.Auth == "sigv4") && c.Region == "" {
+		return errors.New("region is required (dynamodb, aws, sigv4)")
 	}
 	return nil
 }

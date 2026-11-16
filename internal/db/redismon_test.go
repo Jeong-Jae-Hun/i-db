@@ -85,7 +85,7 @@ func TestFormatUptime_과_humanBytes(t *testing.T) {
 		}
 	}
 	for n, want := range map[int64]string{0: "0B", 1023: "1023B", 1536: "1.5KB", 5 << 20: "5.0MB", 3 << 40: "3.0TB", 5000 << 40: "5000.0TB"} {
-		if got := humanBytes(n); got != want {
+		if got := HumanBytes(n); got != want {
 			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
 		}
 	}

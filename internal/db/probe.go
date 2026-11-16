@@ -81,7 +81,7 @@ func pgMetrics(sessions, active, maxConns, size int64) []Metric {
 	return []Metric{
 		{Name: "세션", Value: fmt.Sprintf("%d/%d", sessions, maxConns), Warn: over(sessions, maxConns)},
 		{Name: MetricPGActive, Value: strconv.FormatInt(active, 10)},
-		{Name: "DB", Value: humanBytes(size)},
+		{Name: "DB", Value: HumanBytes(size)},
 	}
 }
 
@@ -132,11 +132,11 @@ func redisMetrics(info map[string]string, dbs []string) []Metric {
 		maxMem, err := strconv.ParseInt(info["maxmemory"], 10, 64)
 		switch {
 		case err != nil:
-			mem.Value = humanBytes(used)
+			mem.Value = HumanBytes(used)
 		case maxMem > 0:
 			mem.Value, mem.Warn = bytesPair(used, maxMem), over(used, maxMem)
 		default:
-			mem.Value = humanBytes(used) + "/제한 없음"
+			mem.Value = HumanBytes(used) + "/제한 없음"
 		}
 	}
 	return []Metric{
@@ -148,7 +148,7 @@ func redisMetrics(info map[string]string, dbs []string) []Metric {
 
 // bytesPair 는 `1.1/4.0GB` 다. 단위가 다르면 둘 다 붙인다(`512.0MB/4.0GB`).
 func bytesPair(used, total int64) string {
-	u, t := humanBytes(used), humanBytes(total)
+	u, t := HumanBytes(used), HumanBytes(total)
 	if unit := strings.TrimLeft(t, "0123456789."); strings.TrimLeft(u, "0123456789.") == unit {
 		u = strings.TrimSuffix(u, unit)
 	}

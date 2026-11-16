@@ -132,7 +132,7 @@ func connRoots(conns []db.Conn, reuse map[int]*node, groupOpen map[string]bool) 
 // envRank 는 폴더 안 환경 순서다(R66.1). Env 는 이 셋만 돌려준다
 var envRank = map[string]int{"local": 0, "stg": 1, "prod": 2}
 
-// connRank 는 같은 환경 안의 순서다: 쓰기 DB → 읽기 DB → Redis → 검색 → 로그·지표 → DynamoDB(R66.1).
+// connRank 는 같은 환경 안의 순서다: 쓰기 DB → 읽기 DB → Redis → 검색 → 로그·지표 → DynamoDB → aws(R66.1).
 func connRank(c db.Conn) int {
 	read := strings.Contains(c.Name, "-read") || strings.HasPrefix(c.Host, "read.") || strings.Contains(c.Host, ".cluster-ro-")
 	switch c.Kind {
@@ -144,6 +144,8 @@ func connRank(c db.Conn) int {
 		return 5
 	case db.KindLoki, db.KindPrometheus, db.KindGrafana:
 		return 6
+	case db.KindAWS:
+		return 8
 	}
 	return 7
 }
@@ -230,7 +232,7 @@ func (f *connForm) visible(i int) bool {
 	case cfHost, cfPort, cfDB:
 		return !f.kind.IsSource()
 	case cfURL:
-		return f.kind.IsSource()
+		return f.kind.IsSource() && f.kind != db.KindAWS
 	case cfAuth:
 		return f.kind.IsHTTP()
 	case cfUser:
@@ -238,7 +240,7 @@ func (f *connForm) visible(i int) bool {
 	case cfPassword:
 		return !f.kind.IsSource() || f.auth == "basic" || f.auth == "token"
 	case cfRegion, cfProfile:
-		return f.kind == db.KindDynamoDB || f.auth == "sigv4"
+		return f.kind.UsesRegion() || f.auth == "sigv4"
 	}
 	return false
 }
@@ -348,7 +350,10 @@ func (f *connForm) conn() (db.Conn, error) {
 	}
 	if f.kind.IsSource() {
 		// 보이지 않는 칸 값은 저장하지 않는다(인증을 바꾸면 이전 사용자·비밀번호가 남지 않게)
-		c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, URL: v[cfURL], Auth: f.auth}
+		c := db.Conn{Name: v[cfName], Group: v[cfGroup], Kind: f.kind, Auth: f.auth}
+		if f.visible(cfURL) {
+			c.URL = v[cfURL]
+		}
 		if f.visible(cfUser) {
 			c.User = v[cfUser]
 		}

@@ -52,13 +52,13 @@ func summarizeInfo(text string) *Result {
 	}
 	memory := "-"
 	if used, err := strconv.ParseInt(info["used_memory"], 10, 64); err == nil {
-		memory = humanBytes(used) + " / "
+		memory = HumanBytes(used) + " / "
 		if maxMem, err := strconv.ParseInt(info["maxmemory"], 10, 64); err != nil {
 			memory += "-"
 		} else if maxMem == 0 {
 			memory += "제한 없음"
 		} else {
-			memory += humanBytes(maxMem)
+			memory += HumanBytes(maxMem)
 		}
 	}
 	hitRate := "-"
@@ -156,8 +156,8 @@ func formatUptime(secs int64) string {
 	return "0초"
 }
 
-// humanBytes 는 1024 단위로 줄인다(예: 1.5KB).
-func humanBytes(n int64) string {
+// HumanBytes 는 1024 단위로 줄인다(예: 1.5KB). Redis 메모리·S3 객체 크기(R67.6)가 같이 쓴다.
+func HumanBytes(n int64) string {
 	if n < 1024 {
 		return fmt.Sprintf("%dB", n)
 	}
@@ -280,7 +280,7 @@ func (r *RedisConn) BigKeys(ctx context.Context, sample, top int) (*Result, erro
 		if b.ttl >= 0 {
 			ttl = b.ttl.String()
 		}
-		res.Rows = append(res.Rows, []string{CapCell(b.key), b.typ, humanBytes(b.bytes), strconv.FormatInt(b.bytes, 10), ttl})
+		res.Rows = append(res.Rows, []string{CapCell(b.key), b.typ, HumanBytes(b.bytes), strconv.FormatInt(b.bytes, 10), ttl})
 	}
 	res.Elapsed = time.Since(start)
 	return res, nil

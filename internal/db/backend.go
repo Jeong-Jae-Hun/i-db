@@ -681,7 +681,7 @@ func (r *RedisConn) GetValue(ctx context.Context, key string) (*Result, error) {
 		return nil, err
 	}
 	if ok {
-		res.Text += " · 메모리 " + humanBytes(mem)
+		res.Text += " · 메모리 " + HumanBytes(mem)
 	}
 	switch typ {
 	case "string":

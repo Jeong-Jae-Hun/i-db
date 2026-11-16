@@ -19,7 +19,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `.idea/data_source_mapping.xml` | `queries/` 파일별 접속 uuid |
 | `.env` | 비밀번호 `PG_<이름>_PASSWORD`, `REDIS_<이름>_PASSWORD`, 저장소 비밀값 `OS_`·`LOKI_`·`PROM_<이름>_PASSWORD`·`GRAFANA_<이름>_TOKEN`(R60.1), 그룹 키·IV `<그룹>_AES_KEY`·`<그룹>_AES_IV`(R37·R52) |
 | `.dbtui/user360.json` | 사용자 한눈에 보기 조회 목록(R51, 없으면 빈 목록) |
-| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`, R60.1) |
+| `.dbtui/connections.json` | db 전용 접속(R59.1, 없으면 빈 목록). 읽기 전용 저장소 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`aws`는 여기서만 읽는다(`url`·`auth`·`region`·`profile`, R60.1·R67.1) |
 
 `<이름>`은 접속 이름을 대문자로 바꾸고 영숫자 외 문자를 `_`로 바꾼 것이다.
 
@@ -557,7 +557,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R60 읽기 전용 저장소 공통
 
-- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
+- R60.1 db 전용 접속 파일(R59)의 `kind`에 `opensearch`·`loki`·`prometheus`·`grafana`·`dynamodb`·`aws`(R67)를 더한다. 칸은 `url`(OpenSearch·Loki·Prometheus·Grafana), `auth`(`basic`·`sigv4`·`token`·없음), `user`, `region`·`profile`(SigV4·DynamoDB·aws)이다. 비밀값은 `.env`의 `<접두>_<이름>_PASSWORD`(basic) 또는 `_TOKEN`(grafana)이고 접두는 `OS`·`LOKI`·`PROM`·`GRAFANA`다. AWS 자격 증명은 저장하지 않고 `profile`(없으면 표준 체인: 환경 변수·`~/.aws`·SSO)로 받는다.
   - 예: `{"name":"search-stg","kind":"opensearch","url":"https://search.stg.example.internal","auth":"sigv4","region":"ap-northeast-2","profile":"stg"}`.
   - 접속을 시험·저장할 때 `basic`·`token`(Grafana 포함)이 `http://` 주소면 `경고: 비밀번호가 평문 http 로 감`을, DynamoDB `url`이 `localhost`·`*.amazonaws.com`이 아니면 `경고: AWS 서명을 AWS 밖 주소로 보냄`을 보인다(막지는 않음). 인증 없음인데 주소에 `user:pass@`가 있으면 오류다.
   - HTTP 요청은 리다이렉트를 따라가지 않는다. 3xx는 `redirect not followed: 302 Found` 같은 오류다(인증 헤더를 다른 주소로 다시 보내거나 허용 경로를 우회하지 않게). 응답 본문은 16 MiB까지 받는다.
@@ -606,10 +606,10 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 ### R64 대시보드
 
 - R64.1 `Ctrl+G`(맥 ⌘G, 팔레트 `대시보드`)는 대시보드 탭을 연다. 맨 위 한 줄은 요약 카드다: 접속 수(종류별), 환경별 수(prod·stg·local), 연결됨·실패 수, PostgreSQL 활성 세션 합, Redis 클라이언트 합, 열린 트랜잭션 수(R17), prod 잠금 해제 중인 접속 수(R54). 그 아래 표는 접속마다 한 줄: 그룹·이름·환경·종류·상태(`●` 됨, `✕` 실패, `…` 아직 결과 없음)·지연(ms)·버전·주요 수치다. 다시 확인하는 동안에는 줄·수치·요약이 마지막 결과를 그대로 보이고 머리에 `확인 중 N`만 센다. 표가 다섯 줄을 못 얻을 만큼 낮으면 요약 카드를 한 줄 글로 접는다.
-  - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`.
+  - 예: PostgreSQL `세션 12/200 · 활성 3 · DB 4.2GB`, Redis `클라이언트 35 · 메모리 1.1/4.0GB · 키 1.2만`, OpenSearch `green · 문서 120만 · 인덱스 37`, Loki `ready · 라벨 13`, Prometheus `up 372/380`, Grafana `ok`(버전은 버전 열), DynamoDB `테이블 3`, aws `큐 63 · DLQ 쌓임 2`(R67.1).
   - 예: PostgreSQL `활성`은 확인하는 연결 자신을 뺀다. Redis 메모리는 `maxmemory:0`이면 `1.1GB/제한 없음`, `maxmemory` 필드를 숨긴 서버는 사용량만 `1.1GB`다.
-  - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있으면 그 칸을 경고 색으로 그린다.
-- R64.2 확인은 모든 접속에 동시에, 접속마다 질의 5초 제한으로 보낸다. 아직 열지 않은 접속을 여는 데는 15초까지 따로 준다(Redis 는 평문 3초 뒤 TLS 로 다시 붙고, PostgreSQL `connect_timeout` 이 8초다). 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 다시 볼 때와 대시보드 탭을 닫을 때는 진행 중인 이전 확인을 취소한다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO server clients memory keyspace`(Redis 7 미만이 거절하면 `INFO`), OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
+  - 예: 세션이 `max_connections`의 80%를 넘거나, Redis 메모리가 최대의 80%를 넘거나, OpenSearch가 `yellow`·`red`이거나, Prometheus에 down 대상이 있거나, aws DLQ에 메시지가 쌓인 큐가 있으면 그 칸을 경고 색으로 그린다.
+- R64.2 확인은 모든 접속에 동시에, 접속마다 질의 5초 제한으로 보낸다. 아직 열지 않은 접속을 여는 데는 15초까지 따로 준다(Redis 는 평문 3초 뒤 TLS 로 다시 붙고, PostgreSQL `connect_timeout` 이 8초다). 대시보드가 열려 있는 동안 30초마다 다시 보고 `r`은 바로 다시 본다. 다시 볼 때와 대시보드 탭을 닫을 때는 진행 중인 이전 확인을 취소한다. 확인은 읽기 전용 메타데이터만 묻는다(PostgreSQL `pg_stat_activity` 집계·`version()`·`pg_database_size`, Redis `INFO server clients memory keyspace`(Redis 7 미만이 거절하면 `INFO`), OpenSearch `_cluster/health`·`_cat/indices` 개수, Loki `/ready`·라벨, Prometheus `count(up)`·`up == 0` 개수, Grafana `/api/health`, DynamoDB `ListTables` 개수, aws `ListQueues`·큐마다 `GetQueueAttributes`). 표에서 `Enter`는 트리에서 그 접속을 고른다. `/`는 그룹·이름·환경으로 거른다.
   - 단, 아직 열지 않은 접속도 확인 때문에 연결을 연다(풀 연결 하나). 확인 오류는 비밀값을 지워 한 줄로 보인다.
 - R64.3 CLI `db status [--format table|tsv|json] [--prod] [-c 이름…]`는 같은 확인을 한 번 돌려 표를 찍는다. prod 접속은 `--prod`가 없으면 확인하지 않고 `--prod 로 확인`으로 보인다(R58.2). 하나라도 실패하면 종료 코드 1이다.
   - 예: 열은 `group`·`name`·`env`·`kind`·`ok`·`latency_ms`·`version`·`metrics`다. json 은 접속마다 객체인 배열이고 `metrics`는 `{name,value,warn}` 배열, 확인하지 않은 prod 는 `"ok":null`·`"note":"--prod 로 확인"`이다. `-c`는 여러 번 줄 수 있고 없으면 모든 접속이다.
@@ -625,12 +625,35 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ### R66 트리 정렬
 
-- R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
+- R66.1 트리의 폴더는 접속 그룹(서비스) 이름 순이고 그룹 없는 접속(`기타`)은 맨 뒤다. 폴더 안은 환경 local → stg → prod 순, 같은 환경은 쓰기 DB → 읽기 DB(이름 `-read`, 호스트 `read.`·`.cluster-ro-`) → Redis → 읽기 Redis → OpenSearch → Loki·Prometheus·Grafana → DynamoDB → aws, 그다음 이름 순이다. 파일 속 순서(`.idea`·`connections.json`)는 바꾸지 않는다.
   - 예: `shop` 폴더 → `shop-local`, `shop-local-redis`, `shop-stg`, `shop-stg-read`, `shop-stg-redis`, `shop-stg-os`, `shop-prod`, `shop-prod-read-redis`, `shop-prod-os`.
 - R66.2 폴더는 보이는 묶음이고 접속의 `group`과 따로 둘 수 있다. 옮긴 폴더는 db 전용 파일 `.dbtui/folders.json`(`{"<접속 uuid>": "폴더"}`, uuid 가 없으면 `"name:<이름>"`)에 두고 DataGrip 접속도 같은 파일로 옮긴다. `.idea`·`connections.json`의 `group`은 고치지 않는다. 트리·정렬(R66.1)·대시보드(R64)·`db status`·`db conns`의 `folder` 열은 옮긴 폴더를, 암호화 키(`<GROUP>_AES_KEY`, R37)·접속 창의 그룹 칸·MCP는 `group`을 쓴다. 폴더가 원래 그룹과 같아지면 기록을 지운다.
   - 예: `dg-stg`(그룹 `grp`)를 `ops`로 옮기면 트리에선 `ops` 폴더에 보이고 `enc()`는 여전히 `GRP_AES_KEY`로 암호화한다.
 - R66.3 폴더 줄 `E`는 `폴더 이름: <지금 이름>` 한 줄 입력을 열고, Enter 면 그 폴더에 보이는 접속을 모두 새 폴더로 옮긴 뒤 `폴더 이름 바꿈: mon → monitoring (접속 3)`을 보인다. 이미 있는 폴더 이름이면 합쳐진다. 접속 줄 `M`은 `옮길 폴더: <지금 폴더>`를 열고 빈 값이면 원래 그룹으로 되돌린다. 펼침 상태는 새 이름으로 이어받고 옮긴 접속(또는 폴더)을 고른다. 폴더만 바뀐 접속은 연결·자동완성 목록을 닫지 않는다. `folders.json`이 깨졌으면 경고만 하고 그룹대로 보이며, 덮어쓰지 않고 `폴더를 옮기지 못함`을 보인다. 폴더 이름은 64자 이하, 제어 문자 없음.
 - R66.4 CLI `db conn folder <이름> <폴더>` · `db conn folder <이름> --reset` · `db conn folder --rename <옛 폴더> <새 폴더>`. 접속에 붙지 않아 `--prod`가 필요 없다. 없는 접속·폴더는 종료 코드 2다.
+
+### R67 AWS
+
+- R67.1 `kind: "aws"` 접속은 AWS 메시징·인프라를 트리로만 보는 읽기 전용 저장소다. 칸은 이름·그룹·종류·리전·프로필이고(`url`·`auth` 없음, `region` 필수) 자격 증명은 DynamoDB처럼 `profile` 또는 표준 체인으로 받는다(R60.1). 트리 맨 위는 폴더 `SNS 토픽`·`SQS 큐`·`Lambda`·`EventBridge`·`Scheduler`·`Step Functions`·`S3`이고 펼칠 때 `sts:GetCallerIdentity`로 자격 증명부터 확인한다(접속 시험이 자격 증명 없이 성공하지 않게). 편집기 질의 언어는 없어 `Ctrl+R`·`db query`는 보내지 않고 `aws 접속은 트리로 본다`를 보인다(CLI는 종료 코드 2). `db tables -c`는 맨 위 폴더다.
+  - 예: `{"name":"infra-stg","kind":"aws","region":"ap-northeast-2","profile":"stg"}`. `db conn add infra-stg --kind aws --region ap-northeast-2 --profile stg`.
+  - 예: 목록 API가 권한 거절(`AccessDenied`·`AccessDeniedException`·`AuthorizationError`)이면 그 폴더는 `권한 없음: sns:ListTopics` 한 줄이고 다른 폴더는 그대로 쓴다. 그 밖의 오류는 노드 오류다.
+  - 부르는 API는 `List*`·`Get*`·`Describe*`·`Head*`(S3 본문은 범위 `GetObject`, R67.6)뿐이다. 메시지를 받거나(`ReceiveMessage`) 보내거나 지우는 호출은 없고, 시험이 패키지 소스에서 쓰기 호출을 찾으면 실패한다.
+  - 대시보드(R64) 수치는 `큐 63 · DLQ 쌓임 2`다. DLQ 쌓임은 RedrivePolicy의 DLQ에 메시지(`ApproximateNumberOfMessages`)가 있는 큐 수이고 0보다 크면 경고다. 큐 속성은 8개씩 동시에 읽고, 큐가 200개를 넘으면 앞 200개만 세어 `DLQ 쌓임 0 (앞 200개)`로 알린다. 속성을 못 읽은 큐가 있으면 `읽기 실패 N`(경고)을 붙인다.
+  - 단, 대시보드는 목록에 없는 DLQ(다른 계정)를 세지 않는다. 트리는 따로 읽는다.
+- R67.2 `SNS 토픽`은 토픽 → 구독이다. 구독 줄은 대상(같은 계정 SQS 큐는 큐 이름으로 줄임)과 프로토콜이다. 토픽 `Enter`는 `protocol`·`endpoint`·`subscription_arn`·`raw`·`filter` 표다(`raw`·`filter`는 구독마다 `GetSubscriptionAttributes`의 `RawMessageDelivery`·`FilterPolicy`). `SQS 큐`는 큐마다 `대기 12 · 처리 중 3 · 지연 0`이고, RedrivePolicy가 있으면 ` · DLQ <이름> <대기 수>`를 붙이며 DLQ에 메시지가 있으면 경고 색이다. 큐 `Enter`는 `attribute`·`value` 표(첫 줄 `QueueUrl`, 나머지 속성 이름순, RedrivePolicy JSON은 원문)다.
+  - 예: `orders` 큐의 DLQ `orders-dlq`에 2건 → `orders 대기 12 · 처리 중 3 · 지연 0 · DLQ orders-dlq 2`(경고 색).
+  - 예: 확인 전 구독(`PendingConfirmation`)은 속성을 묻지 않아 `raw`·`filter`가 빈 칸이다. 다른 계정 DLQ를 못 읽으면 수는 `?`다.
+  - 단, 큐 목록은 `GetQueueAttributes`(`All`)를 큐마다 8개씩 동시에 부른다. 큐 수백 개 계정은 펼치는 데 몇 초 걸린다.
+- R67.3 `Lambda`는 함수 목록이다(`런타임 · 마지막 수정 KST`, 컨테이너 이미지는 `Image`). 함수 `Enter`는 이벤트 소스 매핑 `source`·`state`·`batch`·`last_result` 표다.
+  - 예: `worker nodejs20.x · 2026-11-01 12:04` → `Enter` → `arn:aws:sqs:…:orders | Enabled | 10 | OK`.
+- R67.4 `EventBridge`는 이벤트 버스 → 규칙(`<일정 식 또는 pattern> · <상태>`)이고 규칙 `Enter`는 대상 `target_id`·`arn`·`input`·`dlq` 표다(`input`은 Input, 없으면 InputPath, 없으면 InputTransformer 템플릿). `Scheduler`는 일정 그룹 → 일정(`<식> · <상태>`)이고 일정 `Enter`는 `attribute`·`value` 표(식·시간대·상태·대상 ARN·input·역할·DLQ)다.
+  - 예: `nightly cron(0 18 * * ? *) · ENABLED`, `on-order pattern · DISABLED`. 파트너 버스(`aws.partner/…`) 이름의 `/`도 그대로 받는다.
+  - 단, Scheduler 목록에는 식이 없어 일정마다 `GetSchedule`을 8개씩 동시에 부른다. 못 읽은 일정은 `권한 없음: scheduler:GetSchedule`·`읽기 실패`다.
+- R67.5 `Step Functions`는 상태 기계(`STANDARD·EXPRESS · 만든 시각`)이고 `Enter`는 최근 실행 50개 `name`·`status`·`start`·`stop`(KST 초까지, 실행 중이면 `stop` 빈 칸) 표다. 더 있으면 잘림으로 보인다. 실행을 시작·멈추는 기능은 없다.
+- R67.6 `S3`는 버킷(리전) → `/`로 나눈 접두 → 객체(`크기 · 마지막 수정`)다. 한 단계는 `ListObjectsV2` 한 페이지(1,000개)이고 넘치면 끝에 `… 앞 1000개만 보임`이다. 버킷은 목록이 준 리전(없으면 `GetBucketLocation`)으로 묻는다(리다이렉트를 따라가지 않아서). 객체 `Enter`는 `HeadObject` 메타데이터(`key`·`size`·`last_modified`·`content_type`·`etag`·`storage_class`·`x-amz-meta-*` 등)를 `attribute`·`value` 표로 보이고, 텍스트로 보이는 64KiB 이하 객체만 `body` 줄에 본문을 붙인다.
+  - 본문은 `Range: bytes=0-65535` 범위 `GetObject`로만 받는다. 그 사이 객체가 커져도 64KiB 넘게 받지 않는다. 큰 객체는 내려받지 않는다.
+  - 예: `text/*`·JSON·XML·YAML·CSV Content-Type, 또는 형식이 없거나 `application/octet-stream`인 `.txt`·`.log`·`.csv`·`.json`·`.md`·`.yaml` 등 → 본문. 64KiB 초과 텍스트 → `body (64KiB 를 넘어 받지 않음)`. 이미지·`Content-Encoding: gzip` → `body` 줄 없음. UTF-8이 아니면 `(텍스트가 아님)`.
+  - 단, 콘솔이 만든 빈 "폴더" 객체(키가 접두와 같은 것)는 보이지 않는다. 버전·삭제 표시는 보지 않는다.
 
 ## 4. 화면과 키
 
@@ -665,7 +688,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 | `Ctrl+←→↑↓` · 경계 끌기 | 트리·결과 포커스: 영역 크기(세션에 저장, R46.2), 편집기: 단어 이동·스크롤. 마우스로 트리·오른쪽, 편집기·결과 경계를 끈다(R46.1) |
 | `F1` (⌘?) | 도움말 |
 | 트리 `Enter` `/` `r` `d` `D` `I` `A` `L` `S` | 펼치기·테이블 보기·값 편집·쿼리 파일 열기(접속은 최근 파일 자동 열기, R44) / 거르기 / 새로고침(쿼리 파일 목록도) / 구조 / DDL / CSV 가져오기 / 활동·잠금·크기(Redis 는 INFO·SLOWLOG·큰 키) |
-| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔) / 펼치기(R60~R63) |
+| 트리 `Enter` `l` (저장소) | 인덱스·라벨 값·지표·테이블·aws 노드 미리 보기를 결과 탭에(DynamoDB 는 `비싼 질의: 전체 스캔: y/N` 뒤 스캔) / 펼치기(R60~R63·R67) |
 | 트리 `B` `F` | PostgreSQL 데이터베이스 바꾸기 / 데이터 검색(접속·스키마 줄) |
 | 트리 `X` | Redis 패턴 키 일괄 삭제(접속·이름공간 줄, `esc` 멈춤, R42). db 전용 PostgreSQL 접속 줄은 접속 지우기(R59.3) |
 | 트리 `N` `E` `Alt+X` | 새 접속(URL 붙여넣기·`Ctrl+T` 시험) / db 전용 접속 고치기 / 지우기(Redis 포함, 팔레트 `접속 지우기`, R59) |

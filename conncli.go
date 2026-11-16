@@ -85,10 +85,10 @@ func runConnCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bo
 		fs.BoolVar(&o.prod, "prod", false, "prod 접속 허용")
 		fs.StringVar(&o.user, "user", "", "사용자")
 		fs.StringVar(&o.auth, "auth", "", "저장소 인증 basic|sigv4|token (없으면 비움)")
-		fs.StringVar(&o.region, "region", "", "AWS 리전 (sigv4·DynamoDB)")
+		fs.StringVar(&o.region, "region", "", "AWS 리전 (sigv4·DynamoDB·aws)")
 		fs.StringVar(&o.profile, "profile", "", "AWS 프로필 (비우면 표준 체인)")
 		if sub == "add" {
-			fs.StringVar(&o.kind, "kind", "", "postgresql|redis (URL 과 같아야 함)|opensearch|loki|prometheus|grafana|dynamodb")
+			fs.StringVar(&o.kind, "kind", "", "postgresql|redis (URL 과 같아야 함)|opensearch|loki|prometheus|grafana|dynamodb|aws")
 		} else {
 			fs.StringVar(&o.host, "host", "", "호스트")
 			fs.StringVar(&o.port, "port", "", "포트")
@@ -211,7 +211,7 @@ func connSave(ctx context.Context, o connCLIOpts, proj *db.Project, i int, name 
 		}
 	} else {
 		c.Kind = db.Kind(o.kind)
-		if o.url == "" && c.Kind != db.KindDynamoDB {
+		if o.url == "" && !c.Kind.UsesRegion() {
 			return usageErr("--url 이 필요함")
 		}
 	}

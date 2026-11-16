@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Jeong-Jae-Hun/i-db/internal/awsres"
 	"github.com/Jeong-Jae-Hun/i-db/internal/db"
 	"github.com/Jeong-Jae-Hun/i-db/internal/dynamo"
 	"github.com/Jeong-Jae-Hun/i-db/internal/obs"
@@ -28,6 +29,7 @@ var sourceOpeners = map[db.Kind]func(context.Context, db.Conn) (source.Backend, 
 	db.KindPrometheus: func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewPrometheus(c) },
 	db.KindGrafana:    func(_ context.Context, c db.Conn) (source.Backend, error) { return obs.NewGrafana(c) },
 	db.KindDynamoDB:   dynamo.New,
+	db.KindAWS:        awsres.New,
 }
 
 const (
@@ -37,6 +39,7 @@ const (
 	msgPlainHTTP      = "비밀번호가 평문 http 로 감"
 	msgPlainPG        = "TLS 없이 붙으면 비밀번호가 평문으로 감"
 	msgForeignSigV4   = "AWS 서명을 AWS 밖 주소로 보냄"
+	msgTreeOnly       = "aws 접속은 트리로 본다" // R67.1: 편집기 질의 언어가 없다
 )
 
 // sourceRanges 는 Ctrl+] 가 도는 Loki·Prometheus 범위다(R62.2).
@@ -244,6 +247,10 @@ func (m *model) sourceExec(c db.Conn, do func(ctx context.Context, b source.Back
 // 비싼 질의(ErrNeedsConfirm)는 확인 뒤 Force 로 다시 보낸다. 기록에는 질의 글이 남는다.
 func (m *model) runSource(t *queryTab, text string) tea.Cmd {
 	c := m.conn(t.conn)
+	if c.Kind == db.KindAWS {
+		m.status = msgTreeOnly
+		return nil
+	}
 	q := source.Query{Text: strings.TrimSpace(text)}
 	if q.Text == "" {
 		m.status = "실행할 문장이 없음"
