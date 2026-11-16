@@ -191,7 +191,7 @@ var helpSections = []helpSection{
 		{"Ctrl+E", "EXPLAIN (실행하지 않음)", "ctrl+e"},
 		{"Alt+E", "EXPLAIN ANALYZE, BUFFERS (쓰기 문장은 y/N)", "alt+e"},
 		{"Ctrl+P", "명령 팔레트 (동작·테이블을 이름으로 찾아 실행·열기, 최근 테이블 먼저)", ""},
-		{"Ctrl+H", "실행 기록", "ctrl+h"},
+		{"Ctrl+H", "실행 기록 (Enter ◆ 결과 사본을 새 탭에 · e 편집기에 · d 사본 지우기 · 오늘·어제 거르기)", "ctrl+h"},
 		{"Ctrl+N", "객체 찾기 (테이블·뷰·Redis 키)", "ctrl+n"},
 		{"Ctrl+O / Ctrl+S", "파일 열기 / 저장 (결과 편집이 있으면 제출)", "ctrl+o"},
 		{"F9", "트랜잭션 Auto / Manual (Manual 은 실행 전 BEGIN)", "f9"},
@@ -297,6 +297,7 @@ var helpSections = []helpSection{
 		{"o", "셀 전체 값", "o"},
 		{"w", "텍스트 줄바꿈 (테이블 보기는 WHERE, / 도 같음)", "w"},
 		{"t · esc", "실행 계획 나무 ↔ JSON · 닫기", "t"},
+		{"r (기록 사본 탭)", "그 기록의 접속에서 다시 실행해 사본을 갈음 (R11.4)", ""},
 		{"c", "차트 (다시 c·esc 로 표)", "c"},
 		{"D", "staticEncrypt 칸 복호화 보기 (다시 D 원래 값)", "D"},
 		{"", "정렬·거르기", ""},
@@ -749,6 +750,7 @@ type queryTab struct {
 	flow       *flowState    // 흐름 탭이면 그 상태(R69). 대시보드처럼 편집기·결과 자리 전체에 그린다
 	board      *boardState   // 보드 탭이면 그 상태(R70). 대시보드처럼 편집기·결과 자리 전체에 그린다
 	linked     *linkedView   // 연결된 곳 탭이면 그 상태(R73). 표가 그 결과일 때만 Enter 가 테이블을 연다
+	snap       *snapTab      // 기록 사본을 보이는 탭이면 그 기록(R11.4). 다시 실행해 결과가 오면 지운다
 }
 
 // completer 는 편집기 자동완성 함수다. 탭의 접속이 바뀌어도 부를 때 다시 읽도록 탭을 가리킨다.
@@ -804,8 +806,9 @@ type model struct {
 	ticking  bool
 	// 접속별 자동완성 목록. 키가 있으면 읽는 중이거나 읽었다(실패하면 nil 로 남아 r 로 다시 읽는다)
 	catalogs map[int]*complete.Catalog
-	catGen   map[int]int    // 접속별 자동완성 목록 요청 세대
-	hist     *history.Store // 열지 못했으면 nil
+	catGen   map[int]int      // 접속별 자동완성 목록 요청 세대
+	hist     *history.Store   // 열지 못했으면 nil
+	results  *history.Results // 결과 사본(R11.4). 열지 못했거나 DB_HISTORY_RESULTS=0 이면 nil
 	seq      int
 	status   string
 
@@ -2389,7 +2392,8 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		c := m.conn(msg.conn)
-		e := history.Entry{Time: time.Now(), Conn: c.Name, SQL: db.Redact(db.MaskSecrets(msg.sql), c.Password)}
+		now := time.Now()
+		e := history.Entry{ID: history.NewID(now), Time: now, Conn: c.Name, SQL: db.Redact(db.MaskSecrets(msg.sql), c.Password)}
 		if msg.err != nil {
 			e.Err = db.Redact(msg.err.Error(), c.Password)
 		}
@@ -2398,13 +2402,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var save tea.Cmd
 		if msg.sql != "" && m.hist != nil {
-			hist := m.hist
-			save = func() tea.Msg {
-				if err := hist.Append(e); err != nil {
-					return statusMsg("기록 실패: " + err.Error())
-				}
-				return nil
-			}
+			save = m.saveHistory(e, m.snapshotOf(msg, c, e))
 		}
 		t := m.findTab(msg.tab)
 		// 다시 실행·탭 닫기로 밀려난 결과는 화면에 안 붙이지만, 취소 전에 반영됐을 수 있는 쓰기라 기록은 남긴다
@@ -2496,6 +2494,10 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			t.res, t.resErr = res, e.Err
+			if t.snap != nil {
+				// 다시 실행한 결과가 사본을 갈음한다(R11.4)
+				t.snap, t.title = nil, fmt.Sprintf("Query %d", t.id)
+			}
 			pins := t.subs[:0:0]
 			for _, s := range t.subs {
 				if s.pinned {
@@ -3229,42 +3231,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerCursor = 0
 		return m, cmd
 	case oHistory:
-		list := m.historyMatches()
-		switch ks {
-		case "esc":
-			m.overlay = oNone
-			return m, nil
-		case "down", "ctrl+n":
-			m.histCursor = clamp(m.histCursor+1, len(list))
-			return m, nil
-		case "up", "ctrl+p":
-			m.histCursor = clamp(m.histCursor-1, len(list))
-			return m, nil
-		case "enter":
-			m.overlay = oNone
-			if m.histCursor >= len(list) {
-				return m, nil
-			}
-			e := list[m.histCursor]
-			if t.editor.Value() != "" {
-				t = m.newTab()
-			}
-			t.editor.SetValue(e.SQL)
-			cmd := m.edited(t)
-			// 접속이 이미 있는 탭은 바꾸지 않는다. 다른 환경(prod 등)으로 몰래 옮기지 않기 위해서다
-			for i, c := range m.proj.Conns {
-				if t.conn < 0 && c.Name == e.Conn {
-					cmd = tea.Batch(cmd, m.setConn(t, i))
-				}
-			}
-			m.setFocus(fEditor)
-			m.status = "기록을 편집기에 넣었음"
-			return m, cmd
-		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(k)
-		m.histCursor = 0
-		return m, cmd
+		return m, m.historyKey(k)
 	}
 
 	// 결과 영역이 입력 중이면(거르기·칸 편집·WHERE·값 편집) q 같은 글자 키도 전역 키보다 먼저 그쪽이 받는다
@@ -3937,6 +3904,9 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t.planOn = true
 			return m, nil
 		}
+		if ks == "r" && t.snap != nil && !t.grid.Viewing() {
+			return m, m.rerunSnapshot(t)
+		}
 		switch ks {
 		case "p":
 			// 고정한 결과는 다음 실행에도 남는다
@@ -4371,13 +4341,6 @@ func (m *model) pickerMatches() []string {
 	return out
 }
 
-func (m *model) historyMatches() []history.Entry {
-	if m.hist == nil {
-		return nil
-	}
-	return m.hist.List(history.Filter{Query: m.input.Value(), Limit: historyMax})
-}
-
 // ─── View ───
 
 func (m *model) View() string {
@@ -4421,21 +4384,7 @@ func (m *model) View() string {
 		}
 		return b.String()
 	case oHistory:
-		list := m.historyMatches()
-		lines := []string{truncate(m.input.View(), m.w), dimStyle.Render("↑↓ 고르기 · Enter 편집기에 넣기 · esc 닫기")}
-		top := max(0, m.histCursor-(m.h-3))
-		for i := top; i < len(list) && len(lines) < m.h; i++ {
-			e := list[i]
-			line := dimStyle.Render(e.Time.Local().Format("01-02 15:04")) + " " + textutil.Printable(e.Conn, false) + "  " + textutil.Printable(oneLine(db.MaskSecrets(e.SQL)), false)
-			if e.Err != "" {
-				line = errStyle.Render("✗ ") + line
-			}
-			if i == m.histCursor {
-				line = lipgloss.NewStyle().Reverse(true).Render(ansi.Strip(line))
-			}
-			lines = append(lines, truncate(line, m.w))
-		}
-		return strings.Join(lines, "\n")
+		return m.historyView()
 	case oHelp, oKeys:
 		secs, foot := helpSections, "아무 키나 눌러 닫기"
 		if m.overlay == oKeys {

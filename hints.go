@@ -69,6 +69,8 @@ var (
 	dashHints  = []string{"r 새로고침", "Enter 트리에서 고르기", "/ 거르기", "? 키", "Ctrl+W 닫기"}
 	flowHints  = []string{"r 새로고침", "↑↓ 흐름", "←→ 상자", "Enter 상세", "? 키", "Ctrl+W 닫기"}
 	boardHints = []string{"r 새로고침", "방향키·hjkl 패널", "Enter 쿼리 탭에 열기", "? 키", "Ctrl+W 닫기"}
+	// 기록 창(R11.2). e·d 는 거르기 글이 없을 때만 듣는다
+	historyHints = []string{"↑↓ 고르기", "Enter 열기(◆ 사본은 새 탭)", "e 편집기에 넣기", "d 사본 지우기", "글 SQL·접속·오늘·어제 거르기", "esc 닫기"}
 )
 
 // fitHints 는 항목을 앞에서부터 w 칸에 들어가는 만큼만 잇는다. 항목 중간에서 자르지 않는다.
@@ -184,11 +186,16 @@ func (m *model) resultHints(t *queryTab) []string {
 		return m.labels(whereHints)
 	case t.planOn:
 		return m.labels(planHints)
+	case sc == grid.ScreenText && t.snap != nil:
+		return m.labels(append([]string{"r 다시 실행"}, screenHints[sc]...))
 	case sc != grid.ScreenTable:
 		return m.labels(screenHints[sc])
 	}
 	pg := t.viewConn >= 0 && m.conn(t.viewConn).Kind == db.KindPG
 	var items []string
+	if t.snap != nil {
+		items = append(items, "r 다시 실행")
+	}
 	if t.linked != nil && t.shown() == t.linked.res {
 		items = append(items, "Enter 테이블 열기")
 	}

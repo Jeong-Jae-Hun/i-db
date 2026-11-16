@@ -94,6 +94,14 @@ func main() {
 		// 시작 시 건너뛴 접속 경고를 덮지 않게 이어 붙인다
 		m.addStatus("실행 기록을 열지 못함: " + err.Error())
 	}
+	// 결과 사본(R11.4)은 덤이라 열지 못해도 기록은 쓴다
+	if m.hist != nil {
+		if m.results, err = openResults(hp); err != nil {
+			m.addStatus("결과 사본을 열지 못함: " + err.Error())
+		} else if m.results != nil {
+			m.boot = tea.Batch(m.boot, pruneResultsCmd(m.results))
+		}
+	}
 	m.restoreSession()
 	m.tips = loadTips() // 한 번만 보이는 팁(R74.3). 화면에서만 쓰고 CLI·MCP 는 부르지 않는다
 	m.boot = tea.Batch(m.boot, updateNoticeCmd(os.Getenv, version, updateCheckPath(), fetchLatestTag))
