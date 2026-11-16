@@ -21,6 +21,19 @@ const READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// 평문·TLS 시도 하나의 한도(접속·HELLO·PING 까지)
 const PING_TIMEOUT: Duration = Duration::from_secs(3);
 
+// 답 하나의 상한. go-redis 는 상한 없이 재귀로 읽지만, 깨졌거나 악의적인 서버가 스택·메모리를 다 쓰게 두지 않는다.
+// 실제 Redis 답은 이 값들에 한참 못 미친다(중첩은 XREAD·COMMAND DOCS 도 10단 안팎).
+/// 배열·맵·속성 중첩 깊이
+const MAX_DEPTH: usize = 64;
+/// bulk 문자열 하나. Redis proto-max-bulk-len 기본값(512MB)과 같다
+const MAX_BULK_BYTES: usize = 512 << 20;
+/// 답 하나에서 읽는 bulk·줄 바이트 합
+const MAX_REPLY_BYTES: usize = 1 << 30;
+/// 답 하나의 배열·맵 원소 수 합(값 하나가 수십 바이트라 메모리 1GiB 안쪽이다)
+const MAX_REPLY_ELEMENTS: usize = 16 << 20;
+/// 상태·오류·길이 줄 하나
+const MAX_LINE_BYTES: usize = 1 << 20;
+
 /// go-redis 가 돌려주는 값이다. 상태 줄·bulk·verbatim 은 모두 Str 이다.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -73,6 +86,9 @@ pub struct RedisConn {
     stream: Stream,
     rbuf: Vec<u8>,
     pos: usize,
+    /// 지금 읽는 답에 남은 바이트·원소 예산
+    left_bytes: usize,
+    left_elems: usize,
 }
 
 impl RedisConn {
@@ -175,6 +191,16 @@ impl RedisConn {
         Ok(res)
     }
 
+    fn new(stream: Stream) -> RedisConn {
+        RedisConn {
+            stream,
+            rbuf: Vec::with_capacity(4096),
+            pos: 0,
+            left_bytes: MAX_REPLY_BYTES,
+            left_elems: MAX_REPLY_ELEMENTS,
+        }
+    }
+
     async fn connect(o: &Options, tls_name: Option<&str>) -> Result<RedisConn, PingError> {
         let io = |e: String| PingError::Io(Error::msg(e));
         let addrs = resolve(&o.host, o.port).await.map_err(|e| io(format!("dial tcp: {e}")))?;
@@ -195,11 +221,7 @@ impl RedisConn {
             None => Stream::Plain(tcp),
             Some(name) => Stream::Tls(Box::new(handshake(tcp, name, Verify::Full).await.map_err(io)?)),
         };
-        let mut c = RedisConn {
-            stream,
-            rbuf: Vec::with_capacity(4096),
-            pos: 0,
-        };
+        let mut c = RedisConn::new(stream);
         c.init(o).await?;
         Ok(c)
     }
@@ -247,7 +269,8 @@ impl RedisConn {
         }
         self.stream.write_all(&buf).await.map_err(|e| Error::msg(io_reason(&e)))?;
         self.stream.flush().await.map_err(|e| Error::msg(io_reason(&e)))?;
-        tokio::time::timeout(READ_TIMEOUT, self.read_reply())
+        (self.left_bytes, self.left_elems) = (MAX_REPLY_BYTES, MAX_REPLY_ELEMENTS);
+        tokio::time::timeout(READ_TIMEOUT, self.read_reply(0))
             .await
             .map_err(|_| Error::msg("i/o timeout"))?
     }
@@ -259,13 +282,11 @@ impl RedisConn {
             self.rbuf.clear();
             self.pos = 0;
         }
-        let mut chunk = [0u8; 8192];
-        match self.stream.read(&mut chunk).await {
+        // 읽을 칸을 스택이 아니라 버퍼에 둔다. 답을 재귀로 읽어 깊이마다 이 함수의 상태가 쌓인다
+        self.rbuf.reserve(8192);
+        match self.stream.read_buf(&mut self.rbuf).await {
             Ok(0) => Err(Error::msg("EOF")),
-            Ok(n) => {
-                self.rbuf.extend_from_slice(&chunk[..n]);
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(e) => Err(Error::msg(io_reason(&e))),
         }
     }
@@ -282,14 +303,41 @@ impl RedisConn {
                         go_quote(&String::from_utf8_lossy(&line))
                     )));
                 }
+                self.spend(line.len())?;
                 return Ok(line[..line.len() - 2].to_vec());
+            }
+            if self.rbuf.len() - self.pos > MAX_LINE_BYTES {
+                return Err(Error::msg("redis: reply line too long"));
             }
             self.fill().await?;
         }
     }
 
+    /// 답 예산에서 n 바이트를 쓴다.
+    fn spend(&mut self, n: usize) -> Result<(), Error> {
+        self.left_bytes = self
+            .left_bytes
+            .checked_sub(n)
+            .ok_or_else(|| Error::msg(format!("redis: reply exceeds {MAX_REPLY_BYTES} bytes")))?;
+        Ok(())
+    }
+
+    /// 답 예산에서 원소 n 개를 쓴다.
+    fn spend_elems(&mut self, n: usize) -> Result<(), Error> {
+        self.left_elems = self
+            .left_elems
+            .checked_sub(n)
+            .ok_or_else(|| Error::msg(format!("redis: reply exceeds {MAX_REPLY_ELEMENTS} elements")))?;
+        Ok(())
+    }
+
     async fn read_n(&mut self, n: usize) -> Result<Vec<u8>, Error> {
-        while self.rbuf.len() - self.pos < n + 2 {
+        if n > MAX_BULK_BYTES {
+            return Err(Error::msg(format!("redis: bulk string exceeds {MAX_BULK_BYTES} bytes")));
+        }
+        let want = n.checked_add(2).ok_or_else(|| Error::msg("redis: invalid bulk length"))?;
+        self.spend(want)?;
+        while self.rbuf.len() - self.pos < want {
             self.fill().await?;
         }
         let v = self.rbuf[self.pos..self.pos + n].to_vec();
@@ -297,8 +345,12 @@ impl RedisConn {
         Ok(v)
     }
 
-    fn read_reply(&mut self) -> ReplyFuture<'_> {
+    /// 답 하나를 읽는다. depth 는 배열·맵·속성 중첩 깊이다.
+    fn read_reply(&mut self, depth: usize) -> ReplyFuture<'_> {
         Box::pin(async move {
+            if depth > MAX_DEPTH {
+                return Err(Error::msg(format!("redis: reply nested deeper than {MAX_DEPTH}")));
+            }
             let line = self.read_line().await?;
             let body = String::from_utf8_lossy(&line[1..]).into_owned();
             let len = || -> Result<Option<usize>, Error> {
@@ -342,9 +394,10 @@ impl RedisConn {
                 b'*' | b'~' | b'>' => match len()? {
                     None => Value::Nil,
                     Some(n) => {
+                        self.spend_elems(n)?;
                         let mut items = Vec::with_capacity(n.min(1024));
                         for _ in 0..n {
-                            items.push(match self.read_reply().await? {
+                            items.push(match self.read_reply(depth + 1).await? {
                                 Reply::Value(v) => v,
                                 Reply::Error(e) => Value::Error(e),
                             });
@@ -354,13 +407,14 @@ impl RedisConn {
                 },
                 b'%' | b'|' => {
                     let n = len()?.unwrap_or(0);
+                    self.spend_elems(n.checked_mul(2).ok_or_else(|| Error::msg("redis: invalid map length"))?)?;
                     let mut pairs = Vec::with_capacity(n.min(1024));
                     for _ in 0..n {
-                        let k = match self.read_reply().await? {
+                        let k = match self.read_reply(depth + 1).await? {
                             Reply::Value(v) => v,
                             Reply::Error(e) => return Ok(Reply::Error(e)),
                         };
-                        let v = match self.read_reply().await? {
+                        let v = match self.read_reply(depth + 1).await? {
                             Reply::Value(v) => v,
                             Reply::Error(e) => Value::Error(e),
                         };
@@ -368,7 +422,7 @@ impl RedisConn {
                     }
                     if line[0] == b'|' {
                         // 속성은 버리고 뒤따르는 답을 읽는다
-                        return self.read_reply().await;
+                        return self.read_reply(depth + 1).await;
                     }
                     Value::Map(pairs)
                 }
@@ -452,7 +506,8 @@ fn write_value(b: &mut Vec<u8>, v: &Value) {
     }
 }
 
-/// Go fmt %v 의 float64 글이다: 가장 짧은 자릿수, 지수가 -4 미만이거나 21 이상이면 e 표기(e+21, e-05).
+/// Go fmt %v 의 float64 글이다: strconv 'g' 가장 짧은 자릿수이고, 지수가 -4 미만이거나 6 이상이면 e 표기(1e+06, 1e-05)다.
+/// strconv 는 가장 짧은 자릿수일 때 e 표기 판정에 정밀도 6 을 쓴다.
 fn go_float(f: f64) -> String {
     if f.is_nan() {
         return "NaN".into();
@@ -467,7 +522,7 @@ fn go_float(f: f64) -> String {
     let sci = format!("{f:e}");
     let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
     let exp: i32 = exp.parse().unwrap_or(0);
-    if !(-4..21).contains(&exp) {
+    if !(-4..6).contains(&exp) {
         let sign = if exp < 0 { '-' } else { '+' };
         return format!("{mant}e{sign}{:02}", exp.abs());
     }
@@ -566,16 +621,80 @@ mod tests {
         assert_eq!(format_cell(&v), "[one, 1, (nil), -3, true, ERR x, {k: 0.5, }]");
     }
 
+    /// raw 를 그대로 보내는 가짜 서버에 붙어 답 하나를 읽는다.
+    async fn read_raw(raw: Vec<u8>) -> Result<Reply, Error> {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let _ = s.write_all(&raw).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let mut c = RedisConn::new(Stream::Plain(tokio::net::TcpStream::connect(addr).await.unwrap()));
+        let r = tokio::time::timeout(Duration::from_secs(2), c.read_reply(0)).await;
+        r.unwrap_or_else(|_| Err(Error::msg("timed out")))
+    }
+
+    fn reply_err(r: Result<Reply, Error>) -> String {
+        match r {
+            Err(e) => e.to_string(),
+            Ok(_) => "ok".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn 깊게_중첩된_답은_오류다() {
+        let mut raw = b"*1\r\n".repeat(MAX_DEPTH + 1);
+        raw.extend_from_slice(b":1\r\n");
+        assert_eq!(reply_err(read_raw(raw).await), "redis: reply nested deeper than 64");
+        // 상한 안쪽은 읽는다
+        let mut raw = b"*1\r\n".repeat(MAX_DEPTH);
+        raw.extend_from_slice(b":1\r\n");
+        assert!(read_raw(raw).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn 넘치거나_너무_큰_길이는_오류다() {
+        assert_eq!(
+            reply_err(read_raw(b"$18446744073709551615\r\n".to_vec()).await),
+            "redis: bulk string exceeds 536870912 bytes"
+        );
+        assert_eq!(
+            reply_err(read_raw(b"$536870913\r\n".to_vec()).await),
+            "redis: bulk string exceeds 536870912 bytes"
+        );
+        assert_eq!(
+            reply_err(read_raw(b"*16777217\r\n".to_vec()).await),
+            "redis: reply exceeds 16777216 elements"
+        );
+        assert_eq!(
+            reply_err(read_raw(b"%9223372036854775808\r\n".to_vec()).await),
+            "redis: invalid map length"
+        );
+        let mut long = vec![b'+'; MAX_LINE_BYTES + 10];
+        long.push(b'x');
+        assert_eq!(reply_err(read_raw(long).await), "redis: reply line too long");
+    }
+
     #[test]
-    fn 실수는_Go_v_꼴이다() {
+    fn 실수는_Go_fmt_Sprint_와_같다() {
+        // go1 fmt.Sprint 로 찍은 값을 그대로 고정한다(%v 는 strconv 'g' 가장 짧은 자릿수, 지수 -4 미만·6 이상이면 e 표기)
         for (f, want) in [
             (1.0, "1"),
             (2.5, "2.5"),
-            (-0.000123, "-0.000123"),
-            (0.0000123, "1.23e-05"),
-            (1e20, "100000000000000000000"),
+            (1e6, "1e+06"),
+            (1e20, "1e+20"),
             (1e21, "1e+21"),
+            (123456789.0, "1.23456789e+08"),
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (-0.000123, "-0.000123"),
+            (1.5e-5, "1.5e-05"),
             (123456.789, "123456.789"),
+            (1e5, "100000"),
+            (999999.0, "999999"),
+            (1234567.0, "1.234567e+06"),
+            (12345678901234567890.0, "1.2345678901234567e+19"),
             (f64::INFINITY, "+Inf"),
             (f64::NAN, "NaN"),
         ] {
