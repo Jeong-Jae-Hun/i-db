@@ -2,6 +2,7 @@
 //! 토큰은 Go `internal/sqlfmt` 의 `Tokenize` 를 옮긴 것으로 읽는다. sqlfmt 를 옮기면 그쪽으로 뺀다.
 
 use crate::project::go_atoi;
+use crate::sqlsafe::quote_literal;
 
 /// PostgreSQL 이 한 문장에 받는 바인딩 인자의 상한이다. 넘거나 정수로 못 읽는 $n 은 이름 목록을 만들지 않는다
 const MAX_PARAMS: i64 = 65535;
@@ -65,6 +66,33 @@ pub fn bind(sql: &str) -> (String, Vec<String>) {
     }
     b.push_str(&sql[last..]);
     (b, names)
+}
+
+/// sql 의 $n 자리마다 repl(n, "$n") 이 준 글로 바꾼다. None 이면 그대로 둔다. 문자열·주석 안의 $n 은 토큰이 아니라 건드리지 않는다.
+pub fn replace_params(sql: &str, mut repl: impl FnMut(i64, &str) -> Option<String>) -> String {
+    let mut b = String::new();
+    let mut last = 0;
+    for t in tokenize(sql).iter().filter(|t| t.kind == Kind::Param) {
+        let text = &sql[t.start..t.end];
+        let Some(with) = go_atoi(&text[1..]).and_then(|n| repl(n, text)) else {
+            continue;
+        };
+        b.push_str(&sql[last..t.start]);
+        b.push_str(&with);
+        last = t.end;
+    }
+    b.push_str(&sql[last..]);
+    b
+}
+
+/// sql 의 $n 자리를 args[n-1] 리터럴(None 은 NULL)로 바꾼다. 읽기 전용 실행이 바인딩을 받지 않아서다.
+/// 값은 quote_literal 로 감싸 문장을 바꾸지 못한다.
+pub fn inline_args(sql: &str, args: &[Option<String>]) -> String {
+    replace_params(sql, |n, _| {
+        let i = usize::try_from(n).ok()?.checked_sub(1)?;
+        let v = args.get(i)?;
+        Some(v.as_deref().map_or_else(|| "NULL".to_string(), quote_literal))
+    })
 }
 
 // ─── 토큰 ───
@@ -278,5 +306,14 @@ mod tests {
     fn 닫히지_않은_E_문자열은_끝까지_한_토큰이다() {
         let toks = tokenize("e'\\");
         assert_eq!((toks.len(), toks[0].kind, toks[0].end), (1, Kind::String, 3));
+    }
+
+    #[test]
+    fn 번호_자리를_리터럴로_넣고_문자열_안은_두다() {
+        let args = [Some("a'b".to_string()), None, Some("c\\d".to_string())];
+        assert_eq!(
+            inline_args("select $1, $2, '$1', $3, $4 -- $1", &args),
+            "select 'a''b', NULL, '$1', E'c\\\\d', $4 -- $1"
+        );
     }
 }

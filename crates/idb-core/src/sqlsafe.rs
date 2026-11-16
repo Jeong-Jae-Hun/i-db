@@ -247,13 +247,18 @@ pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// 앞뒤 공백과 끝의 ';'(여러 개, 사이 공백 포함)를 뗀다.
-pub(crate) fn trim_statement(s: &str) -> &str {
+pub fn trim_statement(s: &str) -> &str {
     s.trim().trim_end_matches([';', ' ', '\t', '\r', '\n', '\x0c', '\x0b'])
 }
 
 /// b 가 따옴표 없는 SQL 식별자에 들 수 있는 바이트인지다($ 와 UTF-8 바이트 포함).
 pub fn is_ident_byte(b: u8) -> bool {
     b == b'_' || b == b'$' || b.is_ascii_alphanumeric() || b >= 0x80
+}
+
+/// 식별자를 늘 큰따옴표로 감싼다. 예약어·대문자 판정 없이도 항상 맞다.
+pub fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 /// PostgreSQL quote_literal 과 같다. 백슬래시가 있으면 standard_conforming_strings 설정과
