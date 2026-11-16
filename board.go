@@ -252,6 +252,8 @@ func checkPanel(p *boardPanel, proj *db.Project, fs []flows.Flow, ferr error) er
 			return errors.New("KEYS is not run on boards (it blocks the server): use SCAN")
 		case !db.IsReadOnlyRedis(args):
 			return errors.New("redis command is not a read command")
+		case !boardRedisBounded(args):
+			return errors.New("보드에서는 범위를 정한 읽기만: " + strings.ToUpper(args[0]))
 		}
 	}
 	if p.Since != "" {
@@ -265,6 +267,37 @@ func checkPanel(p *boardPanel, proj *db.Project, fs []flows.Flow, ferr error) er
 		p.since = time.Duration(d)
 	}
 	return nil
+}
+
+// boardRedisCmds 는 보드 Redis 패널이 받는 명령이다. 값 하나·수 하나를 돌려주는 것만 두고, 컬렉션 전체를 읽는
+// HGETALL·SMEMBERS·LRANGE 0 -1 같은 명령은 새로고침마다 통째로 오가므로 뺀다. 범위를 받는 명령은 boardRedisBounded 가 따로 본다.
+var boardRedisCmds = map[string]bool{"GET": true, "MGET": true, "HGET": true, "HMGET": true, "LLEN": true, "SCARD": true,
+	"ZCARD": true, "HLEN": true, "STRLEN": true, "TTL": true, "PTTL": true, "TYPE": true, "EXISTS": true, "XLEN": true,
+	"INFO": true, "DBSIZE": true}
+
+// boardRedisBounded 는 보드에서 돌려도 되는 Redis 읽기인지다. LRANGE·ZRANGE·ZREVRANGE 는 0 이상 start ≤ stop,
+// stop-start < boardRows 인 색인 범위(ZRANGE 는 WITHSCORES 만 덧붙임)이고, SCAN 은 COUNT 가 boardRows 이하다.
+func boardRedisBounded(args []string) bool {
+	cmd := strings.ToUpper(args[0])
+	switch cmd {
+	case "LRANGE", "ZRANGE", "ZREVRANGE":
+		if len(args) < 4 || len(args) > 5 || (len(args) == 5 && (cmd == "LRANGE" || !strings.EqualFold(args[4], "WITHSCORES"))) {
+			return false
+		}
+		start, err1 := strconv.Atoi(args[2])
+		stop, err2 := strconv.Atoi(args[3])
+		return err1 == nil && err2 == nil && start >= 0 && stop >= start && stop-start < boardRows
+	case "SCAN":
+		for i := 2; i+1 < len(args); i += 2 {
+			if strings.EqualFold(args[i], "COUNT") {
+				if n, err := strconv.Atoi(args[i+1]); err != nil || n <= 0 || n > boardRows {
+					return false
+				}
+			}
+		}
+		return len(args) >= 2 && len(args)%2 == 0
+	}
+	return boardRedisCmds[cmd]
 }
 
 // panelConns 는 패널이 묻는 접속 이름이다(흐름은 아웃박스·aws 접속).
@@ -338,6 +371,10 @@ func runPanel(ctx context.Context, clients *db.Clients, sources *sourcePool, pro
 		var rc *db.RedisConn
 		if rc, err = clients.Redis(ctx, c); err == nil {
 			res, err = rc.Run(ctx, db.SplitArgs(strings.TrimSpace(p.Query)))
+		}
+		// 검사가 범위를 정한 읽기만 받지만 MGET·HMGET 처럼 인자 수만큼 오는 명령도 패널 행 수에서 자른다
+		if err == nil && res != nil && len(res.Rows) > limit {
+			res.Rows, res.Truncated = res.Rows[:limit], true
 		}
 	default:
 		var b source.Backend

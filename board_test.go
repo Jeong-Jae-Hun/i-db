@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -138,6 +139,46 @@ func TestLoadBoard_refresh_는_기본_60초_최소_10초이고_깨진_JSON_은_�
 	}
 	if got := strings.Join(listBoards(p.Dir), ","); got != "a,broken,fast,weird" {
 		t.Fatalf("목록: %s", got)
+	}
+}
+
+func TestBoardRedis_컬렉션_전체를_읽는_명령은_받지_않고_범위를_정한_읽기만_받는다(t *testing.T) {
+	ok := []string{"GET a", "MGET a b", "HGET h f", "LLEN l", "ZCARD z", "INFO memory", "DBSIZE", "LRANGE l 0 49",
+		"ZRANGE z 10 20 WITHSCORES", "SCAN 0", "SCAN 0 MATCH a:* COUNT 50"}
+	bad := []string{"LRANGE l 0 -1", "LRANGE l 0 50", "LRANGE l -10 -1", "HGETALL h", "SMEMBERS s", "ZRANGE z 0 -1",
+		"ZRANGE z 0 10 BYSCORE", "SCAN 0 COUNT 1000", "SCAN 0 COUNT", "HKEYS h"}
+	for _, q := range ok {
+		if !boardRedisBounded(db.SplitArgs(q)) {
+			t.Errorf("받아야 함: %s", q)
+		}
+	}
+	for _, q := range bad {
+		if boardRedisBounded(db.SplitArgs(q)) {
+			t.Errorf("막아야 함: %s", q)
+		}
+	}
+	p := boardProject(t)
+	panel := boardPanel{Conn: "cache-stg", Query: "HGETALL h", View: "table"}
+	if err := checkPanel(&panel, p, nil, nil); err == nil || err.Error() != "보드에서는 범위를 정한 읽기만: HGETALL" {
+		t.Fatalf("설정 오류: %v", err)
+	}
+}
+
+func TestBoardRedisIntegration_결과는_패널_행_수에서_자른다(t *testing.T) {
+	addr := os.Getenv("DBTUI_TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("DBTUI_TEST_REDIS_ADDR not set")
+	}
+	host, port, _ := strings.Cut(addr, ":")
+	n, err := strconv.Atoi(port)
+	must(t, err)
+	c := db.Conn{Name: "r", UUID: "r", Kind: db.KindRedis, Host: host, Port: n, DB: "0"}
+	clients := db.NewClients()
+	defer clients.Close()
+	keys := strings.TrimSpace(strings.Repeat("board:none ", boardRows+10))
+	r := runPanel(context.Background(), clients, nil, &db.Project{Conns: []db.Conn{c}}, boardPanel{Conn: "r", Query: "MGET " + keys, View: "table"}, true)
+	if r.err != "" || len(r.res.Rows) != boardRows || !r.res.Truncated {
+		t.Fatalf("50행에서 자름: %q %d", r.err, len(r.res.Rows))
 	}
 }
 
