@@ -65,6 +65,7 @@ var cliCommands = []cliCommand{
 	{"status", "db status [-c 접속 …] [--format table|tsv|json] [--prod]", "모든 접속(또는 -c 로 고른 접속)을 동시에 확인해 상태·지연·버전·주요 수치를 찍음(R64.3). prod 는 --prod 일 때만, 하나라도 실패하면 1"},
 	{"flows", "db flows [-f 흐름 …] [--format table|tsv|json] [--prod]", "이벤트 흐름(.dbtui/flows.json: 아웃박스 → SNS → SQS → DLQ·Lambda)을 한 번 풀어 상자마다 한 줄을 찍음(R69). prod 는 --prod 일 때만, 설정 오류·실패가 있으면 1"},
 	{"board", "db board [이름] [--format table|tsv|json] [--prod]", "쿼리 보드(.dbtui/boards/<이름>.json)의 패널을 한 번 돌려 패널마다 한 줄을 찍음(R70). 이름이 없으면 보드 목록, prod 패널은 --prod 일 때만, 실패한 패널이 있으면 1"},
+	{"history", "db history [--conn 접속] [--since 24h] [--format table|tsv|json] · db history show <id>", "실행 기록 목록과 결과 사본(R11.5). db help history"},
 	{"update", "db update [--check] [--version vX.Y.Z] [--force]", "GitHub 릴리스의 최신 판으로 db 를 바꿈(R65). --check 는 새 판이 있으면 10. db help update"},
 	{"conn", "db conn add|edit|rm|test …", "db 전용 접속 추가·고치기·지우기·시험(R59, .dbtui/connections.json). db help conn"},
 }
@@ -208,6 +209,8 @@ func runCLI(ctx context.Context, args []string, stdin io.Reader, stdinTTY bool, 
 		return runConnCLI(ctx, args[1:], stdin, stdinTTY, stdout, stderr)
 	case "update":
 		return runUpdateCLI(ctx, defaultUpdater(), args[1:], stdout, stderr)
+	case "history":
+		return runHistoryCLI(args[1:], stdout, stderr, tty)
 	}
 	if stdinTTY {
 		stdin = nil
@@ -313,6 +316,10 @@ func cliHelp(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(args) > 0 && args[0] == "update" {
 		fmt.Fprint(stdout, updateUsage)
+		return exitOK
+	}
+	if len(args) > 0 && args[0] == "history" {
+		fmt.Fprint(stdout, historyUsage)
 		return exitOK
 	}
 	if len(args) > 0 {

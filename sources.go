@@ -307,23 +307,29 @@ func (m *model) openSourceNode(t *queryTab, n *node) tea.Cmd {
 	c, path, limit := m.conn(n.conn), n.key, openLimit(m.conn(n.conn).Kind)
 	p := pendingRun{tab: t.id, conn: n.conn, readOnly: true, retarget: true,
 		exec: m.sourceExec(c, func(ctx context.Context, b source.Backend) (*db.Result, error) { return b.Open(ctx, path, limit) })}
-	// 미리 보기도 보낸 요청을 Run 꼴 질의로 남겨 정렬·거르기를 서버로 다시 읽을 수 있게 한다(R61.3·R62.3). OpenSearch 는 기록에도 싣는다
+	// 미리 보기도 보낸 요청을 Run 꼴 질의로 남겨 정렬·거르기를 서버로 다시 읽을 수 있게 한다(R61.3·R62.3).
+	// 기록(R11.4)에는 보낸 요청과 같은 질의 글을 싣는다. aws 노드(R67)는 질의가 아니라 싣지 않는다
 	switch c.Kind {
 	case db.KindOpenSearch:
 		p.sql = opensearch.OpenText(path, limit)
 		p.src = &source.Query{Text: p.sql}
 	case db.KindLoki, db.KindGrafana:
 		if q, ok := obs.OpenQuery(c.Kind, path, limit); ok {
-			p.src = &q
+			p.sql, p.src = q.Text, &q
+		} else if uid, metric, ok := strings.Cut(path, "/"); ok && c.Kind == db.KindGrafana {
+			p.sql = "# datasource: " + uid + "\n" + metric // Grafana 의 Prometheus 지표 즉시값
 		}
+	case db.KindPrometheus:
+		p.sql = path // 지표 이름 즉시값
 	// Athena 파티션 테이블은 확인 뒤 `SELECT * FROM "db"."테이블" LIMIT 50` 을 Force 로 보낸다(R68.1)
 	case db.KindDynamoDB, db.KindAthena:
 		q := source.Query{Text: dynamoScanSQL(path), Limit: limit, Force: true}
 		if c.Kind == db.KindAthena {
 			q.Text = athena.OpenSQL(path, limit)
 		}
+		p.sql = q.Text
 		retry := p
-		retry.sql, retry.src = q.Text, &q
+		retry.src = &q
 		retry.exec = m.sourceExec(c, sourceRun(q))
 		p.retry = &retry
 	}

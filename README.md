@@ -12,6 +12,7 @@ The behavior is specified rule by rule in [SPEC.md](SPEC.md). The UI text and th
 - In-place editing of single-table results (preview SQL before submit, undo of the last submit), paste from spreadsheets, CSV import
 - Server-side table view with a DataGrip-style WHERE / ORDER BY bar (column completion, `/` short filters), paging, exact count; follow foreign keys in both directions
 - Linked rows (`Ctrl+B` on a result cell, or right-click → `연결된 곳 찾기`) and `db linked`: find where a value such as `user_id = 1315` appears in other tables even without foreign keys, by column naming (`user_id`, `*_user_id`, `users.id`) across the same database and the other PostgreSQL connections of the same group and environment (a read replica such as `app-stg-read` is skipped when the writer for the same database is searched too). Only columns that lead an index are counted (up to 100+ rows, 2 s per table, read-only); `Enter` opens the table view filtered to that value. The value is never put in tab titles, history or the session
+- History (`Ctrl+H`) with result snapshots: every run is logged with its connection, row count and time, and table/text results (first 1,000 rows, up to 1 MiB) are kept as gzip snapshots for 30 days / 200 MiB. `Enter` reopens a snapshot read-only in a new tab (`r` re-runs it), `e` puts the SQL in the editor, filter by text, connection, `오늘`/`today`, `어제`/`yesterday`. Prod results are not kept unless `DB_HISTORY_PROD=1`; statements with secrets never are. `db history` lists and prints them
 - Command palette (`Ctrl+P`) that runs any action or jumps to any table or connection, frequently used actions and recently opened tables first
 - Remembers per table the last sort, WHERE (not on prod) and column widths, `↑`/`↓` recall in the `/` filter and WHERE inputs, and which tree nodes were expanded (`DB_RECENT=0` turns this off)
 - EXPLAIN / EXPLAIN ANALYZE as a plan tree, activity/locks/table sizes, cancel or terminate backends
@@ -180,7 +181,8 @@ Press `F1` for every key binding, or `Ctrl+P` for the command palette. Outside t
 | `Alt+F` · tree `F` on an SNS topic (with `DB_ALLOW_BILLED=1`) | event flows (see Flows) |
 | `Alt+B` (⌘⇧B) | query boards (see Boards) |
 | `Ctrl+]` | Loki/Prometheus range 15m · 1h · 6h · 24h · 7d (per tab) |
-| `Ctrl+H` | history |
+| `Ctrl+H` | history (`Enter` opens the ◆ snapshot in a read-only tab, else the editor; `e` editor; `d` delete snapshot) |
+| result `r` in a snapshot tab | re-run that SQL on its connection |
 | tree `Enter` on a table | table view (`w`·`/` WHERE, `O` ORDER BY, `[` `]` pages) |
 | result `Ctrl+K` (⌘K) · right-click | copy menu: target × format, remembers the last format |
 | result `Ctrl+B` (⌘B) | linked rows: other tables (and same-group, same-environment connections) holding the cell value; `Enter` opens one |
@@ -304,6 +306,8 @@ db linked -c app-stg --column user_id --value 1315 --format json
 db status --format json
 db flows --format json
 db board shop-ops --format json
+db history --conn app-stg --since 24h
+db history show 20261116-011530-a3f9c1 --format json
 db conn add app-stg2 --url 'postgres://app_ro:pw@db.stg.example.internal:5432/app'
 ```
 
@@ -348,9 +352,11 @@ claude mcp add db -- db mcp -p ~/work/db-project --max-rows 100
 | `DB_RECENT=0` | do not read or write `recent.json` (frequent palette actions, recent connections, per-table sort/WHERE/widths, input recall, tree expansion) |
 | `DB_CLIPBOARD=osc52`/`system`/`both` | where copies go: OSC 52 only, the system clipboard only (`pbcopy`, `clip` through `cmd.exe` with the UTF-8 code page on WSL and Windows, `wl-copy`/`xclip`), or both (default). Copies over 10 MB are refused; export with `e`/`E` |
 | `DB_ALLOW_BILLED=1` | allow AWS calls billed per request or per byte scanned (SQS, SNS, S3, Athena, DynamoDB data reads). Off by default; only `1` turns it on |
+| `DB_HISTORY_RESULTS=0` | do not keep result snapshots with history (SQL, rows and time are still logged) |
+| `DB_HISTORY_PROD=1` | also keep result snapshots of prod connections (off by default; only `1` turns it on) |
 | `DB_UPDATE_CHECK=0` | do not check GitHub for a new release at startup |
 | `GITHUB_TOKEN` | sent with `db update` and the startup check to GitHub API requests (higher rate limit) |
-| `XDG_STATE_HOME` | where history, session, seen tips, recent items, parameter values, undo log and the last update check live (default `~/.local/state/db/`) |
+| `XDG_STATE_HOME` | where history, session, result snapshots (`db/results/`), seen tips, recent items, parameter values, undo log and the last update check live (default `~/.local/state/db/`) |
 
 ## Development
 
