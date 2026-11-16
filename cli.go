@@ -994,7 +994,8 @@ var sourceCmdKinds = map[string][]db.Kind{
 }
 
 // runSourceCommand 는 저장소 접속의 query·logs·metrics·tables 를 Backend 로 돌린다. 다른 명령은 사용법 오류다.
-// prod 는 읽기도 --prod 가 필요하고(R58.2), 쓰기로 보이는 질의(ErrWrite)와 --force 없는 비싼 질의는 3이다(R60.2).
+// prod 는 읽기도 --prod 가 필요하고(R58.2), 쓰기로 보이는 질의(ErrWrite)·--force 없는 비싼 질의(R60.2)·
+// DB_ALLOW_BILLED 없는 요금 조회(ErrBilled, R72)는 3이다.
 func runSourceCommand(ctx context.Context, o cliOpts, proj *db.Project, kind db.Kind, stdin io.Reader) ([]cliResult, error) {
 	switch o.cmd {
 	case "query", "tables":
@@ -1034,6 +1035,9 @@ func runSourceCommand(ctx context.Context, o cliOpts, proj *db.Project, kind db.
 	var res *db.Result
 	if o.cmd == "tables" {
 		nodes, err := b.Children(ctx, "")
+		if errors.Is(err, source.ErrBilled) {
+			return nil, refused(err.Error())
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1045,6 +1049,8 @@ func runSourceCommand(ctx context.Context, o cliOpts, proj *db.Project, kind db.
 		switch {
 		case errors.Is(err, source.ErrWrite):
 			return nil, refused(msgReadOnlySource)
+		case errors.Is(err, source.ErrBilled):
+			return nil, refused(err.Error())
 		case errors.Is(err, source.ErrNeedsConfirm):
 			return nil, refused(sourceErrText(err) + " (--force)")
 		}

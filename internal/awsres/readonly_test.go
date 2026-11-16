@@ -69,3 +69,27 @@ func TestReadOnly_검사는_쓰기_호출을_실제로_잡는다(t *testing.T) {
 		}
 	}
 }
+
+// 대시보드 확인(probe.go)과 흐름 풀이(flow.go)는 요금 허용(R72)과 상관없이 늘 돈다. 그래서 요청마다 요금이 붙는
+// SNS·SQS·S3 클라이언트를 소스에서 아예 쓰지 않아야 한다. 덫 가짜로 본 시험(Probe·QueueFlows)과 함께 새 호출이 끼는 것을 막는다.
+var billedClient = regexp.MustCompile(`\bb\.(sns|sqs|s3)\b|\b(sns|sqs|s3)\.New\w*Paginator\(`)
+
+func TestReadOnly_늘_도는_대시보드와_흐름은_요금_서비스_클라이언트를_쓰지_않는다(t *testing.T) {
+	for _, f := range []string{"probe.go", "flow.go"} {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			code, _, _ := strings.Cut(line, "//")
+			if m := billedClient.FindString(code); m != "" {
+				t.Errorf("%s:%d: 요금 서비스 호출 %s", f, i+1, m)
+			}
+		}
+	}
+	for _, line := range []string{`b.sqs.GetQueueAttributes(ctx, in)`, `sns.NewListTopicsPaginator(b.sns, in)`, `p := s3.NewListObjectsV2Paginator(c, in)`} {
+		if billedClient.FindString(line) == "" {
+			t.Errorf("못 잡음: %s", line)
+		}
+	}
+}

@@ -24,36 +24,40 @@ import (
 // ─── R69 이벤트 흐름 ───
 
 const flowsJSON = `[
-	{"name":"hub","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at"},"aws":"aws-stg","topic":"stg-hub"},
-	{"name":"bad","aws":"shop-stg","topic":"x"}
+	{"name":"hub","outbox":{"conn":"shop-stg","table":"public.t_outbox","type":"event_type","retry":"retry_count","due":"check_needed_at"},"aws":"aws-stg","topic":"stg-hub",
+		"queues":[{"name":"q1","dlq":"q1-dlq"},{"name":"q2"}]},
+	{"name":"bad","aws":"shop-stg","queues":[{"name":"x"}]}
 ]`
 
-// sampleTopic 은 큐 둘(첫째는 DLQ 4건·Lambda 하나, 둘째는 비어 있음)과 https 구독 하나다.
-func sampleTopic() *awsres.Topic {
-	return &awsres.Topic{Arn: "arn:aws:sns:ap-northeast-2:1:stg-hub", Name: "stg-hub", Subs: []awsres.Sub{
-		{Protocol: "sqs", Endpoint: "q1", Queue: &awsres.Queue{Name: "q1", Visible: "0", InFlight: "2", Delayed: "0", DLQ: "q1-dlq", DLQArn: "arn:aws:sqs:ap-northeast-2:999:q1-dlq", DLQCount: "4",
-			Lambdas: []awsres.Mapping{{Function: "worker", State: "Enabled", LastResult: "OK"}}}},
-		{Protocol: "sqs", Endpoint: "q2", Queue: &awsres.Queue{Name: "q2", Visible: "1", InFlight: "0", Delayed: "0"}},
-		{Protocol: "https", Endpoint: "https://hook.example.com"},
-	}}
+const (
+	q1Arn  = "arn:aws:sqs:ap-northeast-2:111:q1"
+	dlqArn = "arn:aws:sqs:ap-northeast-2:999:q1-dlq"
+)
+
+// sampleQueues 는 hubFlow 의 큐 둘을 푼 결과다. 첫째는 DLQ·Lambda 하나, 둘째는 매핑이 없다. 수치는 없다(R72).
+func sampleQueues() []awsres.Queue {
+	return []awsres.Queue{
+		{Name: "q1", Arn: q1Arn, DLQ: "q1-dlq", DLQArn: dlqArn, Lambdas: []awsres.Mapping{{Function: "worker", State: "Enabled", LastResult: "OK"}}},
+		{Name: "q2", Arn: "arn:aws:sqs:ap-northeast-2:111:q2"},
+	}
 }
 
-// fakeFlow 는 아웃박스·토픽 풀이를 바꿔 끼우고 부른 횟수를 센다. 타이머는 1ms 다.
-func fakeFlow(t *testing.T, stat flows.Stat, topic *awsres.Topic, topicErr error) (*atomic.Int32, *atomic.Int32) {
+// fakeFlow 는 아웃박스·큐 풀이를 바꿔 끼우고 부른 횟수를 센다. 타이머는 1ms 다.
+func fakeFlow(t *testing.T, stat flows.Stat, queues []awsres.Queue, awsErr error) (*atomic.Int32, *atomic.Int32) {
 	t.Helper()
-	var no, nt atomic.Int32
-	oldO, oldT, oldE := flowOutbox, flowTopic, flowEvery
+	var no, nq atomic.Int32
+	oldO, oldQ, oldE := flowOutbox, flowQueues, flowEvery
 	flowOutbox = func(context.Context, *db.Clients, db.Conn, flows.Outbox) (flows.Stat, error) {
 		no.Add(1)
 		return stat, nil
 	}
-	flowTopic = func(context.Context, *sourcePool, db.Conn, string) (*awsres.Topic, error) {
-		nt.Add(1)
-		return topic, topicErr
+	flowQueues = func(context.Context, *sourcePool, db.Conn, []awsres.QueueRef) ([]awsres.Queue, error) {
+		nq.Add(1)
+		return queues, awsErr
 	}
 	flowEvery = time.Millisecond
-	t.Cleanup(func() { flowOutbox, flowTopic, flowEvery = oldO, oldT, oldE })
-	return &no, &nt
+	t.Cleanup(func() { flowOutbox, flowQueues, flowEvery = oldO, oldQ, oldE })
+	return &no, &nq
 }
 
 func writeFlowsFile(t *testing.T, dir, body string) {
@@ -111,15 +115,15 @@ func plain(lines []flowLine) string {
 }
 
 func hubFlow() flows.Flow {
-	return flows.Flow{Name: "hub", AWS: "aws-stg", Topic: "stg-hub",
+	return flows.Flow{Name: "hub", AWS: "aws-stg", Topic: "stg-hub", Queues: []flows.Queue{{Name: "q1", DLQ: "q1-dlq"}, {Name: "q2"}},
 		Outbox: &flows.Outbox{Conn: "shop-stg", Table: "public.t_outbox", Type: "event_type", Retry: "retry_count", Due: "check_needed_at"}}
 }
 
 // ─── 상자 ───
 
-func TestFlowBoxes_아웃박스_SNS_큐_DLQ_Lambda_순서와_경고(t *testing.T) {
+func TestFlowBoxes_아웃박스_SNS_큐_DLQ_Lambda_순서이고_SNS_큐_DLQ_는_수치가_없다(t *testing.T) {
 	st := flows.Stat{Pending: 120, Retry: 3, Stale: 1}
-	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, topic: sampleTopic()}, true)
+	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, queues: sampleQueues()}, true)
 	var got []string
 	for _, b := range boxes {
 		w := ""
@@ -130,21 +134,44 @@ func TestFlowBoxes_아웃박스_SNS_큐_DLQ_Lambda_순서와_경고(t *testing.T
 	}
 	want := []string{
 		"outbox:shop-stg public.t_outbox:대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1!",
-		"sns:stg-hub:구독 3",
-		"sqs:q1:대기 0 · 처리 중 2 · 지연 0",
-		"dlq:q1-dlq:4!",
+		"sns:stg-hub:",
+		"sqs:q1:",
+		"dlq:q1-dlq:",
 		"lambda:worker:Enabled · OK",
-		"sqs:q2:대기 1 · 처리 중 0 · 지연 0",
-		"sub:https://hook.example.com:https",
+		"sqs:q2:",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("상자:\n%s", strings.Join(got, "\n"))
 	}
-	if boxes[2].path != "sqs/q1" || boxes[4].path != "lambda/worker" || boxes[1].path != "sns/arn:aws:sns:ap-northeast-2:1:stg-hub" || boxes[6].path != "" {
+	if boxes[2].path != "sqs/"+q1Arn || boxes[4].path != "lambda/worker" || boxes[1].path != "" {
 		t.Fatalf("열 경로: %+v", boxes)
 	}
-	if boxes[3].path != "sqs/arn:aws:sqs:ap-northeast-2:999:q1-dlq" {
+	if boxes[3].path != "sqs/"+dlqArn {
 		t.Fatalf("DLQ 는 다른 계정일 수 있어 ARN 으로 연다: %q", boxes[3].path)
+	}
+	// 토픽이 ARN 이면 이름은 끝 마디이고 구독 표(요금 허용 때만 열림)를 연다
+	f := hubFlow()
+	f.Topic = "arn:aws:sns:ap-northeast-2:111:stg-hub"
+	if b := flowBoxes(f, flowSnap{}, true)[1]; b.name != "stg-hub" || b.path != "sns/"+f.Topic || b.conn != "aws-stg" {
+		t.Fatalf("ARN 토픽: %+v", b)
+	}
+}
+
+func TestFlowBoxes_큐_상자는_결과_전에도_설정_순서대로_이름을_보이고_계정_오류는_큐마다_붙는다(t *testing.T) {
+	wait := flowBoxes(hubFlow(), flowSnap{}, false)
+	var got []string
+	for _, b := range wait {
+		got = append(got, b.stage+":"+b.name+":"+b.metrics)
+	}
+	if want := "outbox:shop-stg public.t_outbox:…\nsns:stg-hub:\nsqs:q1:…\ndlq:q1-dlq:\nsqs:q2:…"; strings.Join(got, "\n") != want {
+		t.Fatalf("결과 전:\n%s", strings.Join(got, "\n"))
+	}
+	if wait[2].path != "sqs/q1" || wait[3].path != "sqs/q1-dlq" {
+		t.Fatalf("풀기 전 경로는 설정 이름: %q %q", wait[2].path, wait[3].path)
+	}
+	bad := flowBoxes(hubFlow(), flowSnap{awsErr: "aws sts:GetCallerIdentity: ExpiredToken"}, true)
+	if !bad[2].failed() || !bad[4].failed() || bad[1].failed() || boxLabel(bad[2]) != "[SQS q1 | 오류: aws sts:GetCallerIdentity: ExpiredToken]" {
+		t.Fatalf("계정 오류: %+v", bad)
 	}
 }
 
@@ -158,9 +185,8 @@ func TestFlowBoxes_Lambda_는_꺼졌거나_문제면_경고이고_처리할_것_
 		{"Disabled", "OK", true},
 		{"Enabled", "PROBLEM: Function call failed", true},
 	} {
-		tp := &awsres.Topic{Name: "t", Subs: []awsres.Sub{{Protocol: "sqs", Queue: &awsres.Queue{Name: "q", Visible: "0", InFlight: "0", Delayed: "0",
-			Lambdas: []awsres.Mapping{{Function: "f", State: c.state, LastResult: c.last}}}}}}
-		boxes := flowBoxes(flows.Flow{Name: "x", AWS: "a", Topic: "t"}, flowSnap{topic: tp}, true)
+		qs := []awsres.Queue{{Name: "q", Lambdas: []awsres.Mapping{{Function: "f", State: c.state, LastResult: c.last}}}}
+		boxes := flowBoxes(flows.Flow{Name: "x", AWS: "a", Queues: []flows.Queue{{Name: "q"}}}, flowSnap{queues: qs}, true)
 		if b := boxes[len(boxes)-1]; b.stage != "lambda" || b.warn != c.warn {
 			t.Errorf("%s %s: %+v", c.state, c.last, b)
 		}
@@ -172,12 +198,8 @@ func TestFlowBoxes_설정_오류와_아직_결과_없음과_prod_미확인(t *te
 	if len(bad) != 1 || bad[0].err != "설정 오류: topic is empty" || !bad[0].failed() {
 		t.Fatalf("설정 오류: %+v", bad)
 	}
-	wait := flowBoxes(hubFlow(), flowSnap{}, false)
-	if len(wait) != 2 || wait[0].metrics != "…" || wait[1].metrics != "…" {
-		t.Fatalf("결과 없음: %+v", wait)
-	}
-	prod := flowBoxes(hubFlow(), flowSnap{outboxNote: dashProdHint, topicNote: dashProdHint}, true)
-	if prod[0].note != dashProdHint || prod[0].failed() || boxLabel(prod[1]) != "[SNS stg-hub | --prod 로 확인]" {
+	prod := flowBoxes(hubFlow(), flowSnap{outboxNote: dashProdHint, awsNote: dashProdHint}, true)
+	if prod[0].note != dashProdHint || prod[0].failed() || boxLabel(prod[1]) != "[SNS stg-hub]" || boxLabel(prod[2]) != "[SQS q1 | --prod 로 확인]" {
 		t.Fatalf("prod: %+v", prod)
 	}
 }
@@ -186,38 +208,44 @@ func TestFlowBoxes_설정_오류와_아직_결과_없음과_prod_미확인(t *te
 
 func TestFlowLayout_넓으면_왼쪽에서_오른쪽으로_DLQ_는_큐_아래_가지다(t *testing.T) {
 	st := flows.Stat{Pending: 120, Retry: 3, Stale: 1}
-	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, topic: sampleTopic()}, true)
+	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, queues: sampleQueues()}, true)
 	head := "[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1] ──▶ [SNS stg-hub]"
 	pad := strings.Repeat(" ", ansi.StringWidth(head))
 	want := strings.Join([]string{
-		head + " ─┬─▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]",
-		pad + "  │   └─ DLQ q1-dlq 4",
-		pad + "  ├─▶ [SQS q2 | 대기 1 · 처리 중 0]",
-		pad + "  └─▶ [https https://hook.example.com]",
+		head + " ─┬─▶ [SQS q1] ──▶ [λ worker OK]",
+		pad + "  │   └─ DLQ q1-dlq",
+		pad + "  └─▶ [SQS q2]",
 	}, "\n")
 	if got := plain(flowLayout(boxes, 200)); got != want {
 		t.Fatalf("가로:\n%s\n\nwant:\n%s", got, want)
 	}
-	// 구독이 하나면 갈래 없이 잇는다
-	one := flowBoxes(flows.Flow{Name: "x", AWS: "a", Topic: "t"}, flowSnap{topic: &awsres.Topic{Name: "t", Subs: sampleTopic().Subs[:1]}}, true)
-	want = "[SNS t] ──▶ [SQS q1 | 대기 0 · 처리 중 2] ──▶ [λ worker OK]\n" + strings.Repeat(" ", len("[SNS t]")) + "     └─ DLQ q1-dlq 4"
+	// 큐가 하나면 갈래 없이 잇는다
+	one := flowBoxes(flows.Flow{Name: "x", AWS: "a", Topic: "t", Queues: []flows.Queue{{Name: "q1", DLQ: "q1-dlq"}}}, flowSnap{queues: sampleQueues()[:1]}, true)
+	want = "[SNS t] ──▶ [SQS q1] ──▶ [λ worker OK]\n" + strings.Repeat(" ", len("[SNS t]")) + "     └─ DLQ q1-dlq"
 	if got := plain(flowLayout(one, 200)); got != want {
-		t.Fatalf("구독 하나:\n%s", got)
+		t.Fatalf("큐 하나:\n%s", got)
+	}
+}
+
+func TestFlowLayout_아웃박스_토픽_없이_큐만_있으면_큐가_줄_맨_앞이다(t *testing.T) {
+	f := flows.Flow{Name: "x", AWS: "a", Queues: []flows.Queue{{Name: "q1", DLQ: "q1-dlq"}, {Name: "q2"}}}
+	want := "[SQS q1] ──▶ [λ worker OK]\n  └─ DLQ q1-dlq\n[SQS q2]"
+	if got := plain(flowLayout(flowBoxes(f, flowSnap{queues: sampleQueues()}, true), 200)); got != want {
+		t.Fatalf("큐만:\n%s", got)
 	}
 }
 
 func TestFlowLayout_좁으면_위에서_아래로_쌓는다(t *testing.T) {
 	st := flows.Stat{Pending: 120, Retry: 3, Stale: 1}
-	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, topic: sampleTopic()}, true)
+	boxes := flowBoxes(hubFlow(), flowSnap{outbox: &st, queues: sampleQueues()}, true)
 	want := strings.Join([]string{
 		"[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1]",
 		"  ▼",
 		"[SNS stg-hub]",
-		"  ├─▶ [SQS q1 | 대기 0 · 처리 중 2]",
-		"  │     ├─ DLQ q1-dlq 4",
+		"  ├─▶ [SQS q1]",
+		"  │     ├─ DLQ q1-dlq",
 		"  │     └─▶ [λ worker OK]",
-		"  ├─▶ [SQS q2 | 대기 1 · 처리 중 0]",
-		"  └─▶ [https https://hook.example.com]",
+		"  └─▶ [SQS q2]",
 	}, "\n")
 	if got := plain(flowLayout(boxes, 80)); got != want {
 		t.Fatalf("세로:\n%s", got)
@@ -234,7 +262,7 @@ func TestFlowLayout_좁으면_위에서_아래로_쌓는다(t *testing.T) {
 func TestFlowView_낮으면_고른_흐름과_고른_상자가_보이게_내린다(t *testing.T) {
 	m := flowModel(t)
 	st := flows.Stat{Pending: 120, Retry: 3, Stale: 1}
-	s := &flowState{snaps: map[string]flowSnap{"hub": {outbox: &st, topic: sampleTopic()}}, cursor: 7, box: 6}
+	s := &flowState{snaps: map[string]flowSnap{"hub": {outbox: &st, queues: sampleQueues()}}, cursor: 7, box: 5}
 	for i := range 7 {
 		s.list = append(s.list, flows.Flow{Name: fmt.Sprintf("f%d", i), Err: "x"})
 	}
@@ -245,14 +273,14 @@ func TestFlowView_낮으면_고른_흐름과_고른_상자가_보이게_내린�
 		if n := strings.Count(v, "\n") + 1; n != 5 || !strings.Contains(v, "▸ ● hub") && !strings.Contains(v, "▸ ! hub") {
 			t.Fatalf("w=%d 고른 흐름이 보인다 (%d줄):\n%s", w, n, v)
 		}
-		if !strings.Contains(v, "hook.example.com") {
-			t.Fatalf("w=%d 고른 상자(https 구독)가 보인다:\n%s", w, v)
+		if !strings.Contains(v, "[SQS q2]") {
+			t.Fatalf("w=%d 고른 상자(둘째 큐)가 보인다:\n%s", w, v)
 		}
 	}
 }
 
 func TestFlow_Alt_F_와_팔레트는_흐름_탭을_하나만_열고_설정_오류를_보인다(t *testing.T) {
-	no, nt := fakeFlow(t, flows.Stat{Pending: 120, Retry: 3, Stale: 1}, sampleTopic(), nil)
+	no, nt := fakeFlow(t, flows.Stat{Pending: 120, Retry: 3, Stale: 1}, sampleQueues(), nil)
 	m := flowModel(t)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f"), Alt: true})
 	if flowTabs(m) != 1 || m.cur().flow == nil || m.cur().title != "흐름" || m.focus != fResult {
@@ -266,7 +294,7 @@ func TestFlow_Alt_F_와_팔레트는_흐름_탭을_하나만_열고_설정_오�
 		t.Fatalf("설정 오류 흐름은 풀지 않는다: %d %d", no.Load(), nt.Load())
 	}
 	v := ansi.Strip(m.View())
-	for _, want := range []string{"! hub", "✕ bad", "[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1]", "DLQ q1-dlq 4"} {
+	for _, want := range []string{"! hub", "✕ bad", "[아웃박스 shop-stg public.t_outbox | 대기 120 · 재시도 3 · 한도 소진 0 · 오래됨 1]", "DLQ q1-dlq", "hub  " + flowNoMetrics} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("%q 가 없다:\n%s", want, v)
 		}
@@ -283,7 +311,7 @@ func TestFlow_Alt_F_와_팔레트는_흐름_탭을_하나만_열고_설정_오�
 }
 
 func TestFlow_flows_json_이_깨졌거나_없어도_탭을_연다(t *testing.T) {
-	fakeFlow(t, flows.Stat{}, sampleTopic(), nil)
+	fakeFlow(t, flows.Stat{}, sampleQueues(), nil)
 	m := flowModel(t)
 	writeFlowsFile(t, m.proj.Dir, `[{`)
 	m.openFlows(nil)
@@ -298,9 +326,9 @@ func TestFlow_flows_json_이_깨졌거나_없어도_탭을_연다(t *testing.T) 
 }
 
 func TestFlow_닫으면_진행_중인_풀이를_취소하고_늦은_결과는_버린다(t *testing.T) {
-	fakeFlow(t, flows.Stat{}, sampleTopic(), nil)
+	fakeFlow(t, flows.Stat{}, sampleQueues(), nil)
 	var seen atomic.Pointer[context.Context]
-	flowTopic = func(ctx context.Context, _ *sourcePool, _ db.Conn, _ string) (*awsres.Topic, error) {
+	flowQueues = func(ctx context.Context, _ *sourcePool, _ db.Conn, _ []awsres.QueueRef) ([]awsres.Queue, error) {
 		seen.Store(&ctx)
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -325,7 +353,7 @@ func TestFlow_닫으면_진행_중인_풀이를_취소하고_늦은_결과는_�
 }
 
 func TestFlow_Enter_는_상자의_상세를_새_결과_탭에_연다(t *testing.T) {
-	fakeFlow(t, flows.Stat{Pending: 1, Retry: 0, Stale: 0}, sampleTopic(), nil)
+	fakeFlow(t, flows.Stat{Pending: 1, Retry: 0, Stale: 0}, sampleQueues(), nil)
 	f := newFake()
 	registerFake(t, f)
 	m := flowModel(t)
@@ -339,7 +367,7 @@ func TestFlow_Enter_는_상자의_상세를_새_결과_탭에_연다(t *testing.
 		t.Fatalf("새 탭에 aws 접속으로 연다: conn=%d", m.cur().conn)
 	}
 	drive(m, cmd)
-	if _, opens, _ := f.snapshot(); len(opens) != 1 || opens[0] != "sqs/q1" {
+	if _, opens, _ := f.snapshot(); len(opens) != 1 || opens[0] != "sqs/"+q1Arn {
 		t.Fatalf("큐 Open: %v", opens)
 	}
 	// 아웃박스 상자는 종류별 수 질의를 READ ONLY 로 보낸다
@@ -359,14 +387,8 @@ func TestFlow_Enter_는_상자의_상세를_새_결과_탭에_연다(t *testing.
 	}
 }
 
-func TestFlow_트리의_SNS_토픽에서_F_는_그_토픽의_흐름을_연다(t *testing.T) {
-	_, nt := fakeFlow(t, flows.Stat{}, sampleTopic(), nil)
-	var asked atomic.Value
-	flowTopic = func(_ context.Context, _ *sourcePool, c db.Conn, topic string) (*awsres.Topic, error) {
-		nt.Add(1)
-		asked.Store(c.Name + " " + topic)
-		return sampleTopic(), nil
-	}
+func TestFlow_트리의_SNS_토픽에서_F_는_그_토픽_이름만의_흐름을_열고_AWS_를_묻지_않는다(t *testing.T) {
+	_, nq := fakeFlow(t, flows.Stat{}, sampleQueues(), nil)
 	f := newFake()
 	arn := "arn:aws:sns:ap-northeast-2:1:orders"
 	f.children[""] = []source.Node{{Name: "orders", Path: "sns/" + arn, HasChildren: true, Openable: true},
@@ -382,24 +404,32 @@ func TestFlow_트리의_SNS_토픽에서_F_는_그_토픽의_흐름을_연다(t 
 	}
 	m.setFocus(fTree)
 	m.selectNode(childNamed(cn, "orders"))
+	runs0, opens0, _ := f.snapshot()
 	_, cmd := m.Update(key("F"))
 	if flowTabs(m) != 1 {
 		t.Fatal("토픽 줄 F 는 흐름 탭을 연다")
 	}
 	feedFlow(m, cmd)
 	s := m.cur().flow
-	if len(s.list) != 3 || s.list[s.cursor].Name != "orders · aws-stg" || asked.Load() != "aws-stg "+arn {
-		t.Fatalf("트리 흐름: %+v cursor=%d asked=%v", s.list, s.cursor, asked.Load())
+	if len(s.list) != 3 || s.list[s.cursor].Name != "orders · aws-stg" {
+		t.Fatalf("트리 흐름: %+v cursor=%d", s.list, s.cursor)
+	}
+	// hub 만 큐를 푼다. 트리에서 연 흐름은 토픽 이름뿐이라 AWS 에 아무것도 묻지 않는다(R72)
+	if runs, opens, _ := f.snapshot(); nq.Load() != 1 || len(runs) != len(runs0) || len(opens) != len(opens0) {
+		t.Fatalf("큐 풀이 %d, 실행 %d → %d, 열기 %d → %d", nq.Load(), len(runs0), len(runs), len(opens0), len(opens))
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "[SNS orders]") {
+		t.Fatalf("토픽 상자:\n%s", v)
 	}
 }
 
 // ─── 대시보드 카드 ───
 
-func TestDash_DLQ_쌓인_큐와_아웃박스_한도_소진_카드를_더한다(t *testing.T) {
+func TestDash_아웃박스_한도_소진_카드를_더하고_SQS_기반_DLQ_카드는_없다(t *testing.T) {
 	fakeFlow(t, flows.Stat{Pending: 9, Retry: 3, Stale: -1, Exhausted: 2}, nil, nil)
 	fakeProbe(t, func(c db.Conn) db.Health {
 		if c.Kind == db.KindAWS {
-			return db.Health{OK: true, Metrics: []db.Metric{{Name: "큐", Value: "10"}, {Name: awsres.MetricDLQ, Value: "2 (앞 200개)", Warn: true}}}
+			return db.Health{OK: true, Metrics: []db.Metric{{Name: "Lambda", Value: "86"}, {Name: "매핑 꺼짐", Value: "2", Warn: true}, {Name: "실패", Value: "1", Warn: true}}}
 		}
 		return healthy(c)
 	})
@@ -411,12 +441,12 @@ func TestDash_DLQ_쌓인_큐와_아웃박스_한도_소진_카드를_더한다(t
 	}
 	feedFlow(m, cmd)
 	s := m.dashSum(m.cur().dash)
-	if s.aws != 2 || s.dlq != 4 || s.outboxes != 1 || s.exhausted != 2 {
+	if s.outboxes != 1 || s.exhausted != 2 {
 		t.Fatalf("요약: %+v", s)
 	}
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, "DLQ 쌓인 큐") || !strings.Contains(v, "아웃박스 한도 소진") || strings.Contains(v, "아웃박스 재시도") {
-		t.Fatalf("카드가 없다:\n%s", v)
+	if strings.Contains(v, "DLQ 쌓인 큐") || !strings.Contains(v, "아웃박스 한도 소진") || !strings.Contains(v, "Lambda 86 · 매핑 꺼짐 2 · 실패 1") {
+		t.Fatalf("카드·수치:\n%s", v)
 	}
 	// 흐름이 없으면 아웃박스 카드도 없다
 	must(t, os.Remove(filepath.Join(m.proj.Dir, ".dbtui", "flows.json")))
@@ -450,14 +480,14 @@ func flowCLIProject(t *testing.T) string {
 	_, err = db.AddConn(dir, db.Conn{Name: "aws-prod", Kind: db.KindAWS, Region: "ap-northeast-2"})
 	must(t, err)
 	writeFlowsFile(t, dir, `[
-		{"name":"hub","outbox":{"conn":"app-stg","table":"t_outbox","type":"event_type","retry":"retry_count"},"aws":"aws-stg","topic":"stg-hub"},
-		{"name":"live","outbox":{"conn":"app-prod","table":"t_outbox","type":"event_type"},"aws":"aws-prod","topic":"prod-hub"}
+		{"name":"hub","outbox":{"conn":"app-stg","table":"t_outbox","type":"event_type","retry":"retry_count"},"aws":"aws-stg","topic":"stg-hub","queues":[{"name":"q1","dlq":"q1-dlq"},{"name":"q2"}]},
+		{"name":"live","outbox":{"conn":"app-prod","table":"t_outbox","type":"event_type"},"aws":"aws-prod","topic":"prod-hub","queues":[{"name":"pq"}]}
 	]`)
 	return dir
 }
 
 func TestFlowCLI_json_은_상자마다_한_줄이고_prod_는_묻지_않는다(t *testing.T) {
-	no, nt := fakeFlow(t, flows.Stat{Pending: 5, Retry: 1, Stale: -1}, sampleTopic(), nil)
+	no, nt := fakeFlow(t, flows.Stat{Pending: 5, Retry: 1, Stale: -1}, sampleQueues(), nil)
 	dir := flowCLIProject(t)
 	code, out, errw := runCLITest(t, "", "flows", "-p", dir, "--format", "json")
 	if code != exitOK {
@@ -466,16 +496,25 @@ func TestFlowCLI_json_은_상자마다_한_줄이고_prod_는_묻지_않는다(t
 	var rows []flowRow
 	must(t, json.Unmarshal([]byte(out), &rows))
 	if len(rows) != 9 || no.Load() != 1 || nt.Load() != 1 {
-		t.Fatalf("줄 %d, 아웃박스 %d, 토픽 %d: %s", len(rows), no.Load(), nt.Load(), out)
+		t.Fatalf("줄 %d, 아웃박스 %d, 큐 %d: %s", len(rows), no.Load(), nt.Load(), out)
 	}
 	if r := rows[0]; r.Flow != "hub" || r.Stage != "outbox" || r.Metrics != "대기 5 · 재시도 1 · 한도 소진 0" || !r.Warn {
 		t.Fatalf("아웃박스 줄: %+v", r)
 	}
-	if r := rows[3]; r.Stage != "dlq" || r.Name != "q1-dlq" || r.Metrics != "4" || !r.Warn {
-		t.Fatalf("DLQ 줄: %+v", r)
+	// SNS·큐·DLQ 줄은 수치가 비어 있다(요금이 붙어 묻지 않음, R72)
+	for i, stage := range []string{"sns", "sqs", "dlq"} {
+		if r := rows[i+1]; r.Stage != stage || r.Metrics != "" || r.Warn {
+			t.Fatalf("%s 줄: %+v", stage, r)
+		}
 	}
-	if r := rows[7]; r.Flow != "live" || r.Stage != "outbox" || r.Note != dashProdHint || r.Error != "" {
+	if r := rows[4]; r.Stage != "lambda" || r.Name != "worker" || r.Metrics != "Enabled · OK" {
+		t.Fatalf("Lambda 줄: %+v", r)
+	}
+	if r := rows[6]; r.Flow != "live" || r.Stage != "outbox" || r.Note != dashProdHint || r.Error != "" {
 		t.Fatalf("prod 줄: %+v", r)
+	}
+	if r := rows[8]; r.Flow != "live" || r.Stage != "sqs" || r.Name != "pq" || r.Note != dashProdHint {
+		t.Fatalf("prod 큐 줄: %+v", r)
 	}
 	// -f 로 고르고 --prod 면 prod 도 묻는다
 	code, out, _ = runCLITest(t, "", "flows", "-p", dir, "-f", "live", "--prod", "--format", "tsv")
@@ -485,14 +524,14 @@ func TestFlowCLI_json_은_상자마다_한_줄이고_prod_는_묻지_않는다(t
 }
 
 func TestFlowCLI_실패와_설정_오류는_1_이고_없는_흐름은_2다(t *testing.T) {
-	fakeFlow(t, flows.Stat{}, nil, errors.New("aws sns:ListTopics: ExpiredToken: expired"))
+	fakeFlow(t, flows.Stat{}, nil, errors.New("aws sts:GetCallerIdentity: ExpiredToken: expired"))
 	dir := flowCLIProject(t)
 	code, out, _ := runCLITest(t, "", "flows", "-p", dir, "-f", "hub", "--format", "json")
-	if code != exitErr || !strings.Contains(out, `"error":"aws sns:ListTopics: ExpiredToken: expired"`) {
+	if code != exitErr || !strings.Contains(out, `"error":"aws sts:GetCallerIdentity: ExpiredToken: expired"`) {
 		t.Fatalf("실패: %d %s", code, out)
 	}
-	fakeFlow(t, flows.Stat{}, sampleTopic(), nil)
-	writeFlowsFile(t, dir, `[{"name":"bad","aws":"app-stg","topic":"x"}]`)
+	fakeFlow(t, flows.Stat{}, sampleQueues(), nil)
+	writeFlowsFile(t, dir, `[{"name":"bad","aws":"app-stg","queues":[{"name":"x"}]}]`)
 	code, out, _ = runCLITest(t, "", "flows", "-p", dir, "--format", "json")
 	if code != exitErr || !strings.Contains(out, `"stage":"config"`) || !strings.Contains(out, "설정 오류: aws app-stg: want kind aws, got postgresql") {
 		t.Fatalf("설정 오류: %d %s", code, out)
@@ -566,19 +605,21 @@ func TestFlowBoxes_아웃박스_종류_줄은_한도_소진_대기_이름_순이
 	}
 	// 토픽이 있는 흐름은 토픽 그림 아래에 종류 줄을 붙인다
 	f := typeFlow()
-	f.AWS, f.Topic = "aws-stg", "stg-hub"
-	withTopic := plain(flowLayout(flowBoxes(f, flowSnap{outbox: &st, topic: sampleTopic()}, true), 400))
+	f.Topic = "stg-hub"
+	withTopic := plain(flowLayout(flowBoxes(f, flowSnap{outbox: &st}, true), 400))
 	if lines := strings.Split(withTopic, "\n"); !strings.Contains(lines[0], "──▶ [SNS stg-hub]") || !strings.HasPrefix(lines[len(lines)-1], "  └─ IDLE") {
 		t.Fatalf("토픽 + 종류:\n%s", withTopic)
 	}
 }
 
-func TestResolveFlow_토픽_없는_흐름은_토픽을_풀지_않는다(t *testing.T) {
-	no, nt := fakeFlow(t, typeStat(), sampleTopic(), nil)
+func TestResolveFlow_큐_없는_흐름은_토픽이_있어도_AWS_를_묻지_않는다(t *testing.T) {
+	no, nq := fakeFlow(t, typeStat(), sampleQueues(), nil)
 	m := flowModel(t)
-	s := resolveFlow(context.Background(), m.clients, m.sources, m.proj, typeFlow(), true)
-	if no.Load() != 1 || nt.Load() != 0 || s.topicErr != "" || s.topic != nil || s.outbox == nil {
-		t.Fatalf("아웃박스 %d 토픽 %d: %+v", no.Load(), nt.Load(), s)
+	f := typeFlow()
+	f.Topic = "stg-hub"
+	s := resolveFlow(context.Background(), m.clients, m.sources, m.proj, f, true)
+	if no.Load() != 1 || nq.Load() != 0 || s.awsErr != "" || s.queues != nil || s.outbox == nil {
+		t.Fatalf("아웃박스 %d 큐 %d: %+v", no.Load(), nq.Load(), s)
 	}
 }
 
@@ -639,7 +680,7 @@ func TestFlow_종류_줄을_고르고_Enter_는_그_종류의_재시도_행을_R
 }
 
 func TestFlowCLI_종류마다_outbox_type_줄을_더한다(t *testing.T) {
-	fakeFlow(t, typeStat(), sampleTopic(), nil)
+	fakeFlow(t, typeStat(), sampleQueues(), nil)
 	dir := flowCLIProject(t)
 	writeFlowsFile(t, dir, `[{"name":"ob","outbox":{"conn":"app-stg","table":"t_outbox","type":"event_type","retry":"retry_count",
 		"types":{"EARN":{"limit":20,"consumer":"consume-outbox-earn"}}}}]`)

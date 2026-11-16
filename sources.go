@@ -108,6 +108,8 @@ func sourceErrText(err error) string {
 	switch {
 	case errors.Is(err, source.ErrWrite):
 		return msgReadOnlySource
+	case errors.Is(err, source.ErrBilled):
+		return source.ErrBilled.Error()
 	case errors.Is(err, source.ErrNeedsConfirm):
 		if reason := source.ConfirmReason(err); reason != "" {
 			return msgExpensive + ": " + reason
@@ -140,6 +142,8 @@ func connWarning(c db.Conn) string {
 }
 
 // testConn 은 접속 창·db conn 의 시험이다. 읽기 전용 저장소는 맨 위 Children("") 가 되면 접속된 것으로 본다.
+// 맨 위 목록부터 요금이 붙는 종류(Athena 는 Glue 카탈로그, R72)는 막혀 있으면 목록을 보내지 않고, 요금 없는 대시보드 확인
+// (Athena GetWorkGroup)으로 자격 증명만 본다. 확인도 없는 종류는 시험을 건너뛰었다고 알린다.
 // 오류에 비밀값이 나오지 않게 지운다.
 func testConn(ctx context.Context, c db.Conn) (string, error) {
 	if !c.Kind.IsSource() {
@@ -151,6 +155,17 @@ func testConn(ctx context.Context, c db.Conn) (string, error) {
 		var nodes []source.Node
 		if nodes, err = b.Children(ctx, ""); err == nil {
 			return fmt.Sprintf("%s · %d개", connKinds[c.Kind], len(nodes)), nil
+		}
+		if errors.Is(err, source.ErrBilled) {
+			p, ok := b.(source.Prober)
+			if !ok {
+				return fmt.Sprintf("%s · 시험 건너뜀 (%s)", connKinds[c.Kind], err), nil
+			}
+			h := p.Probe(ctx)
+			if h.OK {
+				return fmt.Sprintf("%s · 목록은 요금이 붙어 시험 안 함", connKinds[c.Kind]), nil
+			}
+			err = errors.New(h.Err)
 		}
 	}
 	return "", errors.New(db.Redact(err.Error(), c.Password))
@@ -315,10 +330,11 @@ func (m *model) openSourceNode(t *queryTab, n *node) tea.Cmd {
 	return m.guard(p)
 }
 
-// sourceRefused 는 저장소가 보내기 전에 거절한 결과(ErrWrite·ErrNeedsConfirm)를 처리한다. 둘 다 서버에 가지 않아 기록에 남기지 않는다.
-// 비싼 질의는 `비싼 질의: <까닭>: y/N` 을 묻고 y 면 retry(Force)를 시작한다.
+// sourceRefused 는 저장소가 보내기 전에 거절한 결과(ErrWrite·ErrBilled·ErrNeedsConfirm)를 처리한다. 모두 서버에 가지 않아 기록에 남기지 않는다.
+// 비싼 질의는 `비싼 질의: <까닭>: y/N` 을 묻고 y 면 retry(Force)를 시작한다. 요금 막음(R72)은 확인으로 풀지 않는다.
 func (m *model) sourceRefused(msg resultMsg) (tea.Cmd, bool) {
-	write, expensive := errors.Is(msg.err, source.ErrWrite), errors.Is(msg.err, source.ErrNeedsConfirm)
+	write := errors.Is(msg.err, source.ErrWrite) || errors.Is(msg.err, source.ErrBilled)
+	expensive := errors.Is(msg.err, source.ErrNeedsConfirm)
 	if !write && !expensive {
 		return nil, false
 	}

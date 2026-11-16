@@ -276,7 +276,7 @@ var helpSections = []struct {
 		{"A / L / S", "활동 / 잠금 / 테이블 크기 (PostgreSQL 접속)", "A"},
 		{"A / L / S", "INFO / SLOWLOG / 큰 키 (Redis 접속)", "A"},
 		{"B", "데이터베이스 바꾸기 (PostgreSQL 접속)", "B"},
-		{"F", "데이터 검색 (PostgreSQL 접속·스키마) · aws SNS 토픽은 흐름", "F"},
+		{"F", "데이터 검색 (PostgreSQL 접속·스키마) · aws SNS 토픽은 흐름 (DB_ALLOW_BILLED=1)", "F"},
 		{"X", "패턴 맞는 키 일괄 삭제 (Redis 접속·이름공간, esc 멈춤)", "X"},
 		{"N", "새 접속 (URL 붙여넣기 · Ctrl+T 시험, .dbtui/connections.json)", "N"},
 		{"E", "접속 고치기 (db 전용 접속) · 폴더 줄은 폴더 이름 바꾸기", "E"},

@@ -83,7 +83,11 @@ func (b *Backend) Close() error { return nil }
 // ─── 트리 ───
 
 // Children 은 "" 이면 데이터베이스, "<db>" 면 테이블(Info 는 테이블 종류), "<db>/<테이블>" 이면 열이다.
+// 목록도 Glue 데이터 카탈로그 요청이라 요금이 붙어 막음(R72)을 먼저 본다.
 func (b *Backend) Children(ctx context.Context, path string) ([]source.Node, error) {
+	if err := source.Billed(); err != nil {
+		return nil, err
+	}
 	if path == "" {
 		var out []source.Node
 		p := athena.NewListDatabasesPaginator(b.cl, &athena.ListDatabasesInput{CatalogName: aws.String(catalog)})
@@ -160,6 +164,9 @@ func OpenSQL(path string, limit int) string {
 // Open 은 테이블 미리 보기다. LIMIT 이 있어도 Athena 는 읽은 파일만큼 요금을 매기고, 파티션 테이블은 파티션 조건 없이
 // 여러 파티션을 열 수 있어 확인을 받는다(R68.1). 확인받은 통합은 OpenSQL 을 Force 로 Run 한다.
 func (b *Backend) Open(ctx context.Context, path string, limit int) (*db.Result, error) {
+	if err := source.Billed(); err != nil {
+		return nil, err
+	}
 	dbName, table, ok := strings.Cut(path, "/")
 	if !ok || strings.Contains(table, "/") {
 		return nil, fmt.Errorf("athena: not a table: %s", path)
@@ -177,6 +184,9 @@ func (b *Backend) Open(ctx context.Context, path string, limit int) (*db.Result,
 // Run 은 읽기 SQL 한 문장만 보낸다(R68.2). 끝날 때까지 상태를 묻고 결과를 q.Limit(0 이면 1,000)행까지 받는다.
 // ctx 가 취소되면 StopQueryExecution 으로 서버의 질의를 멈춘다. 결과 Text 는 스캔 크기·엔진 시간이다.
 func (b *Backend) Run(ctx context.Context, q source.Query) (*db.Result, error) {
+	if err := source.Billed(); err != nil {
+		return nil, err
+	}
 	dbName, text := databaseDirective(q.Text)
 	stmt, words, err := readOnly(text)
 	if err != nil {

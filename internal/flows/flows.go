@@ -1,4 +1,5 @@
 // Package flows 는 이벤트 흐름(아웃박스 테이블 → SNS 토픽 → SQS 큐 → DLQ·Lambda, 또는 아웃박스 → 종류별 소비자) 설정과 아웃박스 수 질의다(명세 R69).
+// 토픽·큐·DLQ 는 설정에 적은 이름이고 AWS 에 묻는 것은 큐를 읽는 Lambda 매핑뿐이다(요금이 붙는 SNS·SQS 를 부르지 않음, R72).
 // 설정은 프로젝트의 .dbtui/flows.json 이고 없으면 빈 목록이다. AWS 쪽 풀이는 internal/awsres 가, 화면·CLI 는 main 이 맡는다.
 package flows
 
@@ -33,14 +34,21 @@ const (
 	truncatedNote = "종류 1,000개만"
 )
 
-// Flow 는 흐름 하나다. Outbox·Topic 가운데 하나는 있어야 하고, AWS 는 Topic 이 있을 때만 쓴다.
-// Err 는 검사에서 걸린 까닭이고 있으면 풀지 않는다.
+// Flow 는 흐름 하나다. Outbox·Topic·Queues 가운데 하나는 있어야 한다. Topic 은 그림에 보일 이름(묻지 않음)이고,
+// AWS 는 Queues 의 Lambda 매핑을 찾을 aws 접속이라 Queues 가 있을 때만 쓴다. Err 는 검사에서 걸린 까닭이고 있으면 풀지 않는다.
 type Flow struct {
 	Name   string  `json:"name"`
 	Outbox *Outbox `json:"outbox,omitempty"`
 	AWS    string  `json:"aws,omitempty"`
 	Topic  string  `json:"topic,omitempty"`
+	Queues []Queue `json:"queues,omitempty"`
 	Err    string  `json:"-"`
+}
+
+// Queue 는 토픽을 구독한 SQS 큐다. Name 은 이름 또는 ARN, DLQ 는 선택이고 이름 또는 ARN 이다. 둘 다 보이기만 한다.
+type Queue struct {
+	Name string `json:"name"`
+	DLQ  string `json:"dlq,omitempty"`
 }
 
 // Outbox 는 아웃박스 테이블이다. Table 은 `스키마.테이블` 또는 `테이블`, Type·Retry·Due 는 열 이름이다.
@@ -106,14 +114,19 @@ func validate(f Flow, conns []db.Conn) error {
 	switch {
 	case strings.TrimSpace(f.Name) == "":
 		return errors.New("name is empty")
-	case f.Outbox == nil && strings.TrimSpace(f.Topic) == "":
-		return errors.New("outbox or topic is required")
-	case strings.TrimSpace(f.Topic) == "" && f.AWS != "":
-		return errors.New("aws requires topic")
+	case f.Outbox == nil && strings.TrimSpace(f.Topic) == "" && len(f.Queues) == 0:
+		return errors.New("outbox, topic or queues is required")
+	case len(f.Queues) == 0 && f.AWS != "":
+		return errors.New("aws requires queues")
 	}
-	if strings.TrimSpace(f.Topic) != "" {
+	if len(f.Queues) > 0 {
 		if err := checkConn(conns, f.AWS, db.KindAWS, "aws"); err != nil {
 			return err
+		}
+	}
+	for i, q := range f.Queues {
+		if strings.TrimSpace(q.Name) == "" {
+			return fmt.Errorf("queues[%d].name is empty", i)
 		}
 	}
 	if f.Outbox == nil {
