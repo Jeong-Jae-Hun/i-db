@@ -211,6 +211,15 @@ func (m *Model) SetQuery(q Query, server bool) {
 // FilterTyping 은 거르기 글을 치는 중인지다. 치는 동안은 받은 행 안에서만 거르고 확정 때 서버로 다시 읽는다.
 func (m Model) FilterTyping() bool { return m.typing }
 
+// SetFilterInput 은 치는 중인 거르기 글을 바꾼다(R75.5 이전 거르기). 치는 중이 아니면 하지 않는다.
+func (m *Model) SetFilterInput(f string) {
+	if !m.typing {
+		return
+	}
+	m.filter = f
+	m.rebuild()
+}
+
 // ResumeTyping 은 다시 읽은 결과가 오는 사이 치던 거르기 입력을 이어 간다.
 func (m *Model) ResumeTyping() { m.typing = true }
 

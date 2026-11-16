@@ -36,6 +36,7 @@ import (
 	"github.com/Jeong-Jae-Hun/i-db/internal/params"
 	"github.com/Jeong-Jae-Hun/i-db/internal/paramstore"
 	"github.com/Jeong-Jae-Hun/i-db/internal/plantree"
+	"github.com/Jeong-Jae-Hun/i-db/internal/recent"
 	"github.com/Jeong-Jae-Hun/i-db/internal/redisview"
 	"github.com/Jeong-Jae-Hun/i-db/internal/session"
 	"github.com/Jeong-Jae-Hun/i-db/internal/source"
@@ -190,9 +191,9 @@ var helpSections = []helpSection{
 		{"Ctrl+R / F5", "실행: 선택한 글 전부, 없으면 커서 문장", "ctrl+r"},
 		{"Ctrl+E", "EXPLAIN (실행하지 않음)", "ctrl+e"},
 		{"Alt+E", "EXPLAIN ANALYZE, BUFFERS (쓰기 문장은 y/N)", "alt+e"},
-		{"Ctrl+P", "명령 팔레트 (동작·테이블을 이름으로 찾아 실행·열기, 최근 테이블 먼저)", ""},
+		{"Ctrl+P", "명령 팔레트 (동작·테이블·접속을 이름으로 찾아 실행·열기, 자주 쓴 동작·최근 테이블 먼저)", ""},
 		{"Ctrl+H", "실행 기록", "ctrl+h"},
-		{"Ctrl+N", "객체 찾기 (테이블·뷰·Redis 키)", "ctrl+n"},
+		{"Ctrl+N", "객체 찾기 (테이블·뷰·Redis 키, 최근 연 테이블 먼저)", "ctrl+n"},
 		{"Ctrl+O / Ctrl+S", "파일 열기 / 저장 (결과 편집이 있으면 제출)", "ctrl+o"},
 		{"F9", "트랜잭션 Auto / Manual (Manual 은 실행 전 BEGIN)", "f9"},
 		{"F10 / F11", "COMMIT (prod 는 확인) / ROLLBACK", "f10"},
@@ -212,6 +213,7 @@ var helpSections = []helpSection{
 		{"F1", "도움말", "f1"},
 		{"DB_RESTORE=0", "끝낼 때 탭 저장·다음에 되살리기 끄기 (창 크기는 남김)", ""},
 		{"DB_AUTO_SAVE·OPEN=0", "자동 저장 / 접속 고를 때 최근 파일 열기 끄기", ""},
+		{"DB_RECENT=0", "최근 기록 끄기 (팔레트 자주 쓴 동작·테이블 정렬·WHERE·열 폭·입력 기록·트리 펼침)", ""},
 		{"DB_KEYS=cmd / ctrl", "키 안내를 ⌘ / Ctrl 로 (기본은 맥·kitty 키면 ⌘)", ""},
 		{"DB_CLIPBOARD=osc52 / system", "복사를 OSC 52 만 / 시스템 클립보드만 (기본은 둘 다)", ""},
 		{"enc('글')", "실행 전에 그룹 키·IV 로 staticEncrypt 암호문으로 바꿈", ""},
@@ -633,6 +635,7 @@ type pendingRun struct {
 	ask      int               // 확인 창 번호(model.confirmSeq). 늦게 온 영향 행 수 추정을 가른다
 	estimate string            // 확인 창에 같이 보일 영향 행 수 추정(R39). 못 받았으면 비어 있다
 	note     string            // 시작할 때 상태 줄 앞에 붙일 글(enc() 확장, R52)
+	prefNote string            // 기억한 정렬·WHERE 로 연 테이블 보기면 첫 페이지 뒤 상태 줄에 붙일 글(R75.4)
 	changes  *db.ChangeSet     // rkSubmit 이 낸 묶음(R50)
 	keep     *grid.Query       // 정렬·거르기 다시 읽기(R14.5). 결과에 다시 붙이고 실패하면 보던 결과를 둔다
 	src      *source.Query     // 저장소 실행의 질의. 정렬·거르기를 서버로 다시 읽을 때 바꿔 보낸다(R61.3·R62.3·R63.3)
@@ -743,6 +746,7 @@ type queryTab struct {
 	conflictOf string
 	name       string        // 사용자가 바꾼 탭 이름(R57). 비면 제목·파일 이름이다
 	pinned     bool          // 고정한 탭(R57). 탭 줄 앞에 모이고 닫을 때 묻는다
+	prefNote   string        // 기억한 정렬·WHERE 로 연 테이블 보기의 알림(R75.4). 첫 페이지 결과 뒤 상태 줄에 붙이고 비운다
 	undo       []*undoEntry  // 제출 되돌리기 묶음, 마지막이 가장 최근(R50)
 	since      time.Duration // Loki·Prometheus 범위(R62.2). 0 이면 1h
 	dash       *dashState    // 대시보드 탭이면 그 상태(R64). 편집기·결과 대신 대시보드를 그린다
@@ -874,6 +878,12 @@ type model struct {
 	dragBase  int    // 끌기 시작할 때 그려진 크기
 	paneRev   int    // 키보드로 바꾼 창 크기의 판. 마지막 키 뒤 paneSaveDelay 가 지나면 한 번만 저장한다(R46.2)
 
+	// 최근 기록(R75). nil 이면 끈 것이다(DB_RECENT=0·쓰기 실패·main 이 읽기 전). recall 은 ↑↓ 로 고른 입력 기록 자리,
+	// treeDone 은 이번 실행에서 기억한 펼침을 되살린 접속 uuid 다
+	recent   *recent.Store
+	recall   recallState
+	treeDone map[string]bool
+
 	w, h int
 }
 
@@ -883,7 +893,7 @@ func newModel(p *db.Project) *model {
 		patterns: map[int]string{}, inTx: map[int]bool{}, catalogs: map[int]*complete.Catalog{}, catGen: map[int]int{},
 		manual: map[int]bool{}, txSince: map[int]time.Time{}, dbOver: map[int]string{}, dbOrig: map[int]string{}, schemaOf: map[int]string{},
 		treeW: defaultTreeWidth, mac: keys.MacStyle(false),
-		prodLock: true, unlocked: map[int]time.Time{}, enums: map[int]map[string][]string{}}
+		prodLock: true, unlocked: map[int]time.Time{}, enums: map[int]map[string][]string{}, treeDone: map[string]bool{}}
 	m.roots = connRoots(p.Conns, nil, nil)
 	if len(p.Warnings) > 0 {
 		m.status = "건너뜀: " + strings.Join(p.Warnings, ", ")
@@ -1291,6 +1301,9 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 	if n.conn >= 0 {
 		cat = m.setConn(t, n.conn)
 	}
+	if n.kind == nConn && !(n.expanded && toggle) {
+		m.noteConn(n.conn)
+	}
 	if fresh {
 		cat = tea.Batch(cat, m.autoOpen(n.conn))
 	}
@@ -1313,11 +1326,14 @@ func (m *model) activate(n *node, toggle bool) tea.Cmd {
 // 여는 길(트리·찾기·팔레트·외래 키·정의로 이동)이 모두 여기를 지난다. 최근 테이블(R40.3)은 확인을 지나 보기가 시작될 때(start) 남긴다.
 func (m *model) openTable(t *queryTab, conn int, ref db.TableRef, where string, opt tableview.Options) tea.Cmd {
 	tv := tableview.New(ref, opt)
+	note := ""
 	if where != "" {
 		tv, _ = tv.ToggleWhere(where)
+	} else {
+		tv, note = m.restoreTable(tv, conn) // 기억한 정렬·WHERE(R75.4). 외래 키 따라가기처럼 조건을 주고 열면 쓰지 않는다
 	}
 	return m.guard(pendingRun{tab: t.id, conn: conn, readOnly: true, kind: rkEstimate, tx: true, retarget: true, tv: &tv, title: ref.Table,
-		exec: execScript(m.clients, script{conn: m.conn(conn), stmts: []string{tv.EstimateSQL()}})})
+		prefNote: note, exec: execScript(m.clients, script{conn: m.conn(conn), stmts: []string{tv.EstimateSQL()}})})
 }
 
 // tableLabel 은 명령 팔레트의 테이블 항목 `[환경] 접속 · 스키마.테이블` 이다(R40.2).
@@ -1586,6 +1602,8 @@ func (m *model) start(p pendingRun) tea.Cmd {
 		t.tv, t.title, t.viewConn, t.viewDB = p.tv, p.title, p.conn, m.conn(p.conn).DB
 		ref := p.tv.Table()
 		m.sess.TouchTable(m.conn(p.conn).UUID, ref.Schema, ref.Table, time.Now())
+		m.noteTableOpen(p.conn, ref)
+		t.prefNote = p.prefNote
 	}
 	prevWrite := t.running != nil && !t.runningReadOnly
 	if t.running != nil {
@@ -1651,6 +1669,9 @@ func (m *model) gridKey(k tea.KeyMsg) tea.Cmd {
 	t.grid, a = t.grid.Update(k)
 	if a.Status != "" {
 		m.status = a.Status
+	}
+	if ks := k.String(); (ks == "<" || ks == ">") && strings.HasPrefix(a.Status, "열 폭 ") {
+		m.noteWidth(t) // 테이블 보기면 열 폭을 기억한다(R75.4)
 	}
 	switch {
 	case a.Compare:
@@ -2043,14 +2064,16 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.n.loaded = true
 		}
 		// 접속을 못 읽어도 그 접속의 쿼리 파일은 열 수 있게 붙인다(R43)
+		var again tea.Cmd
 		if msg.n.kind == nConn {
 			m.attachQueries(msg.n)
+			again = m.restoreConnTree(msg.n) // 기억한 스키마·이름공간 펼침(R75.6)
 		}
 		m.rebuild()
 		if m.jump != nil {
-			return m, m.reveal(m.jumpConn, *m.jump)
+			return m, tea.Batch(again, m.reveal(m.jumpConn, *m.jump))
 		}
-		return m, nil
+		return m, again
 	case updateNoticeMsg:
 		m.addStatus(fmt.Sprintf("새 판 %s — db update", msg.tag))
 		return m, nil
@@ -2539,6 +2562,9 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// 테이블 보기는 정렬·페이지를 바꿔 다시 읽어도 커서 열을 지켜 s 를 거듭 누르면 같은 열이 돈다
 			if msg.kind == rkTable {
 				t.grid.FocusCol(keepCol)
+				if res != nil {
+					m.noteTableResult(t)
+				}
 			}
 			// enum 열은 고르기 창으로 고친다(R49.2). 모르는 사용자 타입만 읽는다
 			tick = tea.Batch(tick, m.loadEnums(t, msg.conn, t.res))
@@ -2568,6 +2594,10 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = t.summary
 			if t != m.cur() {
 				m.status = t.title + ": " + t.summary
+			}
+			if msg.kind == rkTable && t.prefNote != "" {
+				m.status += " · " + t.prefNote
+				t.prefNote = ""
 			}
 			return m, tea.Batch(save, tick)
 		}
@@ -3273,8 +3303,14 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case t.redis != nil && t.redis.Editing():
 			return m, m.redisEditKey(k)
 		case t.grid.Typing():
+			if m.gridTypingKey(t, ks) {
+				return m, nil
+			}
 			return m, tea.Batch(m.gridKey(k), m.requery(t))
 		case t.tv != nil && t.tv.Typing():
+			if m.whereTypingKey(t, ks) {
+				return m, nil
+			}
 			return m, m.tableKey(k)
 		case t.planOn && planKeys[ks]:
 			var a plantree.Action
@@ -3523,7 +3559,24 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == fEditor && t.editor.PopupOpen() {
 			break
 		}
-		var labels []string
+		// 자주·최근 쓴 동작을 맨 위에, 최근 접속을 최근 테이블 뒤에 둔다(R75.2). 기록이 없으면 R40 순서 그대로다
+		acts, actKeys := map[string]paletteAct{}, map[string]string{}
+		var actLabels []string
+		for _, sec := range helpSections {
+			for _, kv := range sec.keys {
+				if kv[2] == "" {
+					continue
+				}
+				// 고르면 보이는 글자(⌘)가 아니라 원래 키 이름(kv[2])을 누른다(R47.1)
+				label := fmt.Sprintf("%s — %s · %s", m.label(kv[1]), m.label(kv[0]), sec.title)
+				actLabels = append(actLabels, label)
+				acts[label] = paletteAct{at: sec.at, k: keyMsgOf(kv[2])}
+				actKeys[label] = actionKey(sec.title, kv[2])
+			}
+		}
+		top := m.recentActions(actLabels, actKeys)
+		labels := slices.Clone(top)
+		actLabels = slices.DeleteFunc(actLabels, func(l string) bool { return slices.Contains(top, l) })
 		tables := map[string]paletteTable{}
 		// 같은 테이블은 접속 인덱스로 하나로 합친다. 이름이 같은 접속(DataGrip 은 막지 않는다)의 줄은 글이 겹치면 #자리를 붙여 가른다
 		type tableKey struct {
@@ -3544,6 +3597,10 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			it := finder.Item{Conn: m.conn(ci).Name, Kind: finder.KindTable, Schema: r.Schema, Name: r.Table}
 			tables[label] = paletteTable{it: it, conn: ci, quiet: len(tables) >= paletteRecent}
 			labels = append(labels, label)
+		}
+		conns := m.recentConnLabels()
+		for _, rc := range conns {
+			labels = append(labels, rc.label)
 		}
 		for _, env := range paletteEnvs {
 			for i, c := range m.proj.Conns {
@@ -3567,24 +3624,17 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		acts := map[string]paletteAct{}
-		for _, sec := range helpSections {
-			for _, kv := range sec.keys {
-				if kv[2] == "" {
-					continue
-				}
-				// 고르면 보이는 글자(⌘)가 아니라 원래 키 이름(kv[2])을 누른다(R47.1)
-				label := fmt.Sprintf("%s — %s · %s", m.label(kv[1]), m.label(kv[0]), sec.title)
-				labels = append(labels, label)
-				acts[label] = paletteAct{at: sec.at, k: keyMsgOf(kv[2])}
-			}
-		}
+		labels = append(labels, actLabels...)
 		m.openPicker("명령 ", labels, nil, func(label string) tea.Cmd {
 			// 테이블은 Ctrl+N 처럼 트리에서 골라 연다. 탭 규칙(R3.1)·접속 바꾸기·트랜잭션 확인은 트리 Enter 와 같다
 			if tb, ok := tables[label]; ok {
 				return m.reveal(tb.conn, tb.it)
 			}
+			if i := slices.IndexFunc(conns, func(rc recentConn) bool { return rc.label == label }); i >= 0 {
+				return m.revealConn(conns[i].conn)
+			}
 			a := acts[label]
+			m.noteAction(actKeys[label])
 			if a.at != fKeep {
 				m.setFocus(a.at)
 			}
@@ -3822,7 +3872,7 @@ func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		items = append(items, more...)
+		items = append(m.finderOrder(items), more...)
 		if len(items) == 0 {
 			m.status = "찾을 객체가 없음 (PostgreSQL 접속을 한 번 고르면 목록을 읽음)"
 			return m, nil

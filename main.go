@@ -95,6 +95,7 @@ func main() {
 		m.addStatus("실행 기록을 열지 못함: " + err.Error())
 	}
 	m.restoreSession()
+	m.loadRecent()      // 최근 기록(R75). DB_RECENT=0 이면 읽지도 쓰지도 않는다
 	m.tips = loadTips() // 한 번만 보이는 팁(R74.3). 화면에서만 쓰고 CLI·MCP 는 부르지 않는다
 	m.boot = tea.Batch(m.boot, updateNoticeCmd(os.Getenv, version, updateCheckPath(), fetchLatestTag))
 	// 경계 끌기(R46.1)는 버튼을 누른 채 움직임만 있으면 된다. AllMotion 은 마우스가 지날 때마다 Update·View 를 돌려
@@ -117,6 +118,7 @@ func main() {
 	if serr := m.saveSession(); serr != nil {
 		m.saveErr = serr
 	}
+	m.saveRecentOnQuit()
 	m.stop()
 	m.clients.Close()
 	m.sources.close()

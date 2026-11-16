@@ -972,6 +972,30 @@ func (m Model) CurrentCol() string {
 	return m.res.Cols[m.col]
 }
 
+// Width 는 이름이 col 인 열의 폭이다. 없으면 0 이다.
+func (m Model) Width(col string) int {
+	if m.res == nil {
+		return 0
+	}
+	if i := slices.Index(m.res.Cols, col); i >= 0 && i < len(m.widths) {
+		return m.widths[i]
+	}
+	return 0
+}
+
+// SetWidths 는 이름이 같은 열의 폭을 맞춘다(R75.4 기억한 열 폭). 수동 조절 범위로 줄이고 없는 열은 건너뛴다.
+func (m *Model) SetWidths(w map[string]int) {
+	if m.res == nil || len(w) == 0 {
+		return
+	}
+	for i, c := range m.res.Cols {
+		if v, ok := w[c]; ok && i < len(m.widths) {
+			m.widths[i] = min(maxColWidth, max(minColWidth, v))
+		}
+	}
+	m.follow()
+}
+
 // FocusCol 은 커서를 이름이 같은 열로 옮긴다. 테이블 보기가 페이지를 다시 읽어도 커서 열을 지키게 한다.
 func (m *Model) FocusCol(name string) {
 	if m.res == nil {

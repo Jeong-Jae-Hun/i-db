@@ -180,10 +180,14 @@ func (m *model) resultHints(t *queryTab) []string {
 		return m.labels(redisEditHints)
 	case t.redis != nil:
 		return m.labels(append(slices.Clone(redisTypeHints[t.redis.Type()]), redisHints...))
+	case t.tv != nil && t.tv.TypingWhere() && len(m.whereRecall(t)) > 0:
+		return m.labels(append(slices.Clone(whereHints), "↑↓ 이전 조건"))
 	case t.tv != nil && t.tv.Typing():
 		return m.labels(whereHints)
 	case t.planOn:
 		return m.labels(planHints)
+	case sc == grid.ScreenFilter && len(m.filterRecall()) > 0:
+		return m.labels(append(slices.Clone(screenHints[sc]), "↑↓ 이전 거르기"))
 	case sc != grid.ScreenTable:
 		return m.labels(screenHints[sc])
 	}

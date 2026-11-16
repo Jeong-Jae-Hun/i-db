@@ -52,9 +52,14 @@ func (m *model) tableKey(k tea.KeyMsg) tea.Cmd {
 		}
 		return m.tableAction(t.tv.HeaderClick(col))
 	}
+	where := t.tv.TypingWhere() && ks == "enter"
+	text := t.tv.Input()
 	tv, a := t.tv.Update(k)
 	if !a.Handled {
 		return m.gridKey(k)
+	}
+	if where && !tv.Typing() {
+		m.noteWhere(t, text) // 적용한 WHERE 입력을 기록한다(R75.5, prod 는 남기지 않음)
 	}
 	return m.tableAction(tv, a)
 }

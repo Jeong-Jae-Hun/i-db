@@ -110,12 +110,44 @@ func (m Model) Typing() bool { return m.typing != fieldNone }
 
 func (m Model) Table() db.TableRef { return m.table }
 
+// Where 는 지금 WHERE 글이다(짧은 꼴은 바꾼 SQL).
+func (m Model) Where() string { return m.where }
+
+// Order 는 ORDER BY 칸에 보이는 지금 정렬 글이다.
+func (m Model) Order() string { return m.orderText() }
+
+// TypingWhere 는 WHERE 입력 줄이 열려 있는지다.
+func (m Model) TypingWhere() bool { return m.typing == fieldWhere }
+
+// Input 은 열린 입력 줄의 글이다.
+func (m Model) Input() string { return m.input }
+
+// SetInput 은 열린 입력 줄의 글을 바꾼다(R75.5 이전 조건). 입력 줄이 닫혀 있으면 하지 않는다.
+func (m Model) SetInput(s string) Model {
+	if m.typing != fieldNone {
+		m.input, m.comp = s, nil
+	}
+	return m
+}
+
+// Restore 는 기억한 정렬·WHERE 로 연다(R75.4). 열을 아직 몰라 정렬은 글 그대로 두고 SetColumns 가 열 정렬로 다시 읽는다.
+func (m Model) Restore(where, order string) Model {
+	m.where, m.orderRaw = where, order
+	return m
+}
+
 // SetColumns 는 지금 테이블의 열 이름·타입이다. Tab 완성, 짧은 꼴 조건, ORDER BY 읽기가 쓴다.
 func (m Model) SetColumns(cols, types []string) Model {
 	m.cols, m.numeric = cols, make([]bool, len(cols))
 	if len(types) == len(cols) {
 		for i, t := range types {
 			m.numeric[i] = db.IsNumericType(t)
+		}
+	}
+	// 열을 알기 전에 둔 정렬 글(Restore·첫 결과 전 O 입력)은 열 정렬로 읽히면 바꿔 열 머리 클릭·s 가 이어 돌게 한다
+	if m.orderRaw != "" && len(m.orders) == 0 {
+		if keys, raw := m.parseOrder(m.orderRaw); raw == "" {
+			m.orders, m.orderRaw = keys, ""
 		}
 	}
 	return m
