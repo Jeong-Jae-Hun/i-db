@@ -35,6 +35,7 @@ func testModel(t *testing.T) *model {
 	m := newModel(p)
 	m.prodLock = false // v6 까지의 prod 확인 시험은 잠금(R54) 없이 본다. 잠금 시험은 다시 켠다
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	t.Cleanup(func() { _ = m.recentSaver.flush(5 * time.Second) }) // 화면 밖 기억 쓰기가 임시 폴더 정리와 겹치지 않게
 	return m
 }
 

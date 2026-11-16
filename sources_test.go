@@ -26,6 +26,7 @@ type fakeSource struct {
 	conn     db.Conn
 	children map[string][]source.Node
 	childErr error
+	listed   []string // Children 을 부른 경로
 	runs     []source.Query
 	opens    []string
 	limits   []int
@@ -38,6 +39,7 @@ type fakeSource struct {
 func (f *fakeSource) Children(_ context.Context, path string) ([]source.Node, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listed = append(f.listed, path)
 	return f.children[path], f.childErr
 }
 

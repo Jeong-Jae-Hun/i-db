@@ -3,6 +3,8 @@ package history
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Jeong-Jae-Hun/i-db/internal/atomicfile"
@@ -25,18 +26,53 @@ const (
 )
 
 type Entry struct {
+	ID      string        `json:"id,omitempty"` // 결과 사본 파일 이름(R11.4). 옛 줄은 비어 있다
 	Time    time.Time     `json:"time"`
 	Conn    string        `json:"conn"`
 	SQL     string        `json:"sql"`
 	Elapsed time.Duration `json:"elapsed"`
 	Rows    int           `json:"rows"`
 	Err     string        `json:"err,omitempty"`
+	Result  bool          `json:"result,omitempty"` // 결과 사본을 썼다. 그 뒤 보존 기간·d 로 지워졌을 수 있다
 }
 
-// Filter 의 Query 는 SQL 에서 대소문자 없이 찾을 부분 문자열, Conn 은 정확히 같은 접속 이름이다. Limit 0 이하는 전부다.
+// Filter 의 Query 는 SQL 이나 접속 이름에서 대소문자 없이 찾을 부분 문자열, Conn 은 정확히 같은 접속 이름이다.
+// From·To 는 [From, To) 시각 범위이고 0 이면 그쪽 끝이 없다. Limit 0 이하는 전부다.
 type Filter struct {
 	Query, Conn string
+	From, To    time.Time
 	Limit       int
+}
+
+// 기록 창 거르기 글의 날짜 낱말. 값은 오늘에서 거스를 날 수다
+var dayWords = map[string]int{"오늘": 0, "today": 0, "어제": 1, "yesterday": 1}
+
+// ParseQuery 는 기록 창 거르기 글을 Filter 로 바꾼다. 낱말 `오늘`·`today`·`어제`·`yesterday` 는 now 의 지역 날짜로
+// 거르고(여럿이면 마지막 것), 나머지 낱말은 빈칸 하나로 이어 SQL·접속 이름에서 찾는다.
+//   - 예: "어제 orders" → 어제 0시~오늘 0시 기록 가운데 orders 가 든 것
+func ParseQuery(s string, now time.Time) Filter {
+	var f Filter
+	var rest []string
+	for _, w := range strings.Fields(s) {
+		back, ok := dayWords[strings.ToLower(w)]
+		if !ok {
+			rest = append(rest, w)
+			continue
+		}
+		y, mo, d := now.Date()
+		f.From = time.Date(y, mo, d-back, 0, 0, 0, 0, now.Location())
+		f.To = f.From.AddDate(0, 0, 1)
+	}
+	f.Query = strings.Join(rest, " ")
+	return f
+}
+
+// NewID 는 기록 하나의 이름이다. 시각(UTC, 정렬되게)에 무작위 6자를 붙여 같은 초의 기록도 겹치지 않는다.
+//   - 예: 20261116-011530-a3f9c1
+func NewID(t time.Time) string {
+	var b [3]byte
+	_, _ = rand.Read(b[:]) // 실패해도 0 이 남을 뿐 시각이 이름을 가른다
+	return t.UTC().Format("20060102-150405") + "-" + hex.EncodeToString(b[:])
 }
 
 // Store 는 기록을 메모리(오래된 것부터)와 파일에 같이 둔다. 메서드는 동시에 불러도 된다.
@@ -80,7 +116,7 @@ func Open(path string) (*Store, error) {
 	if !s.over() {
 		return s, nil
 	}
-	lock, err := lockFile(path)
+	lock, err := atomicfile.Lock(path)
 	if err != nil {
 		return nil, err
 	}
@@ -90,10 +126,16 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) Append(e Entry) (err error) {
-	if len(e.SQL) > maxSQLBytes {
-		e.SQL = strings.ToValidUTF8(e.SQL[:maxSQLBytes], "") // 바이트로 자른 끝의 깨진 UTF-8 조각을 버린다
+// capSQL 은 SQL 을 앞 maxSQLBytes 만 남긴다. 기록 줄과 결과 사본이 같이 쓴다.
+func capSQL(sql string) string {
+	if len(sql) <= maxSQLBytes {
+		return sql
 	}
+	return strings.ToValidUTF8(sql[:maxSQLBytes], "") // 바이트로 자른 끝의 깨진 UTF-8 조각을 버린다
+}
+
+func (s *Store) Append(e Entry) (err error) {
+	e.SQL = capSQL(e.SQL)
 	line, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -101,7 +143,7 @@ func (s *Store) Append(e Entry) (err error) {
 	line = append(line, '\n')
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	lock, err := lockFile(s.path)
+	lock, err := atomicfile.Lock(s.path)
 	if err != nil {
 		return err
 	}
@@ -145,7 +187,10 @@ func (s *Store) List(f Filter) []Entry {
 	var out []Entry
 	for i := len(s.entries) - 1; i >= 0 && (f.Limit <= 0 || len(out) < f.Limit); i-- {
 		e := s.entries[i]
-		if (f.Conn == "" || e.Conn == f.Conn) && strings.Contains(strings.ToLower(e.SQL), q) {
+		if (f.Conn != "" && e.Conn != f.Conn) || (!f.From.IsZero() && e.Time.Before(f.From)) || (!f.To.IsZero() && !e.Time.Before(f.To)) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(e.SQL), q) || strings.Contains(strings.ToLower(e.Conn), q) {
 			out = append(out, e)
 		}
 	}
@@ -185,19 +230,6 @@ func (s *Store) compactLocked() error {
 	s.entries = entries[len(entries)-len(lines):]
 	s.size = int64(buf.Len())
 	return nil
-}
-
-// lockFile 은 path 옆 .lock 파일에 배타 flock 을 건다. 돌려준 파일을 닫으면 풀린다.
-// 바꿔 끼우는 기록 파일 자체에 걸면 잠금이 옛 inode 에 남으므로 따로 둔다. 배포 대상(linux·darwin)은 flock 이 있다.
-func lockFile(path string) (*os.File, error) {
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return nil, errors.Join(fmt.Errorf("lock history: %w", err), f.Close())
-	}
-	return f, nil
 }
 
 // readTail 은 파일 끝 maxBytes 만 읽어 기록으로 바꾼다. 파일이 아무리 커져도 읽는 양이 정해져 있다(E63).
