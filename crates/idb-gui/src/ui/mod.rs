@@ -1,5 +1,6 @@
 //! GPUI 화면. 무엇을 보일지는 `vm` 이 정하고 여기서는 그리고 입력을 넘긴다.
 
+mod appkit_guard;
 mod brand;
 mod dashboard;
 mod dialogs;
@@ -229,6 +230,8 @@ fn apply_look(prefs: &Prefs, font: &FontChoice, window: &mut Window, cx: &mut Ap
 
 pub fn run() {
     crate::vm::crashlog::install();
+    // AppKit 이 Touch Bar 관찰을 풀다 죽는 버그를 피한다(appkit_guard 머리 주석의 업스트림 이슈)
+    appkit_guard::install(crate::vm::crashlog::log_path());
     let initial = match initial_target() {
         Ok(t) => t,
         Err(e) => {
@@ -245,6 +248,7 @@ pub fn run() {
     };
     gpui_platform::application().with_assets(brand::Assets).run(move |cx: &mut App| {
         gpui_component::init(cx);
+        appkit_guard::quiet_app_touch_bar();
         install_palette(cx);
         let prefs = Prefs::path().map(|p| Prefs::load(&p)).unwrap_or_default();
         let font = load_font(&prefs, cx);
@@ -269,6 +273,7 @@ pub fn run() {
         let rt = rt.clone();
         let opened = cx.open_window(opts, move |window, cx| {
             apply_look(&prefs, &font, window, cx);
+            appkit_guard::quiet_window_touch_bar(window);
             let ws = cx.new(|cx| {
                 let mut ws = Workspace::new(rt, font, window, cx);
                 if let Some(t) = initial {
