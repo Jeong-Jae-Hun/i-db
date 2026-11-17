@@ -61,9 +61,13 @@ fn lead_flags_after_command(args: Vec<String>) -> Vec<String> {
     let is_command = |a: &str| a == "serve" || a == "mcp" || cli::is_cli_command(a);
     match args.get(i) {
         Some(cmd) if i > 0 && is_command(cmd) => {
+            // 끝(`--` 가 있으면 그 앞)에 붙인다. 바로 뒤에 넣으면 `conn test` 같은 하위 명령 자리를 밀어낸다
+            let rest = &args[i + 1..];
+            let at = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
             let mut out = vec![cmd.clone()];
+            out.extend_from_slice(&rest[..at]);
             out.extend_from_slice(&args[..i]);
-            out.extend_from_slice(&args[i + 1..]);
+            out.extend_from_slice(&rest[at..]);
             out
         }
         _ => args,
@@ -134,7 +138,15 @@ mod lead_flag_tests {
         );
         assert_eq!(
             lead_flags_after_command(v(&["--remote=devbox", "-p", "x", "query", "-c", "a"])),
-            v(&["query", "--remote=devbox", "-p", "x", "-c", "a"])
+            v(&["query", "-c", "a", "--remote=devbox", "-p", "x"])
+        );
+        assert_eq!(
+            lead_flags_after_command(v(&["-p", "x", "conn", "test", "-h"])),
+            v(&["conn", "test", "-h", "-p", "x"])
+        );
+        assert_eq!(
+            lead_flags_after_command(v(&["--remote", "w", "redis", "-c", "r", "--", "LRANGE", "k", "0", "-1"])),
+            v(&["redis", "-c", "r", "--remote", "w", "--", "LRANGE", "k", "0", "-1"])
         );
         assert_eq!(
             lead_flags_after_command(v(&["--remote", "devbox", "mcp"])),
