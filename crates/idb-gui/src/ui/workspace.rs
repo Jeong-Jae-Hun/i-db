@@ -120,6 +120,8 @@ pub struct Workspace {
     /// 자동 저장을 멈춘 탭과 까닭
     autosave_stopped: HashMap<u64, String>,
     autosave_tasks: HashMap<u64, gpui::Task<()>>,
+    /// `DB_AUTO_SAVE=0` 이면 끈다(첫 실행 저장·1초 뒤·탭 옮김·닫기). ⌘S 는 그대로다
+    pub(super) autosave_on: bool,
     /// 데이터베이스 바꾸기 요청이 도는 접속. 원격이면 엔진은 이미 바꿨는데 답이 안 왔을 수 있어
     /// 그동안 그 접속 결과의 고치기·반영·되돌리기·다음 쪽을 막는다
     switching: std::collections::HashSet<String>,
@@ -236,6 +238,7 @@ impl Workspace {
             file_text: HashMap::new(),
             autosave_stopped: HashMap::new(),
             autosave_tasks: HashMap::new(),
+            autosave_on: queries::autosave_enabled(std::env::var("DB_AUTO_SAVE").ok().as_deref()),
             selected_table: None,
             dir_input,
             remotes: crate::vm::runtime::remote_names(),
@@ -1092,6 +1095,9 @@ impl Workspace {
     }
 
     fn schedule_autosave(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.autosave_on {
+            return;
+        }
         let has_file = self.tabs.index_of(id).is_some_and(|i| self.tabs.tabs[i].path.is_some());
         if !has_file || self.autosave_stopped.contains_key(&id) || !self.file_text.contains_key(&id) {
             return;
@@ -1107,6 +1113,9 @@ impl Workspace {
     /// 파일 탭을 저장한다. 밖에서 바뀌었으면 멈추고 알린다(내용으로 가른다).
     pub(super) fn autosave(&mut self, id: u64, cx: &mut Context<Self>) {
         self.autosave_tasks.remove(&id);
+        if !self.autosave_on {
+            return;
+        }
         if self.autosave_stopped.contains_key(&id) {
             return;
         }
@@ -1123,7 +1132,7 @@ impl Workspace {
                 self.file_text.insert(id, text);
                 self.tabs.tabs[i].dirty = false;
             }
-            queries::SaveDecision::Write => match queries::write_query(&path, &text) {
+            queries::SaveDecision::Write => match queries::write_query(self.project_dir().as_deref(), &path, &text) {
                 Ok(()) => {
                     self.file_text.insert(id, text);
                     self.tabs.tabs[i].dirty = false;
@@ -1140,6 +1149,9 @@ impl Workspace {
 
     /// 파일 없는 탭의 첫 실행이면 queries/<그룹>/<접속>-<시각>.sql 로 저장하고 매핑에 붙인다(R45.1).
     fn save_new_query_on_run(&mut self, cx: &mut Context<Self>) {
+        if !self.autosave_on {
+            return;
+        }
         let Some(dir) = self.project_dir() else { return };
         let Some(t) = self.tabs.active().cloned() else { return };
         if t.path.is_some() || t.name.is_some() {
@@ -1159,14 +1171,17 @@ impl Workspace {
             return;
         }
         match queries::save_new_query(&dir, &c.group, &c.name, &c.uuid, &text) {
-            Ok(rel) => {
+            Ok((rel, note)) => {
                 if let Some(i) = self.tabs.index_of(t.id) {
                     self.tabs.tabs[i].path = Some(dir.join(&rel));
                     self.tabs.tabs[i].dirty = false;
                 }
                 self.file_text.insert(t.id, text);
                 self.refresh_queries();
-                self.set_status(format!("새 쿼리를 저장함: {rel}"), false, cx);
+                match note {
+                    Some(n) => self.set_status(n, true, cx),
+                    None => self.set_status(format!("새 쿼리를 저장함: {rel}"), false, cx),
+                }
             }
             Err(e) => self.set_status(format!("새 쿼리 저장 실패: {e}"), true, cx),
         }
@@ -1553,7 +1568,7 @@ impl Workspace {
 
     fn write_file(&mut self, id: u64, path: PathBuf, text: String, cx: &mut Context<Self>) {
         // ⌘S 는 밖에서 바뀌었어도 덮어쓰고 자동 저장을 다시 켠다(R45.2)
-        match queries::write_query(&path, &text) {
+        match queries::write_query(self.project_dir().as_deref(), &path, &text) {
             Ok(()) => {
                 if let Some(i) = self.tabs.index_of(id) {
                     self.tabs.tabs[i].dirty = false;
@@ -3085,6 +3100,39 @@ mod tests {
         });
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- 다른 편집기", "밖의 바뀜을 덮지 않는다");
         cx.update(|_, cx| assert!(ws.read(cx).autosave_stopped.contains_key(&id)));
+    }
+
+    #[gpui::test]
+    fn DB_AUTO_SAVE_0_이면_자동_저장과_첫_실행_저장을_하지_않는다(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&offline_project(), dir.path());
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let rel = "queries/app/a.sql".to_string();
+        let file = dir.path().join(&rel);
+        let before = std::fs::read_to_string(&file).unwrap();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.autosave_on = false;
+                w.open_query(rel.clone(), window, cx);
+                let id = w.tabs.active().unwrap().id;
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id) {
+                    editor.update(cx, |e, cx| e.set_value("select 99", window, cx));
+                }
+                w.autosave(id, cx);
+                // 첫 실행 저장도 끈다: 파일 없는 새 탭
+                w.new_tab(Some("app-stg".into()), window, cx);
+                let id2 = w.tabs.active().unwrap().id;
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id2) {
+                    editor.update(cx, |e, cx| e.set_value("select 1", window, cx));
+                }
+                w.save_new_query_on_run(cx);
+                assert!(w.tabs.active().unwrap().path.is_none(), "첫 실행 저장을 하지 않는다");
+            })
+        });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "자동 저장하지 않는다");
     }
 
     #[gpui::test]

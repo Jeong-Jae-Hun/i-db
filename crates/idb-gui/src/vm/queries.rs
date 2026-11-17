@@ -103,28 +103,48 @@ pub fn before_autosave(disk: Option<&str>, last: &str, editor: &str) -> SaveDeci
     }
 }
 
-/// 파일 없는 탭의 첫 실행 때 저장할 상대 경로를 짓고(R45.1) 매핑에 붙인다. 실제 경로가 프로젝트 밖이면 쓰지 않는다.
-pub fn save_new_query(project: &Path, group: &str, conn: &str, uuid: &str, text: &str) -> std::io::Result<String> {
-    let rel = idb_core::mapping::unique_query_path(project, group, conn, chrono::Local::now())?;
-    let full = project.join(&rel);
-    if let Some(dir) = full.parent() {
-        std::fs::create_dir_all(dir)?;
-        let root = project.canonicalize()?;
-        if !dir.canonicalize()?.starts_with(&root) {
-            return Err(std::io::Error::other("query folder is outside the project"));
-        }
-    }
-    write_query(&full, text)?;
-    if !uuid.is_empty() {
-        idb_core::mapping::add_mapping(project, &rel, uuid)?;
-    }
-    Ok(rel)
+/// 파일 없는 탭의 첫 실행 때 저장할 상대 경로를 짓고 쓴 뒤(R45.1) 매핑에 붙인다. 실제 경로가 프로젝트 밖이면 쓰지 않고,
+/// 폴더는 그 확인 뒤에만 만든다(idb-core 가 TUI 와 같이 한다). 매핑만 실패하면 저장은 하고 그 까닭을 돌려준다.
+pub fn save_new_query(project: &Path, group: &str, conn: &str, uuid: &str, text: &str) -> Result<(String, Option<String>), String> {
+    let rel = idb_core::mapping::unique_query_path(project, group, conn, chrono::Local::now()).map_err(|e| e.to_string())?;
+    write_rel(project, &rel, text)?;
+    let note = if uuid.is_empty() {
+        None
+    } else {
+        idb_core::mapping::add_mapping_checked(project, &rel, uuid)
+            .err()
+            .map(|e| format!("{rel} 는 저장했지만 매핑 실패: {e}"))
+    };
+    Ok((rel, note))
 }
 
-/// 원자적으로 쓴다(0644). 심볼릭 링크면 따라간 실제 파일에 쓴다.
-pub fn write_query(path: &Path, text: &str) -> std::io::Result<()> {
+const OUTSIDE: &str = "파일의 실제 경로가 프로젝트 밖이라 쓰지 않는다";
+
+fn write_rel(project: &Path, rel: &str, text: &str) -> Result<(), String> {
+    idb_core::mapping::write_project_file(project, rel, text).map_err(|e| match e {
+        idb_core::mapping::WriteError::Outside(_) => OUTSIDE.to_string(),
+        idb_core::mapping::WriteError::Io(e) => e,
+    })
+}
+
+/// 탭의 파일을 쓴다. 프로젝트 안 파일은 실제 경로를 쓰기 바로 전에 확인한다(R45.2). 사용자가 ⌘O 로 고른 프로젝트 밖
+/// 파일은 그 파일 그대로 쓴다. 어느 쪽이든 원자적으로 쓰고 원래 권한을 지킨다(R5.2, 새 파일은 0644).
+pub fn write_query(project: Option<&Path>, path: &Path, text: &str) -> Result<(), String> {
+    if let Some(dir) = project
+        && let Ok(rel) = path.strip_prefix(dir)
+    {
+        return write_rel(dir, &rel.to_string_lossy(), text);
+    }
     let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    idb_core::atomicfile::write(&real, ".query-*.tmp", text.as_bytes(), 0o644)
+    let perm = std::fs::metadata(&real)
+        .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777)
+        .unwrap_or(0o644);
+    idb_core::atomicfile::write(&real, ".db-*", text.as_bytes(), perm).map_err(|e| e.to_string())
+}
+
+/// `DB_AUTO_SAVE=0` 이면 자동 저장(첫 실행 저장·탭 옮김·닫기·1초 뒤)을 하지 않는다(TUI 와 같다).
+pub fn autosave_enabled(var: Option<&str>) -> bool {
+    var != Some("0")
 }
 
 #[cfg(test)]
@@ -188,6 +208,55 @@ mod tests {
     }
 
     #[test]
+    fn 프로젝트_안_파일이_밖을_가리키면_덮지_않는다() {
+        let d = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("queries")).unwrap();
+        std::fs::write(out.path().join("t.sql"), "outside").unwrap();
+        std::os::unix::fs::symlink(out.path().join("t.sql"), d.path().join("queries/a.sql")).unwrap();
+        let err = write_query(Some(d.path()), &d.path().join("queries/a.sql"), "new").unwrap_err();
+        assert!(err.contains("밖"), "{err}");
+        assert_eq!(std::fs::read_to_string(out.path().join("t.sql")).unwrap(), "outside");
+    }
+
+    #[test]
+    fn 저장은_0600_파일을_넓히지_않는다() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "queries/a.sql", "x", 1);
+        let p = d.path().join("queries/a.sql");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_query(Some(d.path()), &p, "y").unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        // 프로젝트 밖(⌘O) 파일도 같다
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().join("b.sql");
+        std::fs::write(&o, "x").unwrap();
+        std::fs::set_permissions(&o, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_query(Some(d.path()), &o, "z").unwrap();
+        assert_eq!(std::fs::metadata(&o).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&o).unwrap(), "z");
+    }
+
+    #[test]
+    fn idea_가_밖을_가리키면_쿼리는_저장하되_매핑은_고치지_않는다() {
+        let d = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(out.path(), d.path().join(".idea")).unwrap();
+        let (rel, note) = save_new_query(d.path(), "app", "app-stg", "u1", "select 1").unwrap();
+        assert!(d.path().join(&rel).exists());
+        assert!(note.is_some_and(|n| n.contains("매핑 실패")));
+        assert!(!out.path().join("data_source_mapping.xml").exists());
+    }
+
+    #[test]
+    fn 자동_저장_끄기는_0_일_때만이다() {
+        assert!(autosave_enabled(None));
+        assert!(autosave_enabled(Some("1")));
+        assert!(!autosave_enabled(Some("0")));
+    }
+
+    #[test]
     fn 자동_저장은_내용으로_가른다() {
         assert_eq!(before_autosave(Some("a"), "a", "a"), SaveDecision::Skip);
         assert_eq!(before_autosave(Some("a"), "a", "b"), SaveDecision::Write);
@@ -198,12 +267,13 @@ mod tests {
     #[test]
     fn 새_쿼리는_그룹_폴더에_저장하고_매핑에_붙인다() {
         let d = tempfile::tempdir().unwrap();
-        let rel = save_new_query(d.path(), "app", "app-stg", "u1", "select 1").unwrap();
+        let (rel, note) = save_new_query(d.path(), "app", "app-stg", "u1", "select 1").unwrap();
+        assert_eq!(note, None);
         assert!(rel.starts_with("queries/app/app-stg-") && rel.ends_with(".sql"), "{rel}");
         assert_eq!(std::fs::read_to_string(d.path().join(&rel)).unwrap(), "select 1");
         let xml = std::fs::read_to_string(d.path().join(".idea/data_source_mapping.xml")).unwrap();
         assert!(xml.contains(&rel) && xml.contains("u1"), "{xml}");
-        let rel2 = save_new_query(d.path(), "", "app-stg", "", "select 2").unwrap();
+        let (rel2, _) = save_new_query(d.path(), "", "app-stg", "", "select 2").unwrap();
         assert!(rel2.starts_with("queries/etc/"), "{rel2}");
     }
 }

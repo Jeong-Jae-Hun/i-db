@@ -5,7 +5,7 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
 
@@ -203,9 +203,113 @@ pub fn insert_mapping(data: &str, url: &str, uuid: &str) -> Result<String, Strin
     Ok(insert_line(data, close, &format!("{ind}{entry}"), nl))
 }
 
+/// rel 의 실제 경로다. 심볼릭 링크를 따라간 경로가 프로젝트 밖이면 오류다(R45.2).
+pub fn real_path(dir: &Path, rel: &str) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(dir).map_err(|e| e.to_string())?;
+    let mut p = dir.join(rel);
+    let mut rest = PathBuf::new();
+    let real = loop {
+        match fs::canonicalize(&p) {
+            // 빈 rest 를 join 하면 끝에 / 가 붙어 있는 파일이 폴더로 읽힌다(쓰기가 ENOTDIR 로 실패했다)
+            Ok(r) if rest.as_os_str().is_empty() => break r,
+            Ok(r) => break r.join(&rest),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = p.file_name().map(PathBuf::from) else {
+                    return Err(e.to_string());
+                };
+                // 빈 PathBuf 를 join 하면 끝에 / 가 붙어 폴더로 읽힌다
+                rest = if rest.as_os_str().is_empty() { name } else { name.join(rest) };
+                if !p.pop() {
+                    return Err(e.to_string());
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    if !real.starts_with(&root) {
+        return Err(format!("real path is outside the project: {rel}"));
+    }
+    Ok(real)
+}
+
+#[derive(Debug)]
+pub enum WriteError {
+    /// 실제 경로가 프로젝트 밖이다(R45.2)
+    Outside(String),
+    Io(String),
+}
+
+/// 프로젝트 안 rel 을 원자적으로 쓴다(R5.2·R45.2). 실제 경로(심볼릭 링크를 따라간 경로)가 프로젝트 밖이면 쓰지 않고,
+/// 폴더는 그 확인 뒤에만 만든다. 권한은 원본을 따르고 새 파일은 0644 다.
+pub fn write_project_file(dir: &Path, rel: &str, text: &str) -> Result<(), WriteError> {
+    let p = real_path(dir, rel).map_err(WriteError::Outside)?;
+    let perm = fs::metadata(&p).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o644);
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).map_err(|e| WriteError::Io(e.to_string()))?;
+        // 만든 뒤에도 다시 본다(그사이 바뀐 링크를 따라 밖에 쓰지 않게)
+        real_path(dir, rel).map_err(WriteError::Outside)?;
+    }
+    atomicfile::write(&p, ".db-*", text.as_bytes(), perm).map_err(|e| WriteError::Io(e.to_string()))
+}
+
+/// 매핑 파일의 실제 경로를 확인한 뒤 붙인다. `.idea` 가 밖을 가리키면 고치지 않는다(R45.2).
+pub fn add_mapping_checked(project: &Path, rel: &str, uuid: &str) -> Result<(), String> {
+    real_path(project, ".idea/data_source_mapping.xml")?;
+    add_mapping(project, rel, uuid).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 실제_경로가_프로젝트_밖이면_쓰지_않는다() {
+        let d = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        fs::create_dir_all(d.path().join("queries")).unwrap();
+        fs::write(out.path().join("x.sql"), "outside").unwrap();
+        std::os::unix::fs::symlink(out.path().join("x.sql"), d.path().join("queries/a.sql")).unwrap();
+        assert!(matches!(
+            write_project_file(d.path(), "queries/a.sql", "new"),
+            Err(WriteError::Outside(_))
+        ));
+        assert_eq!(fs::read_to_string(out.path().join("x.sql")).unwrap(), "outside");
+        // 밖을 가리키는 폴더 링크 아래 새 파일도, 폴더도 만들지 않는다
+        std::os::unix::fs::symlink(out.path(), d.path().join("queries/linked")).unwrap();
+        assert!(matches!(
+            write_project_file(d.path(), "queries/linked/sub/b.sql", "x"),
+            Err(WriteError::Outside(_))
+        ));
+        assert!(!out.path().join("sub").exists());
+    }
+
+    #[test]
+    fn 쓰기는_원래_권한을_지키고_새_파일은_0644_다() {
+        let d = tempfile::tempdir().unwrap();
+        write_project_file(d.path(), "queries/app/new.sql", "a").unwrap();
+        let p = d.path().join("queries/app/new.sql");
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o644);
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        write_project_file(d.path(), "queries/app/new.sql", "b").unwrap();
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&p).unwrap(), "b");
+    }
+
+    #[test]
+    fn idea_가_밖을_가리키면_매핑을_고치지_않는다() {
+        let d = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(out.path(), d.path().join(".idea")).unwrap();
+        assert!(add_mapping_checked(d.path(), "queries/a.sql", "u1").is_err());
+        assert!(!out.path().join("data_source_mapping.xml").exists());
+        let d2 = tempfile::tempdir().unwrap();
+        add_mapping_checked(d2.path(), "queries/a.sql", "u1").unwrap();
+        assert!(
+            fs::read_to_string(d2.path().join(".idea/data_source_mapping.xml"))
+                .unwrap()
+                .contains("u1")
+        );
+    }
 
     #[test]
     fn 없는_파일은_DataGrip_형식으로_만든다() {
