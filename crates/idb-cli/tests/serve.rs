@@ -809,3 +809,151 @@ async fn 원격_엔진으로_복호화와_접속_시험이_로컬과_같은_답�
     assert_eq!(local.conn_get("logs-stg").await.unwrap().user, "loki_user");
     remote.close().await;
 }
+
+#[test]
+fn 쿼리_파일은_queries_안에서만_읽고_쓰고_충돌과_매핑을_알린다() {
+    let tmp = offline_project(1);
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("queries/grp")).unwrap();
+    fs::write(dir.join("queries/grp/a.sql"), "select 1;\n").unwrap();
+    std::os::unix::fs::symlink("../.env", dir.join("queries/env.sql")).unwrap();
+    std::os::unix::fs::symlink("..", dir.join("queries/up")).unwrap();
+    let mut s = Serve::start(dir);
+    s.hello();
+
+    // 밖으로 빠지는 길은 읽지도 쓰지도 않는다
+    for path in [
+        "../.env",
+        "/etc/passwd",
+        "queries/../.env.sql",
+        "queries/env.sql",
+        "queries/up/.dbtui/x.sql",
+        "queries/a.txt",
+    ] {
+        let r = s.call(json!({"op": "query_read", "path": path}));
+        assert_eq!(err(&r).0, 2, "{path}: {r}");
+        let r = s.call(json!({"op": "query_write", "path": path, "content": "x", "force": true}));
+        assert_eq!(err(&r).0, 2, "{path}: {r}");
+    }
+    assert!(!dir.join(".dbtui/x.sql").exists());
+    let r = s.call(json!({"op": "query_list"}));
+    let paths: Vec<&str> = r["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"queries/grp/a.sql"), "{r}");
+    assert!(!paths.iter().any(|p| p.contains("env") || p.contains("up/")), "{r}");
+
+    // 읽은 해시로 쓰면 되고, 그사이 바뀌면 충돌이다
+    let r = s.call(json!({"op": "query_read", "path": "queries/grp/a.sql"}));
+    let h = r["result"]["hash"].as_str().unwrap().to_string();
+    assert_eq!(r["result"]["content"], "select 1;\n");
+    let r = s.call(json!({"op": "query_write", "path": "queries/grp/a.sql", "content": "select 2;\n", "base_hash": h}));
+    assert_eq!(r["result"]["conflict"], false, "{r}");
+    let h2 = r["result"]["hash"].as_str().unwrap().to_string();
+    fs::write(dir.join("queries/grp/a.sql"), "select 9;\n").unwrap();
+    let r = s.call(json!({"op": "query_write", "path": "queries/grp/a.sql", "content": "select 3;\n", "base_hash": h2}));
+    assert_eq!(r["result"]["conflict"], true, "{r}");
+    assert_ne!(r["result"]["hash"].as_str().unwrap(), h2);
+    assert_eq!(fs::read_to_string(dir.join("queries/grp/a.sql")).unwrap(), "select 9;\n");
+    let r = s.call(json!({"op": "query_conflict", "path": "queries/grp/a.sql", "content": "select 3;\n", "conn": "app-stg"}));
+    let copy = r["result"]["path"].as_str().unwrap().to_string();
+    assert!(copy.starts_with("queries/grp/a-conflict-"), "{r}");
+    assert_eq!(fs::read_to_string(dir.join(&copy)).unwrap(), "select 3;\n");
+
+    // 새 쿼리는 serve 가 길을 정하고 매핑을 붙인다
+    let r = s.call(json!({"op": "query_new", "conn": "app-stg", "content": "select 4;\n"}));
+    let new = r["result"]["path"].as_str().unwrap().to_string();
+    assert!(new.starts_with("queries/") && new.contains("app-stg-"), "{r}");
+    let mapping = fs::read_to_string(dir.join(".idea/data_source_mapping.xml")).unwrap();
+    assert!(
+        mapping.contains(&new[..]) || mapping.contains(new.trim_start_matches("queries/")),
+        "{mapping}"
+    );
+    let r = s.call(json!({"op": "query_list"}));
+    let f = r["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == new.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(f["conn"], "app-stg", "{r}");
+
+    // 즐겨찾기
+    let r = s.call(json!({"op": "favorite_add", "name": "q1", "conn": "app-stg", "sql": "select 1"}));
+    assert_eq!(r["result"]["saved"], true, "{r}");
+    let r = s.call(json!({"op": "favorite_add", "name": "q1", "conn": "app-stg", "sql": "select 2"}));
+    assert_eq!(r["result"]["exists"], true, "{r}");
+    let r = s.call(json!({"op": "favorites_list"}));
+    assert_eq!(r["result"][0]["sql"], "select 1", "{r}");
+    s.call(json!({"op": "favorite_remove", "name": "q1"}));
+    let r = s.call(json!({"op": "favorites_list"}));
+    assert_eq!(r["result"], json!([]), "{r}");
+    s.finish(&secrets(dir));
+}
+
+#[test]
+fn 읽기_전용_디스크의_쿼리_파일_쓰기는_실행_오류다() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = offline_project(1);
+    let dir = tmp.path();
+    fs::create_dir_all(dir.join("queries/grp")).unwrap();
+    fs::set_permissions(dir.join("queries/grp"), fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(dir.join("queries/grp/probe.sql"), "").is_ok() {
+        return; // root 로 돌면 권한이 듣지 않는다
+    }
+    let mut s = Serve::start(dir);
+    s.hello();
+    let r = s.call(json!({"op": "query_write", "path": "queries/grp/b.sql", "content": "select 1"}));
+    let (code, msg, _) = err(&r);
+    assert_eq!(code, 1);
+    assert!(msg.starts_with("쿼리 파일을 쓰지 못함"), "{msg}");
+    s.finish(&secrets(dir));
+    fs::set_permissions(dir.join("queries/grp"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[tokio::test]
+async fn 원격_엔진으로_쿼리_파일을_쓰면_serve_쪽_프로젝트에_남는다() {
+    use idb_engine::protocol::{QueryText, QueryWritten, Request};
+    use idb_engine::{Engine, RemoteEngine, RemoteSpec};
+    use std::sync::Arc;
+    let tmp = offline_project(1);
+    let spec = RemoteSpec {
+        name: "loop".into(),
+        program: env!("CARGO_BIN_EXE_db").into(),
+        args: vec!["serve".into(), "-p".into(), tmp.path().to_string_lossy().into_owned()],
+    };
+    let remote = Engine::Remote(Arc::new(RemoteEngine::connect(&spec).await.unwrap()));
+    let w: QueryWritten = serde_json::from_value(
+        remote
+            .call(Request::QueryNew {
+                conn: "app-stg".into(),
+                content: "select 1;\n".into(),
+            })
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(tmp.path().join(&w.path)).unwrap(), "select 1;\n");
+    let w2: QueryWritten = serde_json::from_value(
+        remote
+            .call(Request::QueryWrite {
+                path: w.path.clone(),
+                content: "select 2;\n".into(),
+                base_hash: w.hash.clone(),
+                force: false,
+            })
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!w2.conflict);
+    let t: QueryText = serde_json::from_value(remote.call(Request::QueryRead { path: w.path.clone() }).await.unwrap()).unwrap();
+    assert_eq!((t.content.as_str(), t.hash), ("select 2;\n", w2.hash));
+    let r = remote.call(Request::QueryRead { path: "../.env".into() }).await.unwrap_err();
+    assert_eq!(r.code, 2);
+    remote.close().await;
+}

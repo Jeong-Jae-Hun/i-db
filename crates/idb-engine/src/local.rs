@@ -597,6 +597,60 @@ impl LocalEngine {
                 self.conn_folder(&names, &folder).await?;
                 json(serde_json::json!({}))
             }
+            // 쿼리 파일·즐겨찾기는 사용자 자신의 프로젝트 파일이라 serve 에서도 쓰기를 받는다(경계는 queries.rs)
+            Request::QueryList => json(crate::queries::list(&self.proj())),
+            Request::QueryRead { path } => json(crate::queries::read(&self.proj(), &path)?),
+            Request::QueryWrite {
+                path,
+                content,
+                base_hash,
+                force,
+            } => json(crate::queries::write(&self.proj(), &path, &content, &base_hash, force)?),
+            Request::QueryNew { conn, content } => {
+                let w = crate::queries::new_file(&self.proj(), &conn, &content)?;
+                self.remember_mapping(&w);
+                json(w)
+            }
+            Request::QueryConflict { path, content, conn } => {
+                let w = crate::queries::conflict_copy(&self.proj(), &path, &content, &conn)?;
+                self.remember_mapping(&w);
+                json(w)
+            }
+            Request::FavoritesList => {
+                let st = idb_core::favorites::Store::load(&self.proj().dir).map_err(|e| EngineError::run(e.to_string()))?;
+                json(st.list())
+            }
+            Request::FavoriteAdd {
+                name,
+                conn,
+                sql,
+                overwrite,
+            } => {
+                let st = idb_core::favorites::Store::load(&self.proj().dir).map_err(|e| EngineError::run(e.to_string()))?;
+                let name = idb_core::favorites::normalize_name(&name).map_err(|e| EngineError::usage(e.to_string()))?;
+                if !overwrite && st.get(&name).is_some() {
+                    return json(FavoriteSaved {
+                        saved: false,
+                        exists: true,
+                    });
+                }
+                st.put(idb_core::favorites::Fav {
+                    name,
+                    conn,
+                    sql,
+                    saved: Default::default(),
+                })
+                .map_err(|e| EngineError::run(e.to_string()))?;
+                json(FavoriteSaved {
+                    saved: true,
+                    exists: false,
+                })
+            }
+            Request::FavoriteRemove { name } => {
+                let st = idb_core::favorites::Store::load(&self.proj().dir).map_err(|e| EngineError::run(e.to_string()))?;
+                st.delete(&name).map_err(|e| EngineError::run(e.to_string()))?;
+                json(serde_json::json!({}))
+            }
             Request::ReadQuery { conn, sql, limit } => {
                 let c = self.conn(&conn, Kind::Pg)?;
                 // 접속을 열기 전에 거른다. 놓친 쓰기는 run_read_only_rows 의 READ ONLY 트랜잭션이 막는다
@@ -895,6 +949,16 @@ impl LocalEngine {
     }
 
     /// 접속 파일을 다시 읽어 바꾼다. 진행 중인 요청은 옛 사본으로 끝난다.
+    /// 붙인 매핑을 프로젝트 사본에도 남겨 다음 query_list 가 그 접속으로 보인다.
+    fn remember_mapping(&self, w: &QueryWritten) {
+        if w.uuid.is_empty() || !w.mapping_error.is_empty() {
+            return;
+        }
+        let mut p = (*self.proj()).clone();
+        p.mapping.insert(w.path.clone(), w.uuid.clone());
+        *self.proj.write().unwrap() = Arc::new(p);
+    }
+
     fn reload(&self) -> Result<(), EngineError> {
         let dir = self.proj().dir.clone();
         let p = idb_core::project::load_project(&dir)

@@ -8,6 +8,7 @@ pub mod flows;
 pub mod local;
 pub mod lookup;
 pub mod protocol;
+pub mod queries;
 mod redis;
 pub mod remote;
 pub mod serve;
