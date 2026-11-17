@@ -42,7 +42,7 @@ use crate::vm::queries::{self, QueryFile};
 use crate::vm::runtime::{Canceler, Prefs, Runtime, Target, connect};
 use crate::vm::safety::{Ask, Confirms, Gate, Tone, lock_label, tone};
 use crate::vm::tabs::{Tabs, target_sql};
-use crate::vm::tree::{ConnTree, RowKind};
+use crate::vm::tree::{Child, ChildKind, ConnTree, LoadReq, RowKind};
 use crate::vm::zoom;
 use gpui_component::ResizableState;
 use idb_engine::SessionState;
@@ -128,8 +128,8 @@ pub struct Workspace {
     switching: std::collections::HashSet<String>,
     /// 접속마다 데이터베이스를 바꾼 횟수. 요청은 보낼 때 값을 들고 가고, 답이 올 때 다르면 버린다(R27.1)
     db_gen: HashMap<String, u64>,
-    /// 사이드바에서 고른 테이블(두 번 누르면 연다)
-    selected_table: Option<(String, String, String)>,
+    /// 트리에서 고른 줄(접속 이름 또는 자식 id)
+    selected_node: Option<String>,
     // ─── 접속 전 ───
     dir_input: Entity<InputState>,
     remotes: Result<Vec<String>, String>,
@@ -240,7 +240,7 @@ impl Workspace {
             autosave_stopped: HashMap::new(),
             autosave_tasks: HashMap::new(),
             autosave_on: queries::autosave_enabled(std::env::var("DB_AUTO_SAVE").ok().as_deref()),
-            selected_table: None,
+            selected_node: None,
             dir_input,
             remotes: crate::vm::runtime::remote_names(),
             connecting: false,
@@ -474,6 +474,9 @@ impl Workspace {
             self.save_prefs();
         }
         self.tree = ConnTree::new(info.conns);
+        if let Some(m) = self.prefs.tree_memory.get(&target.label()) {
+            self.tree.restore(&m.collapsed, &m.expanded);
+        }
         self.target = Some(target.clone());
         self.refresh_queries();
         self.engine = Some(engine);
@@ -508,7 +511,7 @@ impl Workspace {
         self.file_text.clear();
         self.autosave_stopped.clear();
         self.autosave_tasks.clear();
-        self.selected_table = None;
+        self.selected_node = None;
         cx.notify();
     }
 
@@ -539,6 +542,15 @@ impl Workspace {
                 self.sync_catalog_cells();
             }
             "redis" => {
+                if let Some(i) =
+                    self.tabs.tabs.iter().position(|t| {
+                        t.conn.as_deref() == Some(name.as_str()) && matches!(self.bodies.get(&t.id), Some(Body::Redis { .. }))
+                    })
+                {
+                    self.tabs.activate(i);
+                    cx.notify();
+                    return;
+                }
                 let id = self.tabs.open_named(Some(name.clone()), name.clone());
                 let (rt, engine, ws) = (self.rt.clone(), self.engine.clone(), cx.entity().downgrade());
                 let Some(engine) = engine else { return };
@@ -713,6 +725,8 @@ impl Workspace {
     /// 바꾼 뒤: 세대를 올리고 그 접속의 결과는 고치기·되돌리기·다음 쪽을 막는다.
     pub(super) fn on_db_switched(&mut self, conn: &str, cx: &mut Context<Self>) {
         *self.db_gen.entry(conn.to_string()).or_default() += 1;
+        // 트리도 옛 데이터베이스 것이라 버린다(펼쳐 있으면 다음에 펼칠 때 새로 읽는다)
+        self.tree.forget_conn(conn);
         for r in self.results_for(conn, cx) {
             r.update(cx, |v, cx| v.invalidate(cx));
         }
@@ -850,6 +864,137 @@ impl Workspace {
     fn refresh_catalog(&mut self, conn: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.catalogs.remove(conn);
         self.ensure_catalog(conn, window, cx);
+        self.tree_reload_conn(conn, window, cx);
+    }
+
+    // ─── 접속 트리(펼쳐 읽기) ───
+
+    /// 펼치거나 접는다. 처음 펼치면 읽는다(탭이 없어도 된다).
+    pub(super) fn tree_toggle(&mut self, node: String, window: &mut Window, cx: &mut Context<Self>) {
+        let req = self.tree.toggle_node(&node);
+        self.save_tree_memory();
+        if let Some(r) = req {
+            self.tree_dispatch(r, window, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn tree_retry(&mut self, node: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(r) = self.tree.retry(&node) {
+            self.tree_dispatch(r, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// 접속의 읽은 것을 버리고, 펼쳐 있으면 다시 읽는다(새로 고침·데이터베이스 바꿈).
+    fn tree_reload_conn(&mut self, conn: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree.forget_conn(conn);
+        if self.tree.is_expanded(conn)
+            && let Some(r) = self.tree.retry(conn)
+        {
+            self.tree_dispatch(r, window, cx);
+        }
+    }
+
+    /// 트리 읽기를 보낸다. 메타데이터만 읽어 확인 창·요청 칸(busy)을 쓰지 않고, 실패는 그 자리에 오류 줄로 남긴다.
+    /// 그사이 데이터베이스를 바꿨으면 답을 버린다.
+    fn tree_dispatch(&mut self, req: LoadReq, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else { return };
+        let conn = match &req {
+            LoadReq::Catalog { conn } | LoadReq::RedisScan { conn } | LoadReq::SourceChildren { conn, .. } => conn.clone(),
+        };
+        let gen0 = self.db_gen(&conn);
+        let job = self.rt.spawn({
+            let req = req.clone();
+            async move {
+                match req {
+                    LoadReq::Catalog { conn } => engine.catalog(&conn).await.map(TreeData::Catalog),
+                    LoadReq::RedisScan { conn } => engine.redis_scan(&conn, "*").await.map(TreeData::Keys),
+                    LoadReq::SourceChildren { conn, path, .. } => engine.source_children(&conn, &path).await.map(TreeData::Nodes),
+                }
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let r = job.rx.await;
+            let _ = this.update_in(cx, move |ws, window, cx| {
+                if ws.db_gen(&conn) != gen0 {
+                    return;
+                }
+                let node = match &req {
+                    LoadReq::Catalog { conn } | LoadReq::RedisScan { conn } => conn.clone(),
+                    LoadReq::SourceChildren { node, .. } => node.clone(),
+                };
+                let more = match r {
+                    Ok(Ok(TreeData::Catalog(cat))) => {
+                        let more = ws.tree.set_catalog(&conn, &cat);
+                        // 자동 완성도 같은 카탈로그를 쓴다
+                        ws.catalogs.insert(conn.clone(), Rc::new(cat));
+                        ws.sync_catalog_cells();
+                        more
+                    }
+                    Ok(Ok(TreeData::Keys(s))) => ws.tree.set_redis_keys(&conn, s.keys),
+                    Ok(Ok(TreeData::Nodes(n))) => ws.tree.set_source_children(&node, n),
+                    Ok(Err(e)) => {
+                        ws.tree.set_failed(&node, e.error);
+                        Vec::new()
+                    }
+                    Err(_) => {
+                        ws.tree.set_failed(&node, "멈춤".into());
+                        Vec::new()
+                    }
+                };
+                for r in more {
+                    ws.tree_dispatch(r, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 자식 줄을 눌렀다. 묶음은 펼치고, 테이블은 두 번 눌러 열고, Redis 키·저장소 항목은 그 탭에서 연다.
+    pub(super) fn tree_child_click(&mut self, conn: String, child: Child, clicks: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_node = Some(child.id.clone());
+        match child.kind {
+            ChildKind::Schema
+            | ChildKind::RedisNs { .. }
+            | ChildKind::Source {
+                has_children: true,
+                openable: false,
+                ..
+            } => self.tree_toggle(child.id, window, cx),
+            ChildKind::Table | ChildKind::View if clicks >= 2 => self.open_table(conn, child.path, child.label, window, cx),
+            ChildKind::RedisKey => self.open_redis_key(conn, child.path, window, cx),
+            ChildKind::Source { openable: true, .. } => self.open_source_path(conn, child.path, window, cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn open_redis_key(&mut self, conn: String, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_conn(conn.clone(), window, cx);
+        if let Some(Body::Redis { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
+            let view = view.clone();
+            window.defer(cx, move |window, cx| view.update(cx, |v, cx| v.open_key(key, window, cx)));
+        }
+    }
+
+    fn open_source_path(&mut self, conn: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_conn(conn, window, cx);
+        if let Some(Body::Source { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
+            let view = view.clone();
+            window.defer(cx, move |window, cx| view.update(cx, |v, cx| v.open(path, window, cx)));
+        }
+    }
+
+    /// 트리 펼침을 프로젝트마다 기억한다(R75.6).
+    fn save_tree_memory(&mut self) {
+        let Some(t) = &self.target else { return };
+        let (collapsed, expanded) = self.tree.memory();
+        self.prefs
+            .tree_memory
+            .insert(t.label(), crate::vm::runtime::TreeMemory { collapsed, expanded });
+        self.save_prefs();
     }
 
     /// 테이블 DDL 을 새 SQL 탭에 연다.
@@ -1805,13 +1950,16 @@ impl Workspace {
                             .child(kit::pill(&sc, theme.secondary, theme.muted_foreground, count.to_string()))
                             .on_click(cx.listener(move |ws, _, _, cx| {
                                 ws.tree.toggle(&label);
+                                ws.save_tree_memory();
                                 cx.notify();
                             }))
                             .into_any_element()
                     }
-                    RowKind::Conn(ci) => {
+                    RowKind::Conn { index: ci, expanded } => {
                         let c = self.tree.conns[ci].clone();
-                        let selected = active.as_deref() == Some(c.name.as_str());
+                        let selected = self.selected_node.as_deref() == Some(c.name.as_str()) || active.as_deref() == Some(c.name.as_str());
+                        let (n_toggle, n_click) = (c.name.clone(), c.name.clone());
+                        let is_pg = c.kind == "postgresql";
                         let (n_open, n_ref, n_copy) = (c.name.clone(), c.name.clone(), c.name.clone());
                         let tip = format!("{} · {} {}\n{}", c.kind, c.host, c.db, c.group);
                         let ws = cx.entity().downgrade();
@@ -1841,6 +1989,22 @@ impl Workspace {
                                 h_flex()
                                     .gap(px(sc.s8()))
                                     .debug_selector(move || format!("conn-line1-{i}"))
+                                    .child(
+                                        div()
+                                            .id(("conn-chevron", i))
+                                            .debug_selector(move || format!("conn-chevron-{i}"))
+                                            .flex_shrink_0()
+                                            .size(px(sc.icon()))
+                                            .cursor_pointer()
+                                            .child(
+                                                Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                                                    .size(px(sc.icon())),
+                                            )
+                                            .on_click(cx.listener(move |ws, _, window, cx| {
+                                                cx.stop_propagation();
+                                                ws.tree_toggle(n_toggle.clone(), window, cx);
+                                            })),
+                                    )
                                     .child(kit::kind_icon(&sc, &c.kind, theme.muted_foreground))
                                     .child(
                                         kit::text(&sc, sc.text(), name_color, c.name.clone())
@@ -1853,12 +2017,22 @@ impl Workspace {
                             .when(two_line, |d| {
                                 d.child(
                                     kit::text(&sc, sc.small(), theme.muted_foreground, row.detail.clone())
-                                        .pl(px(sc.icon() + sc.s8()))
+                                        .pl(px(2.0 * (sc.icon() + sc.s8())))
                                         .debug_selector(move || format!("conn-line2-{i}")),
                                 )
                             })
                             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                            .on_click(cx.listener(move |ws, _, window, cx| ws.select_conn(n_open.clone(), window, cx)))
+                            // 한 번: 고른다(PG 는 지금 SQL 탭의 접속으로 삼는다). 두 번: 펼치거나 접는다
+                            .on_click(cx.listener(move |ws, ev: &ClickEvent, window, cx| {
+                                if ev.click_count() >= 2 {
+                                    ws.tree_toggle(n_click.clone(), window, cx);
+                                } else if is_pg {
+                                    ws.select_conn(n_open.clone(), window, cx);
+                                } else {
+                                    ws.selected_node = Some(n_open.clone());
+                                    cx.notify();
+                                }
+                            }))
                             .context_menu(move |menu, _, _| {
                                 let (ws1, ws2) = (ws.clone(), ws.clone());
                                 let (n1, n2, n3) = (n_ref.clone(), n_ref.clone(), n_copy.clone());
@@ -1875,84 +2049,139 @@ impl Workspace {
                             })
                             .into_any_element()
                     }
-                };
-            list = list.child(el);
-        }
-
-        // 지금 접속의 테이블(카탈로그). 한 번 누르면 고르고 두 번 누르면 데이터를 연다
-        let mut objects = v_flex().id("objects").py(px(sc.s4())).gap(px(sc.row_gap()));
-        let filter = self.tree_filter.read(cx).value().to_lowercase();
-        let has_catalog = active.as_ref().is_some_and(|c| self.catalogs.contains_key(c));
-        if let Some(conn) = &active
-            && let Some(cat) = self.catalogs.get(conn)
-        {
-            let mut i: usize = 0;
-            for s in &cat.schemas {
-                let tables: Vec<_> = s
-                    .tables
-                    .iter()
-                    .filter(|t| filter.is_empty() || t.name.to_lowercase().contains(&filter))
-                    .collect();
-                if tables.is_empty() {
-                    continue;
-                }
-                objects = objects.child(
-                    kit::text(&sc, sc.small(), theme.muted_foreground, s.name.clone())
-                        .px(px(sc.s12()))
-                        .pt(px(sc.s8())),
-                );
-                for t in tables {
-                    i += 1;
-                    let key = (conn.clone(), s.name.clone(), t.name.clone());
-                    let selected = self.selected_table.as_ref() == Some(&key);
-                    let k_click = key.clone();
-                    let k_menu = key.clone();
-                    let ws = cx.entity().downgrade();
-                    let tip = format!("{}.{} · 열 {}개 · 두 번 눌러 데이터 보기", s.name, t.name, t.columns.len());
-                    objects = objects.child(
-                        kit::row(&sc, &theme, selected)
-                            .id(("table", i))
+                    RowKind::Child { conn: ci, child, expanded } => {
+                        let conn = self.tree.conns[ci].name.clone();
+                        let indent = sc.s8() + (row.depth.saturating_sub(1)) as f32 * sc.s12();
+                        let selected = self.selected_node.as_deref() == Some(child.id.as_str());
+                        let icon: gpui::AnyElement = match &child.kind {
+                            ChildKind::Table => kit::kind_icon(&sc, "dynamodb", theme.muted_foreground).into_any_element(),
+                            ChildKind::View => Icon::new(IconName::Eye)
+                                .size(px(sc.icon()))
+                                .text_color(theme.muted_foreground)
+                                .into_any_element(),
+                            ChildKind::Schema | ChildKind::RedisNs { .. } | ChildKind::Source { has_children: true, .. } => {
+                                Icon::new(if expanded { IconName::FolderOpen } else { IconName::Folder })
+                                    .size(px(sc.icon()))
+                                    .text_color(theme.muted_foreground)
+                                    .into_any_element()
+                            }
+                            ChildKind::RedisKey | ChildKind::Source { .. } => Icon::new(IconName::File)
+                                .size(px(sc.icon()))
+                                .text_color(theme.muted_foreground)
+                                .into_any_element(),
+                            ChildKind::More(_) => div().size(px(sc.icon())).into_any_element(),
+                        };
+                        let expandable = child.expandable();
+                        let (c_click, c_toggle) = (child.clone(), child.clone());
+                        let (conn_click, conn_menu) = (conn.clone(), conn.clone());
+                        let ws = cx.entity().downgrade();
+                        let warn = matches!(child.kind, ChildKind::Source { warn: true, .. });
+                        let is_table = matches!(child.kind, ChildKind::Table | ChildKind::View);
+                        let menu_child = child.clone();
+                        let base = kit::row(&sc, &theme, selected)
+                            .id(("child", i))
                             .mx(px(sc.s4()))
+                            .pl(px(indent))
                             .cursor_pointer()
                             .hover(|st| st.bg(theme.sidebar_accent))
-                            .debug_selector(move || format!("table-row-{i}"))
-                            .child(div().flex_1().min_w_0().truncate().child(t.name.clone()))
-                            .when(t.view, |d| d.child(kit::pill(&sc, theme.secondary, theme.muted_foreground, "view")))
-                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                            .debug_selector(move || format!("child-row-{i}"))
+                            .child(
+                                div()
+                                    .id(("child-chevron", i))
+                                    .debug_selector(move || format!("child-chevron-{i}"))
+                                    .flex_shrink_0()
+                                    .size(px(sc.icon()))
+                                    .when(expandable, |d| {
+                                        d.child(
+                                            Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                                                .size(px(sc.icon())),
+                                        )
+                                        .on_click(cx.listener(move |ws, _, window, cx| {
+                                            cx.stop_propagation();
+                                            ws.tree_toggle(c_toggle.id.clone(), window, cx);
+                                        }))
+                                    }),
+                            )
+                            .child(div().flex_shrink_0().size(px(sc.icon())).child(icon))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when(matches!(child.kind, ChildKind::More(_)), |d| d.text_color(theme.muted_foreground))
+                                    .child(child.label.clone()),
+                            )
+                            .when(!child.info.is_empty(), |d| {
+                                d.child(
+                                    kit::text(
+                                        &sc,
+                                        sc.small(),
+                                        if warn { theme.warning } else { theme.muted_foreground },
+                                        child.info.clone(),
+                                    )
+                                    .flex_shrink_0(),
+                                )
+                            })
                             .on_click(cx.listener(move |ws, ev: &ClickEvent, window, cx| {
-                                ws.selected_table = Some(k_click.clone());
-                                if ev.click_count() >= 2 {
-                                    let (c, sn, tn) = k_click.clone();
-                                    ws.open_table(c, sn, tn, window, cx);
-                                }
-                                cx.notify();
-                            }))
-                            .context_menu(move |menu, _, _| {
+                                ws.tree_child_click(conn_click.clone(), c_click.clone(), ev.click_count(), window, cx)
+                            }));
+                        if is_table {
+                            base.context_menu(move |menu, _, _| {
                                 let (ws1, ws2, ws3) = (ws.clone(), ws.clone(), ws.clone());
-                                let (k1, k2, k3) = (k_menu.clone(), k_menu.clone(), k_menu.clone());
-                                let name = format!("{}.{}", k_menu.1, k_menu.2);
+                                let (c1, c2, c3) = (conn_menu.clone(), conn_menu.clone(), conn_menu.clone());
+                                let (s1, t1) = (menu_child.path.clone(), menu_child.label.clone());
+                                let (s2, t2) = (s1.clone(), t1.clone());
+                                let name = format!("{s1}.{t1}");
                                 menu.item(PopupMenuItem::new("데이터 열기").on_click(move |_, window, cx| {
-                                    let (c, s, t) = k1.clone();
-                                    let _ = ws1.update(cx, |ws, cx| ws.open_table(c, s, t, window, cx));
+                                    let _ = ws1.update(cx, |ws, cx| ws.open_table(c1.clone(), s1.clone(), t1.clone(), window, cx));
                                 }))
                                 .item(PopupMenuItem::new("DDL 보기").on_click(move |_, window, cx| {
-                                    let (c, s, t) = k2.clone();
-                                    let _ = ws2.update(cx, |ws, cx| ws.show_ddl(c, s, t, window, cx));
+                                    let _ = ws2.update(cx, |ws, cx| ws.show_ddl(c2.clone(), s2.clone(), t2.clone(), window, cx));
                                 }))
                                 .item(PopupMenuItem::new("이름 복사").on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(name.clone()));
                                 }))
                                 .separator()
                                 .item(PopupMenuItem::new("새로 고침").on_click(move |_, window, cx| {
-                                    let c = k3.0.clone();
-                                    let _ = ws3.update(cx, |ws, cx| ws.refresh_catalog(&c, window, cx));
+                                    let _ = ws3.update(cx, |ws, cx| ws.refresh_catalog(&c3, window, cx));
                                 }))
-                            }),
-                    );
-                }
-            }
+                            })
+                            .into_any_element()
+                        } else {
+                            base.into_any_element()
+                        }
+                    }
+                    RowKind::Loading { .. } => {
+                        let indent = sc.s8() + (row.depth.saturating_sub(1)) as f32 * sc.s12() + sc.icon() + sc.s8();
+                        kit::row(&sc, &theme, false)
+                            .mx(px(sc.s4()))
+                            .pl(px(indent))
+                            .debug_selector(move || format!("child-row-{i}"))
+                            .child(kit::text(&sc, sc.small(), theme.muted_foreground, "읽는 중…"))
+                            .into_any_element()
+                    }
+                    RowKind::Failed { node, msg } => {
+                        let indent = sc.s8() + (row.depth.saturating_sub(1)) as f32 * sc.s12() + sc.icon() + sc.s8();
+                        kit::row(&sc, &theme, false)
+                            .id(("failed", i))
+                            .mx(px(sc.s4()))
+                            .pl(px(indent))
+                            .debug_selector(move || format!("child-row-{i}"))
+                            .child(kit::text(&sc, sc.small(), theme.danger, msg.clone()).flex_1().min_w_0())
+                            .child(
+                                Button::new(("retry", i))
+                                    .ghost()
+                                    .label("다시 시도")
+                                    .on_click(cx.listener(move |ws, _, window, cx| ws.tree_retry(node.clone(), window, cx))),
+                            )
+                            .tooltip(move |window, cx| Tooltip::new(msg.clone()).build(window, cx))
+                            .into_any_element()
+                    }
+                };
+            list = list.child(el);
         }
 
+        let filter = self.tree_filter.read(cx).value().to_lowercase();
         let queries_el = self.render_queries(&filter, cx);
         let section = |title: &'static str| kit::section(&sc, &theme, title);
         v_flex()
@@ -1986,19 +2215,8 @@ impl Workspace {
                     .overflow_y_scroll()
                     .child(section("접속"))
                     .child(list)
-                    .when(has_catalog, |d| d.child(section("테이블")).child(objects))
                     .child(section("쿼리"))
-                    .child(queries_el)
-                    .when(active.is_some() && !has_catalog, |d| {
-                        d.child(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child("테이블 목록을 읽는 중…"),
-                        )
-                    }),
+                    .child(queries_el),
             )
     }
 
@@ -2446,6 +2664,12 @@ impl Workspace {
     }
 }
 
+enum TreeData {
+    Catalog(Catalog),
+    Keys(idb_engine::ScanResult),
+    Nodes(Vec<idb_engine::Node>),
+}
+
 /// 이보다 좁은 사이드바는 접속 줄을 한 줄로 접는다(호스트는 툴팁)
 const NARROW_SIDEBAR: f32 = 220.0;
 
@@ -2792,14 +3016,26 @@ mod tests {
         cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
         wait(cx, &ws, |w| w.engine.is_some());
         cx.simulate_resize(gpui::size(px(1600.), px(4000.)));
+        // 접속 하나를 펼쳐 스키마·테이블(두 단계 들여쓰기)도 잰다. 엔진 대신 카탈로그를 바로 넣는다
+        cx.update(|_, cx| {
+            ws.update(cx, |w, _| {
+                let cat: Catalog = serde_json::from_value(serde_json::json!({"schemas": [{"name": "public", "tables": [
+                    {"name": "users", "view": false, "columns": []}, {"name": "v_users", "view": true, "columns": []}]}], "functions": []}))
+                .unwrap();
+                w.tree.toggle_node("app-stg");
+                w.tree.set_catalog("app-stg", &cat);
+                w.tree.toggle_node("app-stg\u{1f}s:public");
+            })
+        });
         let n_rows = cx.update(|_, cx| ws.read(cx).tree.rows().len());
+        let depths: Vec<usize> = cx.update(|_, cx| ws.read(cx).tree.rows().iter().map(|r| r.depth).collect());
         let conn_rows: Vec<usize> = cx.update(|_, cx| {
             ws.read(cx)
                 .tree
                 .rows()
                 .iter()
                 .enumerate()
-                .filter(|(_, r)| matches!(r.kind, RowKind::Conn(_)))
+                .filter(|(_, r)| matches!(r.kind, RowKind::Conn { .. }))
                 .map(|(i, _)| i)
                 .collect()
         });
@@ -2810,7 +3046,9 @@ mod tests {
             let sc = cx.update(|_, cx| ws.read(cx).scale());
             let mut prev_bottom: Option<gpui::Pixels> = None;
             for i in 0..n_rows {
-                let row = bounds(cx, format!("conn-row-{i}")).or_else(|| bounds(cx, format!("folder-row-{i}")));
+                let row = bounds(cx, format!("conn-row-{i}"))
+                    .or_else(|| bounds(cx, format!("folder-row-{i}")))
+                    .or_else(|| bounds(cx, format!("child-row-{i}")));
                 let Some(row) = row else { continue };
                 assert!(
                     f32::from(row.size.height) + 0.5 >= sc.hit(),
@@ -2838,7 +3076,63 @@ mod tests {
                 }
             }
             assert!(prev_bottom.is_some(), "{z}배: 줄을 하나도 못 쟀다");
+            // 들여쓰기: 깊을수록 글이 오른쪽에서 시작한다(아이콘 자리가 겹치지 않게)
+            let chevron_left = |cx: &mut VisualTestContext, d: usize| -> f32 {
+                let i = depths.iter().position(|x| *x == d).expect("그 깊이 줄");
+                let sel = if d == 1 {
+                    format!("conn-chevron-{i}")
+                } else {
+                    format!("child-chevron-{i}")
+                };
+                f32::from(bounds(cx, sel).expect("화살표").left())
+            };
+            let (l1, l2, l3) = (chevron_left(cx, 1), chevron_left(cx, 2), chevron_left(cx, 3));
+            assert!(l1 < l2 && l2 < l3, "{z}배 들여쓰기가 깊이를 따르지 않는다: {l1} {l2} {l3}");
         }
+    }
+
+    /// v1.1.1: 테이블 목록이 활성 탭 접속에만, 맨 아래에 있었고 실패하면 끝없이 "읽는 중…" 이었다.
+    #[gpui::test]
+    fn 탭이_없어도_접속을_펼치고_실패하면_오류_줄과_다시_시도가_된다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.close_tab(0, cx);
+                assert!(w.tabs.tabs.is_empty());
+                w.tree_toggle("app-stg".into(), window, cx);
+                assert!(
+                    w.tree
+                        .rows()
+                        .iter()
+                        .any(|r| matches!(&r.kind, RowKind::Loading { node } if node == "app-stg"))
+                );
+            })
+        });
+        draw(cx);
+        // 오프라인 프로젝트의 PG 는 닿지 않는다 → 오류 줄
+        wait(cx, &ws, |w| {
+            w.tree
+                .rows()
+                .iter()
+                .any(|r| matches!(&r.kind, RowKind::Failed { node, .. } if node == "app-stg"))
+        });
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                assert!(w.tabs.tabs.is_empty(), "펼치기는 탭을 열지 않는다");
+                w.tree_retry("app-stg".into(), window, cx);
+                assert!(
+                    w.tree
+                        .rows()
+                        .iter()
+                        .any(|r| matches!(&r.kind, RowKind::Loading { node } if node == "app-stg"))
+                );
+            })
+        });
+        wait(cx, &ws, |w| {
+            !w.tree.rows().iter().any(|r| matches!(r.kind, RowKind::Loading { .. }))
+        });
     }
 
     fn redis_project() -> tempfile::TempDir {

@@ -140,6 +140,9 @@ pub struct Prefs {
     pub editor_height: f32,
     /// 테이블 보기 WHERE·ORDER BY 기록. 테이블마다 두고 prod 접속 것은 남기지 않는다(R75.5).
     /// 옛 판의 전역 `where_history`·`order_history` 는 어느 접속 것인지 몰라 읽지 않고 버린다
+    /// 프로젝트(열 곳 글)마다 트리 펼침(R75.6)
+    #[serde(default)]
+    pub tree_memory: std::collections::BTreeMap<String, TreeMemory>,
     /// 설정 판(옛 기본값을 옮길 때 쓴다)
     #[serde(default)]
     pub layout: u32,
@@ -184,11 +187,21 @@ impl Default for Prefs {
             editor_height: default_editor_height(),
             table_history: Default::default(),
             layout: LAYOUT_VERSION,
+            tree_memory: Default::default(),
         }
     }
 }
 
 const LAYOUT_VERSION: u32 = 2;
+
+/// 접은 폴더와 펼친 트리 자리
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeMemory {
+    #[serde(default)]
+    pub collapsed: Vec<String>,
+    #[serde(default)]
+    pub expanded: Vec<String>,
+}
 
 const MAX_RECENT: usize = 8;
 
@@ -359,7 +372,7 @@ mod tests {
         let info = rt.rt.block_on(job.rx).unwrap().unwrap();
         assert!(!info.conns.is_empty());
         let tree = crate::vm::tree::ConnTree::new(info.conns);
-        assert!(tree.rows().iter().any(|r| matches!(r.kind, crate::vm::tree::RowKind::Conn(_))));
+        assert!(tree.rows().iter().any(|r| matches!(r.kind, crate::vm::tree::RowKind::Conn { .. })));
     }
 
     #[test]
