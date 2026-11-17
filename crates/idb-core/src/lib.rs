@@ -4,6 +4,7 @@
 pub mod atomicfile;
 pub mod connstore;
 pub mod favorites;
+pub mod flows;
 pub mod gojson;
 pub mod gostrconv;
 pub mod history;
