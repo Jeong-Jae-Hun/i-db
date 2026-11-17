@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","ddb-stg","--write","SELECT * FROM t"]
+exit: 2
+--- stdout
+--- stderr
+읽기 전용 저장소라 --write 를 받지 않음

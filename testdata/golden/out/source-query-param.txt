@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","search-stg","--param","a=1","GET logs/_search"]
+exit: 2
+--- stdout
+--- stderr
+--param 은 이 접속 종류에서는 안 됨

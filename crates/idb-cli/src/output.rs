@@ -1,15 +1,13 @@
 //! CLI 결과 출력(json·tsv·csv·table). Go `writeResults` 와 바이트가 같다.
 
 use idb_core::gojson;
-use idb_core::result::{NULL_TEXT, QueryResult, is_numeric_type};
+use idb_core::result::{NULL_TEXT, QueryResult, is_capped_cell, is_numeric_type};
 use idb_core::textutil::{printable, string_width, truncate};
 
 use crate::cli::{EXIT_ERR, EXIT_OK, Opts};
 
 /// table 형식에서 칸 하나가 차지하는 최대 폭. 긴 JSON 한 칸이 줄 전체를 밀어내지 않게 자른다
 const CLI_CELL_WIDTH: usize = 60;
-/// 표 칸 하나에 담는 최대 바이트(E63)
-pub const MAX_CELL_BYTES: usize = 64 << 10;
 
 /// 출력할 결과 하나다. user360 처럼 여러 개면 title 로 나눈다.
 #[derive(Default)]
@@ -22,20 +20,6 @@ pub struct CliResult {
     pub decrypt_failed: usize,
     /// 결과는 찍되 일부가 실패해 1 로 끝낼 때다
     pub failed: bool,
-}
-
-/// MAX_CELL_BYTES 에서 잘린 칸인지다. 잘린 칸은 끝에 `…(N바이트)`·`…(잘림)` 이 붙는다.
-pub fn is_capped_cell(s: &str) -> bool {
-    if s.len() <= MAX_CELL_BYTES {
-        return false;
-    }
-    let Some(rest) = s.strip_suffix(')') else { return false };
-    let Some(i) = rest.rfind("…(") else { return false };
-    let inner = &rest[i + "…(".len()..];
-    inner == "잘림"
-        || inner
-            .strip_suffix("바이트")
-            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn capped_cells(res: &QueryResult) -> usize {
@@ -239,20 +223,13 @@ pub fn to_csv(r: &QueryResult) -> String {
 /// 칸 하나를 CSV 로 쓴다. = + - @ 탭·CR 로 시작하는 글은 스프레드시트 수식 실행을 막으려고 ' 를 붙인다(숫자는 그대로).
 fn csv_field(s: &str) -> String {
     let mut s = s.to_string();
-    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) && !go_parses_float(&s) {
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) && !idb_core::gostrconv::parses_float(&s) {
         s.insert(0, '\'');
     }
     if !s.is_empty() && !s.contains([',', '"', '\r', '\n']) && s.trim() == s {
         return s;
     }
     format!("\"{}\"", s.replace('"', "\"\""))
-}
-
-/// Go `strconv.ParseFloat(s, 64)` 가 받는지다(부호·소수·지수·inf·nan·16진 부동소수).
-fn go_parses_float(s: &str) -> bool {
-    let t = s.strip_prefix(['+', '-']).unwrap_or(s).to_ascii_lowercase();
-    matches!(t.as_str(), "inf" | "infinity" | "nan")
-        || (!t.starts_with("0x") && !t.contains('_') && s.parse::<f64>().is_ok() && !t.starts_with("inf") && !t.starts_with("nan"))
 }
 
 /// 열을 맞춘 글 표를 쓴다. 칸의 제어 문자는 보이는 글자로 바꾸고, 폭은 넓은 글자를 2칸으로 센다. 숫자 열은 오른쪽에 붙인다.
@@ -309,4 +286,76 @@ fn write_table_line(b: &mut String, cells: &[String], widths: &[usize], types: &
         }
     }
     b.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(cmd: &str, format: &str, write: bool) -> Opts {
+        Opts {
+            cmd: cmd.into(),
+            format: format.into(),
+            write,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn user360_은_제목별로_나누고_오류도_한_칸이다() {
+        let results = || {
+            vec![
+                CliResult {
+                    title: "계정".into(),
+                    conn: "a".into(),
+                    res: Some(QueryResult {
+                        cols: vec!["id".into()],
+                        types: Some(vec!["int8".into()]),
+                        rows: vec![vec!["1".into()]],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                CliResult {
+                    title: "채널".into(),
+                    conn: "b".into(),
+                    err: Some("boom".into()),
+                    ..Default::default()
+                },
+            ]
+        };
+        let (mut out, mut errw) = (String::new(), String::new());
+        assert_eq!(
+            write_results(&mut out, &mut errw, &opts("user360", "json", false), results()),
+            EXIT_ERR
+        );
+        assert_eq!(
+            out,
+            "[{\"title\":\"계정\",\"conn\":\"a\",\"cols\":[\"id\"],\"types\":[\"int8\"],\"rows\":[[\"1\"]],\"truncated\":false,\"elapsed_ms\":0},{\"title\":\"채널\",\"conn\":\"b\",\"error\":\"boom\"}]\n"
+        );
+        out.clear();
+        write_results(&mut out, &mut errw, &opts("user360", "tsv", false), results());
+        assert_eq!(out, "== 계정 (a) ==\nid\n1\n\n== 채널 (b) ==\n오류: boom\n");
+    }
+
+    #[test]
+    fn write_의_잘림_안내는_max_rows_를_권하지_않는다() {
+        let res = || {
+            vec![CliResult {
+                res: Some(QueryResult {
+                    cols: vec!["a".into()],
+                    rows: vec![vec!["1".into()]],
+                    truncated: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]
+        };
+        let (mut out, mut errw) = (String::new(), String::new());
+        write_results(&mut out, &mut errw, &opts("query", "tsv", true), res());
+        assert!(!errw.contains("--max-rows") && errw.contains("1,000행 상한"), "{errw}");
+        out.clear();
+        write_results(&mut out, &mut errw, &opts("query", "table", true), res());
+        assert!(!out.contains("--max-rows") && out.contains("1,000행 상한"), "{out}");
+    }
 }

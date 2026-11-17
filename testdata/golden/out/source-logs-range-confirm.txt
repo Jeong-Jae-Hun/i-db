@@ -1,0 +1,5 @@
+args: ["logs","-p","{P}","-c","logs-stg","--since","8d","{a=\"1\"}"]
+exit: 3
+--- stdout
+--- stderr
+비싼 질의: 범위 7일 초과 (--force)

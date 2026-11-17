@@ -1,0 +1,5 @@
+args: ["board","-p","{P}","--format","csv"]
+exit: 2
+--- stdout
+--- stderr
+db board: --format must be one of table|tsv|json

@@ -1,0 +1,5 @@
+args: ["history","show","20260101-000000-abcdef"]
+exit: 1
+--- stdout
+--- stderr
+결과 사본이 없음: 20260101-000000-abcdef

@@ -1,0 +1,5 @@
+args: ["conns","-p","{P}","--format","tsv","--timeout","0.5ns"]
+exit: 2
+--- stdout
+--- stderr
+db conns: --timeout must be positive

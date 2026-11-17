@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","search-stg","--force","GET logs/_count"]
+exit: 1
+--- stdout
+--- stderr
+opensearch: Get "http://127.0.0.1:1/logs/_count": dial tcp 127.0.0.1:1: connect: connection refused

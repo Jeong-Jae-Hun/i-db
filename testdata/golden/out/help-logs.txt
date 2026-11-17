@@ -1,0 +1,28 @@
+args: ["help","logs"]
+exit: 0
+--- stdout
+사용법: db logs -c Loki접속 'LogQL' [--since 1h] [--until 0] [--force]
+  Loki 로그 질의(query 와 같고 범위 플래그를 받음, Grafana 접속도)
+
+플래그:
+  -c string
+    	접속 이름(db conns)
+  -f string
+    	SQL·명령을 읽을 파일
+  -force
+    	--write 에서 위험 문장(R25)·숨은 쓰기 허용, 저장소는 비싼 질의 허용(R60.2)
+  -format string
+    	출력 형식 table|tsv|csv|json (기본: 터미널이면 table, 아니면 tsv)
+  -max-rows int
+    	최대 행 수(상한 10000) (default 200)
+  -p string
+    	DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더 (default "/golden/project")
+  -prod
+    	prod 접속 허용(읽기만)
+  -since value
+    	Loki·Prometheus 범위 시작(지금부터 거슬러, 1h·15m·7d, 기본 1h)
+  -timeout duration
+    	전체 시간 제한 (default 30s)
+  -until value
+    	범위 끝(지금부터 거슬러, 기본 0)
+--- stderr

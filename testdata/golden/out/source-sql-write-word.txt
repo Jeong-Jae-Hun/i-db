@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","search-stg","SELECT * FROM (DELETE FROM logs)"]
+exit: 3
+--- stdout
+--- stderr
+읽기 전용 저장소라 보내지 않음

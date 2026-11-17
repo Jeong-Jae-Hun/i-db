@@ -1,0 +1,7 @@
+args: ["history","--format","table","--conn","app-stg","--since","7d"]
+exit: 0
+--- stdout
+id  time  conn  rows  elapsed  result  sql  err
+--  ----  ----  ----  -------  ------  ---  ---
+(0행)
+--- stderr

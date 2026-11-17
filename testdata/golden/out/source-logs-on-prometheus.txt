@@ -1,0 +1,5 @@
+args: ["logs","-p","{P}","-c","metrics-prod","--prod","up"]
+exit: 2
+--- stdout
+--- stderr
+metrics-prod 는 logs 접속이 아님 (prometheus)

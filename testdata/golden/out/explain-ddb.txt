@@ -1,0 +1,5 @@
+args: ["explain","-p","{P}","-c","ddb-stg","SELECT * FROM t"]
+exit: 2
+--- stdout
+--- stderr
+explain(dynamodb): 이 접속 종류에서는 안 됨

@@ -1,0 +1,5 @@
+args: ["tables","-p","{P}","-c","search-stg","--format","json"]
+exit: 1
+--- stdout
+--- stderr
+opensearch: Get "http://127.0.0.1:1/_cat/indices?format=json&h=index,docs.count,health": dial tcp 127.0.0.1:1: connect: connection refused

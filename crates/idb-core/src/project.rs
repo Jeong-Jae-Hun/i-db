@@ -69,7 +69,7 @@ impl Kind {
         matches!(self, Kind::DynamoDb | Kind::Athena | Kind::Aws)
     }
 
-    fn auth_options(self) -> &'static [&'static str] {
+    pub(crate) fn auth_options(self) -> &'static [&'static str] {
         match self {
             Kind::OpenSearch => &["", "basic", "sigv4"],
             Kind::Loki | Kind::Prometheus => &["", "basic"],
@@ -261,6 +261,18 @@ impl Project {
 
     pub fn conn_by_name(&self, name: &str) -> Option<&Conn> {
         self.conns.iter().find(|c| c.name == name)
+    }
+
+    /// 화면(R52)·CLI(R58)·serve 가 같이 쓰는 enc() 확장이다. 보낼 글과 알림 글을 돌려준다.
+    pub fn expand_enc(&self, c: &Conn, sql: &str) -> Result<(String, String), String> {
+        let (key, iv) = self.aes_key_iv(c);
+        let (out, n, server) = crate::statcrypt::expand_enc(sql, &key, &iv)?;
+        let note = match (n, server) {
+            (0, _) => String::new(),
+            (_, true) => "키·IV 가 없어 서버 staticEncrypt 로 실행".into(),
+            _ => format!("enc() {n}개 암호화"),
+        };
+        Ok((out, note))
     }
 }
 
@@ -478,29 +490,29 @@ fn parse_mapping(b: &[u8]) -> Result<Vec<(String, String)>, String> {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct ConnEntry {
-    uuid: String,
-    name: String,
-    group: String,
-    kind: String,
-    host: String,
-    port: i64,
-    db: String,
-    user: String,
-    url: String,
-    auth: String,
-    region: String,
-    profile: String,
-    sslmode: String,
-    workgroup: String,
-    output: String,
+pub(crate) struct ConnEntry {
+    pub(crate) uuid: String,
+    pub(crate) name: String,
+    pub(crate) group: String,
+    pub(crate) kind: String,
+    pub(crate) host: String,
+    pub(crate) port: i64,
+    pub(crate) db: String,
+    pub(crate) user: String,
+    pub(crate) url: String,
+    pub(crate) auth: String,
+    pub(crate) region: String,
+    pub(crate) profile: String,
+    pub(crate) sslmode: String,
+    pub(crate) workgroup: String,
+    pub(crate) output: String,
 }
 
 fn load_db_conns(p: &mut Project, env: &HashMap<String, String>) -> Result<(), LoadError> {
     let path = p.dir.join(".dbtui").join("connections.json");
     let entries: Vec<ConnEntry> = match fs::read(&path) {
         Ok(b) => serde_json::from_slice::<Option<Vec<ConnEntry>>>(&b)
-            .map_err(|e| LoadError(format!("read {}: {e}", path.display())))?
+            .map_err(|e| LoadError(format!("read {}: {}", path.display(), crate::gojson::json_error(&e))))?
             .unwrap_or_default(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(LoadError(format!("read {}: {e}", path.display()))),
@@ -552,12 +564,12 @@ fn load_db_conns(p: &mut Project, env: &HashMap<String, String>) -> Result<(), L
     Ok(())
 }
 
-fn valid_conn_name(name: &str) -> bool {
+pub(crate) fn valid_conn_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Go `ValidateConn` 과 같은 순서로 같은 오류 글을 낸다. raw_kind·raw_port 는 파일에 적힌 그대로다.
-fn validate_conn(c: &Conn, raw_kind: &str, raw_port: i64) -> Result<(), String> {
+pub(crate) fn validate_conn(c: &Conn, raw_kind: &str, raw_port: i64) -> Result<(), String> {
     if !valid_conn_name(&c.name) {
         return Err("name must be letters, digits, - or _".into());
     }
@@ -629,7 +641,7 @@ fn load_folders(p: &mut Project) {
         Ok(b) => match serde_json::from_slice::<Option<HashMap<String, String>>>(&b) {
             Ok(m) => m.unwrap_or_default(),
             Err(e) => {
-                p.warnings.push(format!("folders.json: {e}"));
+                p.warnings.push(format!("folders.json: {}", crate::gojson::json_error(&e)));
                 return;
             }
         },
