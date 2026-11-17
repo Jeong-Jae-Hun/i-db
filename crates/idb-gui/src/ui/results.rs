@@ -16,6 +16,7 @@ use idb_engine::{Applied, ChangeSet, Engine, EngineError, ResultSet, TablePage, 
 
 use super::workspace::{Hooks, Workspace};
 use crate::vm::edits::Edits;
+use crate::vm::export;
 use crate::vm::grid::{Dir, Grid, NULL};
 use crate::vm::runtime::{Job, Runtime};
 use crate::vm::safety::Confirms;
@@ -49,6 +50,8 @@ pub struct GridDelegate {
     page: u64,
     /// 데이터베이스를 바꾸는 중이면 다음 쪽을 읽지 않는다
     frozen: bool,
+    /// 복호화 보기가 켜져 있으면 암호문 → 평문
+    pub(super) decrypted: Option<std::collections::HashMap<String, String>>,
     /// 결과의 출처 테이블(INSERT 복사에 쓴다). 편집 상태와 달리 데이터베이스를 바꿔도 이름은 그대로라 남긴다
     origin: Option<idb_engine::Origin>,
     /// 마지막으로 오른쪽 단추를 누른 칸(열을 고르는 데 쓴다)
@@ -62,8 +65,13 @@ impl GridDelegate {
             return (String::new(), CellMark::Plain);
         };
         let base = self.grid.cell(row, col).to_string();
+        // 복호화 보기(R37): 받은 암호문을 serve 가 푼 평문으로 보인다(보기만 바꾸고 편집·제출 값은 그대로다)
+        let (base, plain_mark) = match self.decrypted.as_ref().and_then(|m| m.get(&base)) {
+            Some(p) => (p.clone(), CellMark::Decrypted),
+            None => (base, CellMark::Plain),
+        };
         let Some(e) = &self.edits else {
-            return (base, CellMark::Plain);
+            return (base, plain_mark);
         };
         if e.is_deleted(src) {
             return (base, CellMark::Deleted);
@@ -71,7 +79,7 @@ impl GridDelegate {
         match e.value(src, col) {
             Some(Some(v)) => (v.to_string(), CellMark::Edited),
             Some(None) => (NULL.to_string(), CellMark::Edited),
-            None => (base, CellMark::Plain),
+            None => (base, plain_mark),
         }
     }
 }
@@ -81,6 +89,7 @@ enum CellMark {
     Plain,
     Edited,
     Deleted,
+    Decrypted,
 }
 
 /// 칸에 보일 한 줄이다. 긴 글은 앞부분만 둔다(칸 너비 밖은 어차피 잘린다).
@@ -146,6 +155,7 @@ impl TableDelegate for GridDelegate {
             .when(is_null, |d| d.text_color(cx.theme().muted_foreground).italic())
             .when(mark == CellMark::Edited, |d| d.bg(cx.theme().warning.opacity(0.25)))
             .when(mark == CellMark::Deleted, |d| d.bg(cx.theme().danger.opacity(0.2)).line_through())
+            .when(mark == CellMark::Decrypted, |d| d.text_color(cx.theme().success))
             .child(one_line(&text))
     }
 
@@ -320,6 +330,7 @@ impl ResultsView {
             loader,
             page,
             frozen: false,
+            decrypted: None,
             origin,
             ctx_cell: None,
             owner: Some(cx.weak_entity()),
@@ -740,6 +751,106 @@ impl ResultsView {
         });
     }
 
+    /// 표에 보이는 칸 글이다(복호화·편집 반영 뒤). 화면 시험이 본다
+    #[cfg(test)]
+    pub(super) fn shown_cell(&self, row: usize, col: usize, cx: &App) -> String {
+        self.table.read(cx).delegate().display(row, col).0
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_decrypted(&mut self, m: Option<std::collections::HashMap<String, String>>, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().decrypted = m;
+            t.refresh(cx);
+        });
+    }
+
+    // ─── 복호화·전체 내보내기 ───
+
+    /// 복호화 보기를 켜고 끈다(R37). 암호문 꼴 칸만 serve 로 보내 그 접속 그룹 키로 푼다.
+    pub(super) fn toggle_decrypt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_on = self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            let on = d.decrypted.take().is_some();
+            t.refresh(cx);
+            on
+        });
+        if was_on {
+            self.status("복호화 보기를 껐다", false, cx);
+            cx.notify();
+            return;
+        }
+        let cells = {
+            let g = &self.table.read(cx).delegate().grid;
+            let all = (0..g.source_len()).flat_map(|i| g.source(i).iter().map(String::as_str));
+            export::cipher_cells(all, 10_000)
+        };
+        if cells.is_empty() {
+            self.status("암호문 꼴 칸이 없다", false, cx);
+            return;
+        }
+        let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
+        self.with_ws(window, cx, move |ws, window, cx| {
+            let sent = cells.clone();
+            ws.guarded(
+                "복호화",
+                Rc::new(move |e: Engine, _| {
+                    let (conn, cells) = (conn.clone(), cells.clone());
+                    async move { e.decrypt(&conn, cells).await }
+                }),
+                Rc::new(move |ws: &mut Workspace, d: idb_engine::Decrypted, _, cx| {
+                    let map = export::overlay(&sent, &d.values);
+                    let msg = if d.failed > 0 {
+                        format!("복호화 {}칸 · {}칸 풀지 못함", map.len(), d.failed)
+                    } else {
+                        format!("복호화 {}칸", map.len())
+                    };
+                    ws.set_status(msg, d.failed > 0, cx);
+                    let _ = this.update(cx, |v, cx| {
+                        v.table.update(cx, |t, cx| {
+                            t.delegate_mut().decrypted = Some(map);
+                            t.refresh(cx);
+                        });
+                        cx.notify();
+                    });
+                }),
+                Confirms::default(),
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// 이 결과를 만든 문장 전체를 1,000행 제한 없이 CSV 로 받는다(R33.1). 원격이어도 이 기계에 쓴다.
+    pub(super) fn full_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked(cx) {
+            return;
+        }
+        let sql = match &self.source {
+            Source::Query { sql } => sql.clone(),
+            Source::Table {
+                schema,
+                table,
+                filter,
+                order,
+            } => export::table_sql(schema, table, filter, order),
+            Source::Static => return,
+        };
+        let conn = self.conn.clone();
+        let dir = dirs_home().join("Downloads");
+        let dir = if dir.is_dir() { dir } else { std::env::temp_dir() };
+        let rx = cx.prompt_for_new_path(&dir, Some(&export::default_name(&conn, chrono::Local::now())));
+        let ws = self.ws.clone();
+        let gen0 = self.db_gen;
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let _ = cx.update(|window, cx| {
+                let _ = ws.update(cx, |ws, cx| run_export(ws, conn, sql, path, gen0, window, cx));
+            });
+        })
+        .detach();
+    }
+
     /// WHERE·ORDER BY 로 테이블 보기를 다시 읽고 기록에 남긴다.
     pub(super) fn apply_table_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some((wi, oi)), Source::Table { schema, table, .. }) = (&self.table_inputs, &self.source) else {
@@ -840,6 +951,75 @@ impl ResultsView {
     }
 }
 
+/// 전체 내보내기를 돌린다. 시작·조각 받기·파일 쓰기를 한 요청으로 묶어, 멈추면(⌘.) serve 의 내보내기도 멈춘다.
+pub(super) fn run_export(
+    ws: &mut Workspace,
+    conn: String,
+    sql: String,
+    path: std::path::PathBuf,
+    gen0: u64,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let started: std::sync::Arc<std::sync::Mutex<Option<u64>>> = Default::default();
+    let (st_make, st_cancel) = (started.clone(), started.clone());
+    let (c_make, shown) = (conn.clone(), path.clone());
+    let hooks = Hooks {
+        precheck: Some(Rc::new(move |ws: &Workspace| {
+            ws.write_ok(&conn, gen0)
+                .map_err(|_| "데이터베이스가 바뀌어 내보내지 않는다 (다시 실행한다)".to_string())
+        })),
+        fail: None,
+        cancelled: Some(Rc::new(move |ws: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>| {
+            if let (Some(id), Some(e)) = (*st_cancel.lock().unwrap(), ws.engine().cloned()) {
+                ws.rt.spawn(async move {
+                    let _ = e.export_cancel(id).await;
+                });
+            }
+        })),
+    };
+    ws.guarded_with(
+        "전체 내보내기",
+        Rc::new(move |e: Engine, _| {
+            let (conn, sql, path, started) = (c_make.clone(), sql.clone(), path.clone(), st_make.clone());
+            async move {
+                let s = e.export_start(&conn, &sql).await?;
+                *started.lock().unwrap() = Some(s.export);
+                let mut f = open_private(&path).map_err(|e| EngineError::run(format!("export file: {e}")))?;
+                loop {
+                    let ch = e.export_read(s.export).await?;
+                    if ch.done {
+                        return Ok((ch.rows, ch.bytes));
+                    }
+                    std::io::Write::write_all(&mut f, &ch.data).map_err(|e| EngineError::run(format!("export file: {e}")))?;
+                }
+            }
+        }),
+        Rc::new(move |ws: &mut Workspace, (rows, bytes): (i64, u64), _, cx| {
+            ws.set_status(
+                format!("내보냄: {} → {}", export::progress(bytes, Some(rows)), shown.display()),
+                false,
+                cx,
+            );
+        }),
+        hooks,
+        Confirms::default(),
+        window,
+        cx,
+    );
+}
+
+/// 새 파일이면 0600 으로 만든다(결과에 개인정보가 들 수 있다).
+fn open_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
 /// 반영·되돌리기는 (확인 뒤 다시 보낼 때도) 보내기 바로 전에 데이터베이스 세대·바꾸는 중을 다시 본다.
 fn write_hooks(conn: String, gen0: u64) -> Hooks {
     Hooks {
@@ -880,6 +1060,7 @@ impl Render for ResultsView {
             info.push_str(&format!(" · 추가 {inserts}"));
         }
         let table_inputs_el = self.render_table_inputs(cx);
+        let decrypt_on = self.table.read(cx).delegate().decrypted.is_some();
         let toolbar = h_flex()
             .gap_1()
             .px_2()
@@ -928,6 +1109,28 @@ impl Render for ResultsView {
                     )
                 })
             })
+            .when(!matches!(self.source, Source::Static), |d| {
+                d.child(
+                    Button::new("full-export")
+                        .xsmall()
+                        .ghost()
+                        .label("전체 내보내기")
+                        .tooltip("1,000행 제한 없이 CSV 로 받는다")
+                        .on_click(cx.listener(|v, _, w, cx| v.full_export(w, cx))),
+                )
+            })
+            .child(
+                Button::new("decrypt")
+                    .xsmall()
+                    .with_variant(if decrypt_on {
+                        gpui_component::button::ButtonVariant::Primary
+                    } else {
+                        gpui_component::button::ButtonVariant::Ghost
+                    })
+                    .label("복호화")
+                    .tooltip("암호문 칸을 그룹 키로 풀어 보인다 (보기만)")
+                    .on_click(cx.listener(|v, _, w, cx| v.toggle_decrypt(w, cx))),
+            )
             .child(
                 Button::new("copy")
                     .xsmall()

@@ -3,6 +3,7 @@
 pub mod completion;
 pub mod crashlog;
 pub mod edits;
+pub mod export;
 pub mod font;
 pub mod grid;
 pub mod history;

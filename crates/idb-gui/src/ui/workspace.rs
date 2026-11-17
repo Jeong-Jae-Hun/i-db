@@ -580,6 +580,10 @@ impl Workspace {
 
     // ─── 데이터베이스·스키마 ───
 
+    pub(super) fn engine(&self) -> Option<&Engine> {
+        self.engine.as_ref()
+    }
+
     pub(super) fn is_switching(&self, conn: &str) -> bool {
         self.switching.contains(conn)
     }
@@ -2824,6 +2828,81 @@ mod tests {
             let w = ws.read(cx);
             assert_eq!(w.prefs.where_history, vec!["id > 1"]);
             assert_eq!(w.prefs.order_history, vec!["id desc"]);
+        });
+    }
+
+    #[gpui::test]
+    fn 복호화_보기는_암호문_칸만_평문으로_바꾸고_끄면_돌아온다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let enc = "000102030405060708090a0b0c0d0e0f^|^00112233445566778899aabbccddeeff";
+        let rs: ResultSet = serde_json::from_value(
+            serde_json::json!({"cols": ["email", "name"], "rows": [[enc, "kim"]], "text": "", "truncated": false, "elapsed_ms": 1}),
+        )
+        .unwrap();
+        let r = cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                let id = w.tabs.tabs[0].id;
+                w.show_result(
+                    id,
+                    "app-stg".into(),
+                    Source::Query { sql: "select 1".into() },
+                    rs,
+                    false,
+                    window,
+                    cx,
+                );
+                match w.bodies.get(&id) {
+                    Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                    _ => panic!("결과 없음"),
+                }
+            })
+        });
+        cx.update(|window, cx| {
+            r.update(cx, |v, cx| {
+                v.set_decrypted(Some([(enc.to_string(), "a@b.com".to_string())].into()), cx)
+            });
+            assert_eq!(r.read(cx).shown_cell(0, 0, cx), "a@b.com");
+            assert_eq!(r.read(cx).shown_cell(0, 1, cx), "kim");
+            // 켜져 있으면 끈다
+            r.update(cx, |v, cx| v.toggle_decrypt(window, cx));
+            assert_eq!(r.read(cx).shown_cell(0, 0, cx), enc);
+            // 끈 상태에서 켜면 serve 에 묻는다. 오프라인 프로젝트엔 그룹 키가 없어 실패하고 보기는 그대로다
+            r.update(cx, |v, cx| v.toggle_decrypt(window, cx));
+        });
+        draw(cx);
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|_, cx| {
+            assert_eq!(r.read(cx).shown_cell(0, 0, cx), enc);
+            assert!(ws.read(cx).status.1, "{:?}", ws.read(cx).status);
+        });
+    }
+
+    #[gpui::test]
+    fn 전체_내보내기가_실패하면_파일을_만들지_않는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("x.csv");
+        let o2 = out.clone();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                super::super::results::run_export(w, "app-stg".into(), "select 1".into(), o2, 0, window, cx)
+            })
+        });
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|_, cx| assert!(ws.read(cx).status.1));
+        assert!(!out.exists(), "시작이 실패하면 파일을 만들지 않는다");
+        // 데이터베이스를 바꾼 뒤(세대가 다르면)는 보내지도 않는다
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.on_db_switched("app-stg", cx);
+                super::super::results::run_export(w, "app-stg".into(), "select 1".into(), dir.path().join("y.csv"), 0, window, cx);
+                assert!(w.busy.is_none());
+                assert!(w.status.0.contains("데이터베이스가 바뀌어"), "{:?}", w.status);
+            })
         });
     }
 
