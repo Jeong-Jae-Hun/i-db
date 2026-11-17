@@ -606,7 +606,9 @@ mod tests {
         add_conn(d, b).unwrap();
         let json = read(conns_path(d));
         assert!(json.contains("\n  {\n    \"uuid\""), "{json}");
-        assert!(json.contains("\"name\": \"a1\"") && json.find("a1") < json.find("b2"));
+        // uuid 는 무작위 16진수라 "a1"·"b2" 를 품을 수 있어 이름 칸으로 순서를 본다
+        let at = |n: &str| json.find(&format!("\"name\": \"{n}\""));
+        assert!(at("a1").is_some() && at("a1") < at("b2"), "{json}");
         assert!(!json.contains("p w"), "json 에 비밀번호가 들어갔다");
         assert!(!json.contains("\"url\""), "빈 저장소 칸은 쓰지 않는다");
         assert_eq!(read(d.join(".env")), format!("PG_A1_PASSWORD={}\n", query_escape("p w&/")));
