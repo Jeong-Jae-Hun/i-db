@@ -616,39 +616,15 @@ impl LocalEngine {
                 self.remember_mapping(&w);
                 json(w)
             }
-            Request::FavoritesList => {
-                let st = idb_core::favorites::Store::load(&self.proj().dir).map_err(|e| EngineError::run(e.to_string()))?;
-                json(st.list())
-            }
+            Request::FavoritesList => json(crate::queries::favorites(&self.proj().dir)?),
             Request::FavoriteAdd {
                 name,
                 conn,
                 sql,
                 overwrite,
-            } => {
-                let st = idb_core::favorites::Store::load(&self.proj().dir).map_err(|e| EngineError::run(e.to_string()))?;
-                let name = idb_core::favorites::normalize_name(&name).map_err(|e| EngineError::usage(e.to_string()))?;
-                if !overwrite && st.get(&name).is_some() {
-                    return json(FavoriteSaved {
-                        saved: false,
-                        exists: true,
-                    });
-                }
-                st.put(idb_core::favorites::Fav {
-                    name,
-                    conn,
-                    sql,
-                    saved: Default::default(),
-                })
-                .map_err(|e| EngineError::run(e.to_string()))?;
-                json(FavoriteSaved {
-                    saved: true,
-                    exists: false,
-                })
-            }
+            } => json(crate::queries::favorite_add(&self.proj().dir, &name, &conn, &sql, overwrite)?),
             Request::FavoriteRemove { name } => {
-                let st = idb_core::favorites::Store::load(&self.proj().dir).map_err(|e| EngineError::run(e.to_string()))?;
-                st.delete(&name).map_err(|e| EngineError::run(e.to_string()))?;
+                crate::queries::favorite_remove(&self.proj().dir, &name)?;
                 json(serde_json::json!({}))
             }
             Request::ReadQuery { conn, sql, limit } => {

@@ -2,14 +2,22 @@
 //! 화면은 이 op 로만 읽고 쓴다(로컬도 같은 길). 사용자 자신의 쿼리 파일이라 원격에서도 쓰기를 받는다(DB 쓰기가 아님).
 //! 경계: `queries/` 아래 `.sql` 만, `..`·절대 경로를 받지 않고, 읽고 쓰기 전마다 실제 경로(링크를 따라간 곳)가
 //! 프로젝트의 queries 안인지 본다. 한 파일은 1MiB 까지이고, 쓰기는 원자적이며 권한은 원본을 따른다.
+//! 해시 확인과 쓰기, 새 이름 고르기, 매핑 고치기는 잠금 하나로 줄 세운다(프로세스 안은 Mutex, 프로세스끼리는
+//! queries 폴더의 flock). 프로세스 안 잠금은 프로젝트를 가리지 않는 전역이다. 한 serve 는 프로젝트 하나만 열고
+//! 쓰기는 사람이 누르는 빈도라 충분하다. 한 프로세스가 여러 프로젝트를 바쁘게 쓰게 되면 프로젝트별로 나눈다.
 
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use idb_core::mapping::{WriteError, add_mapping_checked, conflict_path, real_path, unique_query_path, write_project_file};
 use idb_core::project::Project;
 
-use crate::protocol::{EngineError, QueryFile, QueryText, QueryWritten};
+use idb_core::favorites::{Fav, Store, normalize_name};
+
+use crate::protocol::{EngineError, FavoriteSaved, QueryFile, QueryText, QueryWritten};
 
 /// 한 쿼리 파일의 상한이다
 pub const MAX_QUERY_BYTES: usize = 1 << 20;
@@ -18,10 +26,12 @@ pub fn hash(text: &str) -> String {
     idb_core::session::disk_hash(text.as_bytes())
 }
 
-/// 받을 수 있는 상대 경로인지 본다: `queries/…/<이름>.sql`, 빈 마디·`.`·`..`·절대 경로·역슬래시·NUL 없음.
+/// 받을 수 있는 상대 경로인지 본다: `queries/…/<이름>.sql`, 빈 마디·`.`·`..`·절대 경로·역슬래시 없음.
+/// 제어 문자와 XML 에 못 넣는 글자(U+FFFE·U+FFFF)도 받지 않는다. 매핑 XML 에 들어가면 다음 프로젝트 읽기가 깨진다.
 pub fn check_rel(rel: &str) -> Result<(), EngineError> {
     let bad = || EngineError::usage(format!("쿼리 파일 경로가 아님: {}", idb_core::textutil::printable(rel, false)));
-    if !rel.starts_with("queries/") || !rel.ends_with(".sql") || rel.contains(['\\', '\0']) {
+    let illegal = |c: char| c == '\\' || c.is_control() || c == '\u{FFFE}' || c == '\u{FFFF}';
+    if !rel.starts_with("queries/") || !rel.ends_with(".sql") || rel.contains(illegal) {
         return Err(bad());
     }
     if rel.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
@@ -40,6 +50,73 @@ fn real(dir: &Path, rel: &str) -> Result<PathBuf, EngineError> {
         return Err(outside());
     }
     Ok(p)
+}
+
+static LOCK: Mutex<()> = Mutex::new(());
+const LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// 잡고 있는 동안 다른 쓰기(이 프로세스와 다른 프로세스)가 기다린다.
+struct Locked {
+    _mem: MutexGuard<'static, ()>,
+    _file: File,
+}
+
+/// queries 폴더(없으면 만든다)에 배타 flock 을 건다. 커밋 폴더에 잠금 파일을 남기지 않으려고 폴더 자체에 건다.
+fn lock(dir: &Path) -> Result<Locked, EngineError> {
+    let mem = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let outside = || EngineError::usage("queries 폴더의 실제 경로가 프로젝트 밖");
+    let root = real_path(dir, "queries").map_err(|_| outside())?;
+    std::fs::create_dir_all(&root).map_err(|e| EngineError::run(format!("쿼리 파일을 쓰지 못함: {e}")))?;
+    if real_path(dir, "queries").map_err(|_| outside())? != root {
+        return Err(outside());
+    }
+    let file = File::open(&root).map_err(|e| EngineError::run(format!("queries 잠금: {e}")))?;
+    let deadline = Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Err(std::fs::TryLockError::WouldBlock) => return Err(EngineError::run("queries 잠금을 10초 안에 얻지 못함")),
+            Err(std::fs::TryLockError::Error(e)) => return Err(EngineError::run(format!("queries 잠금: {e}"))),
+        }
+    }
+    Ok(Locked { _mem: mem, _file: file })
+}
+
+/// 고른 새 이름을 create_new 로 먼저 잡는다. 이미 있으면 false 다(다른 쪽이 그사이 만들었다).
+fn claim(dir: &Path, rel: &str) -> Result<bool, EngineError> {
+    let p = real(dir, rel)?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| EngineError::run(format!("쿼리 파일을 쓰지 못함: {e}")))?;
+    }
+    let p = real(dir, rel)?;
+    match OpenOptions::new().write(true).create_new(true).mode(0o644).open(&p) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(EngineError::run(format!("쿼리 파일을 쓰지 못함: {e}"))),
+    }
+}
+
+/// pick 이 고른 새 이름을 잡아 content 를 쓴다. 쓰지 못하면 잡아 둔 빈 파일을 지운다.
+fn write_new(dir: &Path, content: &str, pick: impl Fn() -> std::io::Result<String>) -> Result<String, EngineError> {
+    if content.len() > MAX_QUERY_BYTES {
+        return Err(EngineError::usage("쿼리 파일은 1MiB 까지만 저장"));
+    }
+    for _ in 0..5 {
+        let rel = pick().map_err(|e| EngineError::run(e.to_string()))?;
+        check_rel(&rel)?;
+        if !claim(dir, &rel)? {
+            continue;
+        }
+        if let Err(e) = write_file(dir, &rel, content) {
+            if let Ok(p) = real(dir, &rel) {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(e);
+        }
+        return Ok(rel);
+    }
+    Err(EngineError::run("새 쿼리 파일 이름을 고르지 못함"))
 }
 
 fn read_file(dir: &Path, rel: &str) -> Result<Option<String>, EngineError> {
@@ -136,6 +213,8 @@ pub fn read(proj: &Project, rel: &str) -> Result<QueryText, EngineError> {
 /// base_hash 는 화면이 마지막으로 읽거나 쓴 내용의 해시다(비면 없던 파일). 지금 내용이 그것과 다르면 쓰지 않고 conflict 와
 /// 지금 해시(지워졌으면 빈 글)를 돌려준다. force 는 그래도 덮는다(Ctrl+S). 내용이 이미 같으면 쓰지 않는다.
 pub fn write(proj: &Project, rel: &str, content: &str, base_hash: &str, force: bool) -> Result<QueryWritten, EngineError> {
+    check_rel(rel)?;
+    let _lock = lock(&proj.dir)?;
     let cur = read_file(&proj.dir, rel)?;
     let cur_hash = cur.as_deref().map(hash).unwrap_or_default();
     if cur.as_deref() == Some(content) {
@@ -178,8 +257,10 @@ pub fn new_file(proj: &Project, conn: &str, content: &str) -> Result<QueryWritte
     let c = proj
         .conn_by_name(conn)
         .ok_or_else(|| EngineError::usage(format!("접속 없음: {conn}")))?;
-    let rel = unique_query_path(&proj.dir, &c.group, &c.name, chrono::Local::now()).map_err(|e| EngineError::run(e.to_string()))?;
-    write_file(&proj.dir, &rel, content)?;
+    let _lock = lock(&proj.dir)?;
+    let rel = write_new(&proj.dir, content, || {
+        unique_query_path(&proj.dir, &c.group, &c.name, chrono::Local::now())
+    })?;
     let mapping_error = map(proj, &rel, &c.uuid);
     Ok(QueryWritten {
         hash: hash(content),
@@ -194,8 +275,8 @@ pub fn new_file(proj: &Project, conn: &str, content: &str) -> Result<QueryWritte
 /// 덮을 수 없는 글을 rel 옆 `<이름>-conflict-<시각>.sql` 에 남기고 원래 파일이 붙은 접속(없으면 conn)을 붙인다(R45.3).
 pub fn conflict_copy(proj: &Project, rel: &str, content: &str, conn: &str) -> Result<QueryWritten, EngineError> {
     check_rel(rel)?;
-    let copy = conflict_path(&proj.dir, rel, chrono::Local::now()).map_err(|e| EngineError::run(e.to_string()))?;
-    write_file(&proj.dir, &copy, content)?;
+    let _lock = lock(&proj.dir)?;
+    let copy = write_new(&proj.dir, content, || conflict_path(&proj.dir, rel, chrono::Local::now()))?;
     let uuid = proj
         .mapping
         .get(rel)
@@ -211,6 +292,92 @@ pub fn conflict_copy(proj: &Project, rel: &str, content: &str, conn: &str) -> Re
         path: copy,
         ..Default::default()
     })
+}
+
+// ─── 즐겨찾기 (R29) ───
+
+/// 즐겨찾기 한 개 SQL 의 상한이다
+pub const MAX_FAV_SQL: usize = 256 << 10;
+/// 즐겨찾기 수의 상한이다
+pub const MAX_FAVS: usize = 1000;
+/// 즐겨찾기 파일의 상한이다. 읽기·쓰기 모두 이것을 넘으면 멈춘다
+pub const MAX_FAV_FILE: u64 = 4 << 20;
+const FAV_REL: &str = ".dbtui/favorites.json";
+
+/// `.dbtui` 폴더나 즐겨찾기 파일이 링크면 따라가지 않는다. 실제 경로도 프로젝트 안이어야 한다.
+fn fav_check(dir: &Path) -> Result<(), EngineError> {
+    let refuse = || EngineError::usage("즐겨찾기 파일의 실제 경로가 프로젝트 밖이거나 링크라 쓰지 않음");
+    for rel in [".dbtui", FAV_REL] {
+        if std::fs::symlink_metadata(dir.join(rel)).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(refuse());
+        }
+    }
+    real_path(dir, FAV_REL).map_err(|_| refuse())?;
+    match std::fs::metadata(dir.join(FAV_REL)) {
+        Ok(m) if !m.is_file() => Err(EngineError::usage("즐겨찾기 파일이 일반 파일이 아님")),
+        Ok(m) if m.len() > MAX_FAV_FILE => Err(EngineError::usage("즐겨찾기 파일이 4MiB 를 넘어 읽지 않음")),
+        _ => Ok(()),
+    }
+}
+
+fn fav_store(dir: &Path) -> Result<Store, EngineError> {
+    fav_check(dir)?;
+    Store::load(dir).map_err(|e| EngineError::run(e.to_string()))
+}
+
+/// 이름순 목록이다. MAX_FAVS 개까지만 돌려준다.
+pub fn favorites(dir: &Path) -> Result<Vec<Fav>, EngineError> {
+    let mut v = fav_store(dir)?.list();
+    v.truncate(MAX_FAVS);
+    Ok(v)
+}
+
+/// 같은 이름이 있고 overwrite 가 아니면 쓰지 않고 exists 다.
+pub fn favorite_add(dir: &Path, name: &str, conn: &str, sql: &str, overwrite: bool) -> Result<FavoriteSaved, EngineError> {
+    let name = normalize_name(name).map_err(|e| EngineError::usage(e.to_string()))?;
+    if sql.len() > MAX_FAV_SQL {
+        return Err(EngineError::usage("즐겨찾기 SQL 은 256KiB 까지만 저장"));
+    }
+    let st = fav_store(dir)?;
+    let list = st.list();
+    let old = list.iter().find(|f| f.name == name);
+    if old.is_some() && !overwrite {
+        return Ok(FavoriteSaved {
+            saved: false,
+            exists: true,
+        });
+    }
+    if old.is_none() && list.len() >= MAX_FAVS {
+        return Err(EngineError::usage(format!("즐겨찾기는 {MAX_FAVS}개까지만 저장")));
+    }
+    // JSON 따옴표·이스케이프 몫으로 한 개에 넉넉히 더해 어림한다
+    let size = |f: &Fav| (f.name.len() + f.conn.len() + f.sql.len()) * 2 + 128;
+    let total: usize = list.iter().filter(|f| f.name != name).map(size).sum::<usize>()
+        + size(&Fav {
+            name: name.clone(),
+            conn: conn.into(),
+            sql: sql.into(),
+            saved: Default::default(),
+        });
+    if total as u64 > MAX_FAV_FILE {
+        return Err(EngineError::usage("즐겨찾기 파일이 4MiB 를 넘게 되어 저장하지 않음"));
+    }
+    st.put(Fav {
+        name,
+        conn: conn.into(),
+        sql: sql.into(),
+        saved: Default::default(),
+    })
+    .map_err(|e| EngineError::run(e.to_string()))?;
+    fav_check(dir)?;
+    Ok(FavoriteSaved {
+        saved: true,
+        exists: false,
+    })
+}
+
+pub fn favorite_remove(dir: &Path, name: &str) -> Result<(), EngineError> {
+    fav_store(dir)?.delete(name).map_err(|e| EngineError::run(e.to_string()))
 }
 
 #[cfg(test)]
@@ -293,5 +460,109 @@ mod tests {
         assert!(c.path.contains("-conflict-") && c.uuid == "u1");
         assert_eq!(list(&p2).len(), 2);
         assert!(write(&p, &n.path, &"x".repeat(MAX_QUERY_BYTES + 1), "", true).is_err());
+    }
+
+    #[test]
+    fn 제어_문자가_든_경로는_받지_않고_매핑_XML_을_깨지_않는다() {
+        let d = tempfile::tempdir().unwrap();
+        let p = proj(d.path());
+        new_file(&p, "app-stg", "select 1").unwrap();
+        for rel in [
+            "queries/a\u{1}.sql",
+            "queries/a\u{7f}.sql",
+            "queries/a\u{FFFE}.sql",
+            "queries/a\nb.sql",
+        ] {
+            assert_eq!(read(&p, rel).unwrap_err().code, idb_engine_usage(), "{rel:?}");
+            assert!(write(&p, rel, "x", "", true).is_err(), "{rel:?}");
+            assert!(conflict_copy(&p, rel, "x", "app-stg").is_err(), "{rel:?}");
+        }
+        // 매핑 파일이 그대로 XML 로 읽힌다(insert_mapping 이 파싱한다)
+        let map = std::fs::read_to_string(d.path().join(".idea/data_source_mapping.xml")).unwrap();
+        assert!(idb_core::mapping::insert_mapping(&map, "file://x", "u").is_ok());
+    }
+
+    #[test]
+    fn 같은_해시로_동시에_쓰면_하나만_되고_새_이름은_겹치지_않는다() {
+        let d = tempfile::tempdir().unwrap();
+        let p = proj(d.path());
+        let n = new_file(&p, "app-stg", "base").unwrap();
+        for round in 0..20 {
+            let base = read(&p, &n.path).unwrap().hash;
+            let bar = std::sync::Barrier::new(4);
+            let ok: usize = std::thread::scope(|s| {
+                let hs: Vec<_> = (0..4)
+                    .map(|i| {
+                        let (p, n, base, bar) = (&p, &n, &base, &bar);
+                        s.spawn(move || {
+                            bar.wait();
+                            usize::from(!write(p, &n.path, &format!("r{round}-{i}"), base, false).unwrap().conflict)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).sum()
+            });
+            assert_eq!(ok, 1, "round {round}");
+        }
+        let bar = std::sync::Barrier::new(8);
+        let paths: Vec<String> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..8)
+                .map(|i| {
+                    let (p, bar) = (&p, &bar);
+                    s.spawn(move || {
+                        bar.wait();
+                        new_file(p, "app-stg", &format!("q{i}")).unwrap().path
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let uniq: std::collections::BTreeSet<_> = paths.iter().collect();
+        assert_eq!(uniq.len(), 8);
+        let map = std::fs::read_to_string(d.path().join(".idea/data_source_mapping.xml")).unwrap();
+        for (i, rel) in paths.iter().enumerate() {
+            assert_eq!(std::fs::read_to_string(d.path().join(rel)).unwrap(), format!("q{i}"));
+            assert!(map.contains(rel.as_str()), "매핑에서 빠짐: {rel}");
+        }
+    }
+
+    #[test]
+    fn 즐겨찾기는_링크를_따라가지_않고_크기와_수를_넘지_않는다() {
+        let d = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("favorites.json"), "[]").unwrap();
+        // 폴더 링크
+        std::os::unix::fs::symlink(out.path(), d.path().join(".dbtui")).unwrap();
+        assert!(favorites(d.path()).is_err());
+        assert!(favorite_add(d.path(), "q", "", "select 1", false).is_err());
+        assert!(favorite_remove(d.path(), "q").is_err());
+        assert_eq!(std::fs::read_to_string(out.path().join("favorites.json")).unwrap(), "[]");
+        // 파일 링크
+        std::fs::remove_file(d.path().join(".dbtui")).unwrap();
+        std::fs::create_dir(d.path().join(".dbtui")).unwrap();
+        std::os::unix::fs::symlink(out.path().join("favorites.json"), d.path().join(FAV_REL)).unwrap();
+        assert!(favorites(d.path()).is_err());
+        assert!(favorite_add(d.path(), "q", "", "select 1", false).is_err());
+        assert_eq!(std::fs::read_to_string(out.path().join("favorites.json")).unwrap(), "[]");
+        std::fs::remove_file(d.path().join(FAV_REL)).unwrap();
+
+        assert!(favorite_add(d.path(), "big", "", &"x".repeat(MAX_FAV_SQL + 1), false).is_err());
+        let data: Vec<serde_json::Value> = (0..MAX_FAVS)
+            .map(|i| serde_json::json!({"name": format!("f{i:04}"), "conn": "", "sql": "select 1", "saved": "2026-11-17T10:00:00+09:00"}))
+            .collect();
+        std::fs::write(d.path().join(FAV_REL), serde_json::to_vec(&data).unwrap()).unwrap();
+        assert_eq!(favorites(d.path()).unwrap().len(), MAX_FAVS);
+        assert!(
+            favorite_add(d.path(), "one-more", "", "select 1", false)
+                .unwrap_err()
+                .error
+                .contains("1000개")
+        );
+        assert!(
+            favorite_add(d.path(), "f0001", "", "select 2", true).unwrap().saved,
+            "있는 이름은 덮을 수 있다"
+        );
+        std::fs::write(d.path().join(FAV_REL), vec![b' '; MAX_FAV_FILE as usize + 1]).unwrap();
+        assert!(favorites(d.path()).unwrap_err().error.contains("4MiB"));
     }
 }
