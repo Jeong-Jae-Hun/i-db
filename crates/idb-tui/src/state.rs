@@ -224,6 +224,8 @@ impl App {
     pub fn save_session(&mut self) -> Result<(), String> {
         for i in 0..self.tabs.len() {
             self.autosave(i);
+            // 덮을 수 없는 글은 충돌 사본에, 파일 없는 탭의 친 글은 새 쿼리에 남긴다(R45.1·R45.3)
+            self.keep_text(i);
         }
         let Some(path) = self.session.path.clone() else { return Ok(()) };
         let mut st = self.session.state.clone();

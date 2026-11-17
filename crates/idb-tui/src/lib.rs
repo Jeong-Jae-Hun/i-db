@@ -184,6 +184,9 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("{e}");
         return 1;
     }
+    for n in &app.quit_notes {
+        eprintln!("{n}");
+    }
     if let Err(e) = saved {
         eprintln!("{e}");
     }

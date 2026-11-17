@@ -1461,3 +1461,87 @@ fn c_는_차트_등호는_고정_결과와_비교다() {
     a.on_key("esc");
     assert!(a.cur().diff.is_none());
 }
+
+#[test]
+fn 연결된_곳_표의_Enter_는_그_줄의_테이블을_값_조건으로_연다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select user_id from t");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(rs(&["user_id"], &[&["1315"]])));
+    a.set_focus(Focus::Result);
+    a.on_key("ctrl+b");
+    assert_eq!(a.status, "연결된 곳 찾는 중: user_id = 1315");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let res = rs(
+        &["connection", "table", "column", "rows", "note"],
+        &[&["app-stg", "public.orders", "user_id", "3", ""], &["x", "", "", "", "접속 실패"]],
+    );
+    a.on_done(id, Ok(json!({"result": res, "failed": false})));
+    a.on_key("enter");
+    let (_, req) = jobs(&mut a).into_iter().find(|(_, r)| r["op"] == "table_page").unwrap();
+    assert_eq!(
+        (req["table"].as_str(), req["where"].as_str()),
+        (Some("orders"), Some("\"user_id\" = '1315'"))
+    );
+}
+
+#[test]
+fn 탭_접속을_바꾸면_이_탭만_쓰던_트랜잭션을_먼저_묻는다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.in_tx.insert(0, std::time::Instant::now());
+    select_conn(&mut a, "cache");
+    a.on_key("enter");
+    assert!(matches!(a.overlay, Overlay::Tx { .. }));
+    assert_eq!(a.cur().conn, Some(0));
+    a.on_key("r");
+    let (id, req) = jobs(&mut a).into_iter().find(|(_, r)| r["op"] == "tx_rollback").unwrap();
+    assert_eq!(req["conn"], "app-stg");
+    a.on_done(id, Ok(json!({"in_tx": false, "text": "ROLLBACK"})));
+    assert_eq!(a.cur().conn, Some(2));
+}
+
+#[test]
+fn 남길_수_없는_친_글이_있는_탭은_닫기_전에_묻는다() {
+    let mut a = app();
+    a.set_conn(0, Some(2));
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "GET k");
+    a.new_tab();
+    a.close_tab(0);
+    assert!(matches!(&a.overlay, Overlay::Confirm { q, .. } if q == "저장하지 않은 글이 있는 탭을 닫을까요"));
+    a.on_key("y");
+    assert_eq!(a.tabs.len(), 1);
+}
+
+#[test]
+fn 되돌리기는_데이터베이스를_바꾼_뒤의_묶음을_건너뛴다() {
+    let mut a = app();
+    let cs: idb_engine::ChangeSet = serde_json::from_value(json!({"table": {"schema": "public", "table": "t"}, "pk": ["id"],
+        "changes": [{"op": "delete", "key": {"id": "1"}, "values": {}, "old": {}}]}))
+    .unwrap();
+    let ap: idb_engine::Applied = serde_json::from_value(json!({"rows": [{"id": "1", "v": "a"}]})).unwrap();
+    let entry = |db: &str| crate::app::UndoEntry {
+        conn: 0,
+        db: db.into(),
+        changes: cs.clone(),
+        applied: ap.clone(),
+    };
+    a.tabs[0].undo = vec![entry("d"), entry("other")];
+    a.set_focus(Focus::Result);
+    a.on_key("ctrl+z");
+    assert_eq!(a.status, "다른 데이터베이스에서 낸 묶음 1개 건너뜀");
+    a.on_key("y");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "undo_changes");
+    a.on_done(id, Ok(json!({"result": rs(&[], &[]), "applied": {"rows": []}, "sql": []})));
+    assert_eq!(a.tabs[0].undo.len(), 1);
+    assert_eq!(a.tabs[0].undo[0].db, "other");
+    a.on_key("ctrl+z");
+    assert!(matches!(&a.overlay, Overlay::Confirm { q, .. } if q.ends_with("그 묶음 1개 버리기")));
+}

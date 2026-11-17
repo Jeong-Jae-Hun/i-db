@@ -82,6 +82,8 @@ pub enum Pend {
     },
     Undo {
         tab: u64,
+        /// 낸 묶음의 자리(tab.undo)
+        at: usize,
     },
     RedisValue {
         tab: u64,
@@ -135,6 +137,7 @@ pub enum Pend {
     Linked {
         tab: u64,
         conn: usize,
+        value: String,
     },
     User360 {
         tab: u64,
@@ -254,6 +257,8 @@ impl Overlay {
 /// 지운 묶음 되돌리기 기록(R50).
 pub struct UndoEntry {
     pub conn: usize,
+    /// 제출할 때의 데이터베이스(R50: 바꾼 뒤에는 되돌리지 않는다)
+    pub db: String,
     pub changes: idb_engine::ChangeSet,
     pub applied: idb_engine::Applied,
 }
@@ -310,6 +315,10 @@ pub struct Tab {
     pub snapshot: bool,
     /// 실행 계획 나무(R22.2). 있으면 결과 영역이 나무다(esc 로 닫으면 표)
     pub plan: Option<crate::plan::PlanView>,
+    /// 연결된 곳 표(R73.5)의 찾은 값이다. Enter 로 그 줄의 테이블을 연다
+    pub linked: Option<String>,
+    /// 남기지 못한 글을 버리고 닫기로 했다
+    pub close_ok: bool,
     /// 차트(R28)·비교(R31.2) 화면. 있으면 결과 영역이 그것이다
     pub chart: Option<crate::viz::Chart>,
     pub diff: Option<crate::viz::DiffView>,
@@ -352,6 +361,8 @@ impl Tab {
             text_top: 0,
             snapshot: false,
             plan: None,
+            linked: None,
+            close_ok: false,
             chart: None,
             diff: None,
             base: None,
@@ -471,6 +482,10 @@ pub struct App {
     pub estimating: Option<(u64, Instant, crate::actions::ConfirmParts, After)>,
     pub exporting: Option<crate::export::Exporting>,
     pub conn_form: Option<crate::connform::ConnForm>,
+    /// 잠금 상태를 받은 때(R54 남은 시간 세기)
+    pub lock_at: HashMap<usize, Instant>,
+    /// 화면을 닫은 뒤 터미널에 알릴 글(R45.3 충돌 사본 등)
+    pub quit_notes: Vec<String>,
 }
 
 impl App {
@@ -523,6 +538,8 @@ impl App {
             estimating: None,
             exporting: None,
             conn_form: None,
+            lock_at: HashMap::new(),
+            quit_notes: Vec::new(),
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -627,6 +644,13 @@ impl App {
         t.editor.redis = redis;
         if let Some(c) = conn {
             self.ensure_catalog(c);
+            if self.conns[c].env == "prod" && !self.locks.contains_key(&c) {
+                let name = self.conns[c].name.clone();
+                self.call(
+                    Request::ProdLock { conn: name, unlock: None },
+                    Pend::Lock { conn: c, toggle: false },
+                );
+            }
         }
     }
 
@@ -1029,6 +1053,13 @@ impl App {
         self.autosave(i);
         if let Some(note) = self.keep_text(i) {
             self.status = note;
+        } else if self.unsaved_text(i) && !self.tabs[i].close_ok {
+            // 친 글을 남길 수 없으면(Redis·접속 없음·쓰기 실패) 묻는다(R45.3)
+            self.confirm("저장하지 않은 글이 있는 탭을 닫을까요", move |a| {
+                a.tabs[i].close_ok = true;
+                a.close_tab(i);
+            });
+            return;
         }
         self.tabs.remove(i);
         if self.tabs.is_empty() {

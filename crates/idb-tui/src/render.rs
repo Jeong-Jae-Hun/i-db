@@ -230,10 +230,14 @@ impl App {
                 if let Some(l) = self.locks.get(&c)
                     && l.prod
                 {
-                    let b = if l.locked {
+                    // 열린 남은 시간은 받은 뒤 흐른 만큼 줄여 센다. 다 흐르면 serve 도 다시 잠근다(R54)
+                    let rest = l
+                        .remaining_secs
+                        .saturating_sub(self.lock_at.get(&c).map_or(0, |t| t.elapsed().as_secs()));
+                    let b = if l.locked || rest == 0 {
                         "🔒 잠김".to_string()
                     } else {
-                        format!("🔓 열림 {}:{:02}", l.remaining_secs / 60, l.remaining_secs % 60)
+                        format!("🔓 열림 {}:{:02}", rest / 60, rest % 60)
                     };
                     left.push((format!("  {b}"), theme::tx_badge()));
                 }

@@ -405,6 +405,12 @@ impl App {
         }
     }
 
+    /// 사용자가 친 글이 파일·새 쿼리 어디에도 남지 않는지다(R45.3 닫기 확인).
+    pub fn unsaved_text(&self, i: usize) -> bool {
+        let t = &self.tabs[i];
+        t.editor.typed && t.file.is_none() && !t.editor.value().trim().is_empty()
+    }
+
     /// 탭을 닫을 때 남길 글을 충돌 사본·새 쿼리에 둔다(R45.3). 남긴 경로 알림을 돌려준다.
     pub fn keep_text(&mut self, i: usize) -> Option<String> {
         if !autosave_on() {
@@ -421,9 +427,21 @@ impl App {
         if !t.autosave_stopped || text.trim().is_empty() || f.read(&rel).ok().as_deref() == Some(text.as_str()) {
             return None;
         }
-        let copy = idb_core::mapping::conflict_path(&f.dir, &rel, chrono::Local::now()).ok()?;
-        f.write(&copy, &text).ok()?;
-        Some(format!("저장 안 한 글을 {copy} 에 남김"))
+        let name = t.display_name();
+        let res = idb_core::mapping::conflict_path(&f.dir, &rel, chrono::Local::now())
+            .map_err(|e| e.to_string())
+            .and_then(|copy| f.write(&copy, &text).map(|()| copy));
+        match res {
+            Ok(copy) => {
+                // 화면을 닫은 뒤 터미널에도 알린다(R45.3)
+                self.quit_notes.push(format!("saved unsaved text of {rel} to {copy}"));
+                Some(format!("저장 안 한 글을 {copy} 에 남김"))
+            }
+            Err(e) => {
+                self.quit_notes.push(format!("could not save {name}: {e}"));
+                None
+            }
+        }
     }
 
     // ─── 즐겨찾기 (R29) ───

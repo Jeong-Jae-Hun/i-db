@@ -218,6 +218,7 @@ impl App {
             },
             Pend::Lock { conn, toggle } => match res.and_then(decode::<LockState>) {
                 Ok(st) => {
+                    self.lock_at.insert(conn, Instant::now());
                     if toggle {
                         self.status = if st.locked {
                             format!("prod({}) 쓰기 잠금", st.conn)
@@ -230,10 +231,12 @@ impl App {
                 Err(e) => self.status = one_line(&e.error),
             },
             Pend::Apply { tab, cs } => self.apply_done(tab, cs, res),
-            Pend::Undo { tab } => match res.and_then(decode::<AppliedResult>) {
+            Pend::Undo { tab, at } => match res.and_then(decode::<AppliedResult>) {
                 Ok(r) => {
-                    if let Some(t) = self.tab_by_id(tab) {
-                        t.undo.pop();
+                    if let Some(t) = self.tab_by_id(tab)
+                        && at < t.undo.len()
+                    {
+                        t.undo.remove(at);
                     }
                     self.status = format!("되돌림: {}", one_line(&r.result.text));
                     self.refresh_tab(tab);
@@ -411,10 +414,14 @@ impl App {
                 }
                 Err(e) => self.status = one_line(&e.error),
             },
-            Pend::Linked { tab, conn: _ } => match res.and_then(decode::<LinkedResult>) {
+            Pend::Linked { tab, conn: _, value } => match res.and_then(decode::<LinkedResult>) {
                 Ok(l) => {
                     let summary = l.result.text.clone();
                     self.result_done(tab, Ok(l.result), "연결된 곳");
+                    if let Some(t) = self.tab_by_id(tab) {
+                        t.linked = Some(value);
+                        t.summary = format!("{summary} · Enter 테이블 보기");
+                    }
                     self.status = summary;
                 }
                 Err(e) => self.result_done(tab, Err(e), "연결된 곳"),
@@ -627,6 +634,22 @@ impl App {
                 }
                 if let NodeKind::Conn(c) = node.kind {
                     let ti = self.tab;
+                    // 탭 접속을 바꾸면 이 탭만 쓰던 열린 트랜잭션이 남는다. 먼저 끝내게 묻는다(R17.3)
+                    if let Some(old) = self.tabs[ti].conn.filter(|&o| o != c)
+                        && self.in_tx.contains_key(&old)
+                        && !self.tabs.iter().enumerate().any(|(j, t)| j != ti && t.conn == Some(old))
+                    {
+                        self.overlay = Overlay::Tx {
+                            conns: vec![old],
+                            then: Box::new(move |a| {
+                                a.set_conn(ti, Some(c));
+                                if opening && enter {
+                                    a.auto_open(c);
+                                }
+                            }),
+                        };
+                        return;
+                    }
                     if self.tabs[ti].conn != Some(c) {
                         self.set_conn(ti, Some(c));
                     }
@@ -1121,6 +1144,9 @@ impl App {
                 }
                 return;
             }
+        }
+        if k == "enter" && self.tabs[ti].linked.is_some() && self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) {
+            return self.open_linked_row(ti);
         }
         if self.tabs[ti].chart.is_some() {
             if matches!(k, "c" | "esc") {
@@ -1706,6 +1732,8 @@ impl App {
         let col = g.res.cols.get(g.col).cloned().unwrap_or_default();
         let Some(v) = g.cur_value() else { return };
         let table = g.res.origin.as_ref().map(|o| o.table.table.clone()).unwrap_or_default();
+        let value = v.clone();
+        self.status = format!("연결된 곳 찾는 중: {col} = {v}");
         let req = Request::Linked {
             conn: self.conns[conn].name.clone(),
             column: col,
@@ -1716,9 +1744,53 @@ impl App {
         self.set_conn(i, Some(conn));
         let id = self.tabs[i].id;
         self.tabs[i].title = "연결된 곳".into();
-        let job = self.call(req, Pend::Linked { tab: id, conn });
+        let job = self.call(
+            req,
+            Pend::Linked {
+                tab: id,
+                conn,
+                value: value.clone(),
+            },
+        );
         self.tabs[i].running = Some(job);
         self.set_focus(Focus::Result);
+    }
+
+    /// 연결된 곳 표의 Enter: 그 줄의 접속에서 그 테이블을 `"<열>" = <값>` 조건으로 연다(R73.5).
+    fn open_linked_row(&mut self, ti: usize) {
+        let t = &self.tabs[ti];
+        let (Some(g), Some(value)) = (t.shown(), t.linked.clone()) else {
+            return;
+        };
+        let Some(row) = g.row_values() else { return };
+        let get = |name: &str| {
+            g.res
+                .cols
+                .iter()
+                .position(|c| c == name)
+                .map(|i| row[i].clone())
+                .unwrap_or_default()
+        };
+        let (conn, table, col) = (get("connection"), get("table"), get("column"));
+        let Some((schema, tbl)) = table.split_once('.') else {
+            self.status = "열 테이블이 없는 줄".into();
+            return;
+        };
+        let Some(ci) = self.conns.iter().position(|c| c.name == conn) else {
+            self.status = "찾은 뒤 접속을 고치거나 지워 열지 않음".into();
+            return;
+        };
+        let wh = format!(
+            "{} = {}",
+            idb_core::sqlsafe::quote_ident(&col),
+            idb_core::sqlsafe::quote_literal(&value)
+        );
+        let r = TableRef {
+            schema: schema.into(),
+            table: tbl.into(),
+        };
+        self.new_tab();
+        self.open_table(ci, r, wh);
     }
 
     fn export(&mut self, kind: &'static str) {
@@ -2322,6 +2394,7 @@ impl App {
                 let Some(ti) = self.tab_index(tab) else { return };
                 let conn = self.tabs[ti].result_conn.unwrap_or(0);
                 let mut status = format!("제출함: {}", one_line(&r.result.text));
+                let self_db = self.db_over.get(&conn).cloned().unwrap_or_else(|| self.conns[conn].db.clone());
                 let count = |op| cs.changes.iter().filter(|c| c.op == op).count();
                 let note = format!(
                     "-- 제출 {}건 {}.{} (UPDATE {} · INSERT {} · DELETE {})",
@@ -2339,9 +2412,11 @@ impl App {
                     let t = &mut self.tabs[ti];
                     t.undo.push(UndoEntry {
                         conn,
+                        db: String::new(),
                         changes: cs.clone(),
                         applied: r.applied.clone(),
                     });
+                    t.undo.last_mut().unwrap().db = self_db.clone();
                     if t.undo.len() > UNDO_KEEP {
                         t.undo.remove(0);
                     }
@@ -2367,10 +2442,32 @@ impl App {
     fn undo_submit(&mut self) {
         let ti = self.tab;
         let tab = self.tabs[ti].id;
-        let Some(u) = self.tabs[ti].undo.last() else {
+        if self.tabs[ti].undo.is_empty() {
             self.status = "되돌릴 제출이 없음".into();
             return;
+        }
+        // 제출한 뒤 데이터베이스를 바꾼 묶음은 건너뛰고 지금 데이터베이스의 가장 최근 묶음을 낸다(R50.2)
+        let cur_db = |a: &App, c: usize| a.db_over.get(&c).cloned().unwrap_or_else(|| a.conns[c].db.clone());
+        let pick = self.tabs[ti]
+            .undo
+            .iter()
+            .rposition(|u| u.db.is_empty() || u.db == cur_db(self, u.conn));
+        let skipped = self.tabs[ti].undo.len() - 1 - pick.unwrap_or(self.tabs[ti].undo.len() - 1);
+        let Some(pick) = pick else {
+            let n = self.tabs[ti].undo.len();
+            self.confirm(
+                format!("지금 데이터베이스에서 되돌릴 묶음이 없음 — 그 묶음 {n}개 버리기"),
+                move |a| {
+                    a.tabs[ti].undo.clear();
+                    a.status = format!("되돌리기 묶음 {n}개 버림");
+                },
+            );
+            return;
         };
+        if skipped > 0 {
+            self.status = format!("다른 데이터베이스에서 낸 묶음 {skipped}개 건너뜀");
+        }
+        let u = &self.tabs[ti].undo[pick];
         let (conn, cs, applied) = (u.conn, u.changes.clone(), u.applied.clone());
         let undo = match undo_preview(&cs, &applied) {
             Ok(p) => p,
@@ -2397,7 +2494,7 @@ impl App {
                         applied,
                         confirm_prod: prod,
                     },
-                    Pend::Undo { tab },
+                    Pend::Undo { tab, at: pick },
                 );
             }),
             preview: undo,

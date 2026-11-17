@@ -304,6 +304,7 @@ impl App {
         moved(&mut self.catalogs, &map);
         moved(&mut self.in_tx, &map);
         moved(&mut self.locks, &map);
+        moved(&mut self.lock_at, &map);
         moved(&mut self.schema_of, &map);
         moved(&mut self.db_over, &map);
         self.manual = self.manual.iter().filter_map(|&c| remap(Some(c))).collect();
