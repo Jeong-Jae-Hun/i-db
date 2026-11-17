@@ -18,7 +18,7 @@ use std::future::Future;
 
 use tokio::time::Instant;
 
-pub use pg::{Clients, Pg, TableRef};
+pub use pg::{Clients, Pg, Session, TableRef};
 
 /// 서버가 돌려준 오류다. 글은 pgx `PgError.Error()` 와 같다.
 #[derive(Clone, Debug, PartialEq, Eq)]

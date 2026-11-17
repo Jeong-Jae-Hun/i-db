@@ -241,6 +241,11 @@ impl Conn {
         !self.broken && self.tx_status == b'I'
     }
 
+    /// 읽다·쓰다 끊겨 다시 쓸 수 없는 연결인지다.
+    pub fn is_broken(&self) -> bool {
+        self.broken
+    }
+
     /// simple protocol 로 sql 을 보낸다. 결과 행은 버리고 첫 오류를 돌려준다.
     pub async fn exec(&mut self, sql: &str) -> Result<(), Error> {
         let mut buf = BytesMut::new();

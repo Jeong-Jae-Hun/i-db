@@ -1,6 +1,7 @@
 //! PostgreSQL 접속 풀과 CLI 가 쓰는 조회. Go `internal/db` 의 backend·readonly·meta·export(SearchData)·schemadiff·linked 와 같다.
 
 mod meta;
+mod session;
 mod types;
 mod wire;
 
@@ -17,6 +18,7 @@ use crate::linked::{self, LinkedColumn};
 use crate::schemadiff::{SnapColumn, SnapTable, Snapshot, column_def};
 use crate::{Error, redis};
 pub use meta::TableRef;
+pub use session::Session;
 use wire::{Config, Rows};
 
 /// 풀 하나가 여는 연결 수 상한(pgxpool MaxConns)
@@ -253,39 +255,7 @@ impl Pg {
         let start = Instant::now();
         let mut p = self.acquire().await?;
         let params: Vec<Option<&str>> = args.iter().map(|a| Some(a.as_str())).collect();
-        let c = p.conn();
-        let w = first_sql_word(sql);
-        let res = if !matches!(w.as_str(), "select" | "values" | "table") || !is_read_only_sql(sql) {
-            c.query_cells(sql, &params, MAX_ROWS).await.map(to_result)
-        } else {
-            // 트랜잭션 밖이면 커서용 트랜잭션을 직접 열고, 실패하면 직접 닫는다
-            let began = !c.in_tx();
-            let r = async {
-                if began {
-                    c.exec("BEGIN").await?;
-                }
-                c.query(
-                    &format!("DECLARE dbtui_cursor NO SCROLL CURSOR FOR {}", trim_statement(sql)),
-                    &params,
-                    0,
-                )
-                .await?;
-                let rows = c
-                    .query_cells(&format!("FETCH FORWARD {} FROM dbtui_cursor", MAX_ROWS + 1), &[], MAX_ROWS)
-                    .await?;
-                c.exec("CLOSE dbtui_cursor").await?;
-                if began {
-                    c.exec("COMMIT").await?;
-                }
-                Ok(to_result(rows))
-            }
-            .await;
-            if r.is_err() && began {
-                let _ = c.exec("ROLLBACK").await;
-            }
-            r
-        };
-        let mut res = res?;
+        let mut res = run_on(p.conn(), sql, &params).await?;
         p.release();
         res.elapsed = start.elapsed();
         Ok(res)
@@ -481,6 +451,41 @@ impl Pg {
         p.release();
         r
     }
+}
+
+/// 연결 c 에서 문장 하나를 실행한다(Go RunArgs 본문). 값은 텍스트로 바인딩해 서버가 타입을 정한다.
+/// select·values·table 읽기 문장은 커서로 MAX_ROWS+1 행만 받고, 그 밖의 문장(쓰기·RETURNING·SHOW·EXPLAIN)은 끝까지 받되 MAX_ROWS 행만 싣는다.
+pub(crate) async fn run_on(c: &mut wire::Conn, sql: &str, params: &[Option<&str>]) -> Result<QueryResult, Error> {
+    let w = first_sql_word(sql);
+    if !matches!(w.as_str(), "select" | "values" | "table") || !is_read_only_sql(sql) {
+        return c.query_cells(sql, params, MAX_ROWS).await.map(to_result);
+    }
+    // 트랜잭션 밖이면 커서용 트랜잭션을 직접 열고, 실패하면 직접 닫는다
+    let began = !c.in_tx();
+    let r = async {
+        if began {
+            c.exec("BEGIN").await?;
+        }
+        c.query(
+            &format!("DECLARE dbtui_cursor NO SCROLL CURSOR FOR {}", trim_statement(sql)),
+            params,
+            0,
+        )
+        .await?;
+        let rows = c
+            .query_cells(&format!("FETCH FORWARD {} FROM dbtui_cursor", MAX_ROWS + 1), &[], MAX_ROWS)
+            .await?;
+        c.exec("CLOSE dbtui_cursor").await?;
+        if began {
+            c.exec("COMMIT").await?;
+        }
+        Ok(to_result(rows))
+    }
+    .await;
+    if r.is_err() && began {
+        let _ = c.exec("ROLLBACK").await;
+    }
+    r
 }
 
 /// 읽기 전용 트랜잭션 안에서 sql 을 실행한다. select·values·table·with 는 커서로 limit+1 행만 받는다.

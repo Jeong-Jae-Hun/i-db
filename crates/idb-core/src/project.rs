@@ -262,6 +262,18 @@ impl Project {
     pub fn conn_by_name(&self, name: &str) -> Option<&Conn> {
         self.conns.iter().find(|c| c.name == name)
     }
+
+    /// 화면(R52)·CLI(R58)·serve 가 같이 쓰는 enc() 확장이다. 보낼 글과 알림 글을 돌려준다.
+    pub fn expand_enc(&self, c: &Conn, sql: &str) -> Result<(String, String), String> {
+        let (key, iv) = self.aes_key_iv(c);
+        let (out, n, server) = crate::statcrypt::expand_enc(sql, &key, &iv)?;
+        let note = match (n, server) {
+            (0, _) => String::new(),
+            (_, true) => "키·IV 가 없어 서버 staticEncrypt 로 실행".into(),
+            _ => format!("enc() {n}개 암호화"),
+        };
+        Ok((out, note))
+    }
 }
 
 #[derive(Debug)]
