@@ -31,6 +31,8 @@ pub const REASON_CONFIRM_PROD: &str = "confirm_prod";
 pub const REASON_CONFIRM_DANGER: &str = "confirm_danger";
 /// 환경과 상관없이 늘 묻는 확인(백엔드 신호 R22.1, 패턴 일괄 삭제 R42). `confirm:true` 로 다시 보낸다
 pub const REASON_CONFIRM: &str = "confirm";
+/// 읽기 전용이 아닌 문장의 EXPLAIN ANALYZE 는 문장을 실제로 실행해 환경과 상관없이 묻는다(R9.2). `confirm_analyze:true` 로 다시 보낸다
+pub const REASON_CONFIRM_ANALYZE: &str = "confirm_analyze";
 /// 읽기 전용 저장소에 쓰기로 보이는 질의다(R60). 다시 보낼 길이 없다
 pub const REASON_READ_ONLY: &str = "read_only";
 /// 전체 스캔·큰 범위 같은 비싼 저장소 질의다(R60.2). 확인 후 `force:true` 로 다시 보낸다
@@ -366,6 +368,9 @@ pub struct RunRequest {
     /// 사용자가 `위험: … y/N` 에 y 했다(R25)
     #[serde(default)]
     pub confirm_danger: bool,
+    /// 사용자가 `EXPLAIN ANALYZE 는 문장을 실제로 실행합니다: y/N` 에 y 했다(R9.2). explain 만 본다
+    #[serde(default)]
+    pub confirm_analyze: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

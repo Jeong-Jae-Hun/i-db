@@ -862,28 +862,46 @@ impl LocalEngine {
         if stmts.len() != 1 {
             return Err(EngineError::usage(format!("문장 하나만 실행함 ({}개)", stmts.len())));
         }
-        let (mut sent, note) = self.proj.expand_enc(&c, stmts[0]).map_err(EngineError::usage)?;
-        if let Some(opt) = &explain {
-            sent = explain_sql(&sent, opt);
-        }
+        let (orig, note) = self.proj.expand_enc(&c, stmts[0]).map_err(EngineError::usage)?;
+        // 판정은 감싸기 전 문장으로 한다(Go ui.go ctrl+e·alt+e). ANALYZE 없이 감싼 EXPLAIN 은 속 문장을 실행하지 않아 늘 읽기이고,
+        // ANALYZE 로 감쌌거나 직접 쓴 EXPLAIN 이면 속 문장의 읽기·쓰기와 위험(R25)이 그대로다. 감싼 글로 가르면 ANALYZE 낱말에 걸린다
+        let analyze = explain.as_ref().is_some_and(|o| o.analyze);
+        let judged = explain.is_none() || analyze || first_sql_word(&orig) == "explain";
+        let read_only = !judged || is_read_only_sql(&orig);
+        let danger = if explain.is_none() || analyze {
+            danger_of(&orig)
+        } else {
+            String::new()
+        };
+        let sent = match &explain {
+            Some(opt) => explain_sql(&orig, opt),
+            None => orig.clone(),
+        };
         let (sql, args) = bind_params(&sent, &r.params)?;
-        let read_only = is_read_only_sql(&sent);
         // 거절은 접속을 열기 전에 한다. 그래야 거절할 prod 에 연결 자체를 하지 않는다
         if c.env() == "prod" && !read_only {
-            let w = first_sql_word(&sent);
-            let tx_end = TX_END_WORDS.contains(&w.as_str()) && !mask_sql(&sent).to_lowercase().split_whitespace().any(|t| t == "prepared");
+            let w = first_sql_word(&orig);
+            let tx_end = explain.is_none()
+                && TX_END_WORDS.contains(&w.as_str())
+                && !mask_sql(&orig).to_lowercase().split_whitespace().any(|t| t == "prepared");
             if !tx_end && self.locked(&c) {
                 let hint = matches!(w.as_str(), "begin" | "start" | "set") || self.in_tx(&c).await;
                 return Err(self.lock_refusal(&c, hint));
             }
-            if !r.confirm_prod {
-                return Err(EngineError::refused(
-                    REASON_CONFIRM_PROD,
-                    format!("prod({})에 쓰기 실행: y/N", c.name),
-                ));
-            }
         }
-        let danger = danger_of(&sent);
+        // ANALYZE 는 문장을 실제로 실행하므로 읽기 전용이 아니면 모든 환경에서 먼저 묻는다(R9.2). prod 는 그다음 R6 확인이다
+        if analyze && !read_only && !r.confirm_analyze {
+            return Err(EngineError::refused(
+                REASON_CONFIRM_ANALYZE,
+                "EXPLAIN ANALYZE 는 문장을 실제로 실행합니다: y/N",
+            ));
+        }
+        if c.env() == "prod" && !read_only && !r.confirm_prod {
+            return Err(EngineError::refused(
+                REASON_CONFIRM_PROD,
+                format!("prod({})에 쓰기 실행: y/N", c.name),
+            ));
+        }
         if !danger.is_empty() && !r.confirm_danger {
             return Err(EngineError::refused(REASON_CONFIRM_DANGER, format!("위험: {danger}")));
         }

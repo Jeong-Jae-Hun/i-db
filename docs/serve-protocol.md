@@ -6,7 +6,7 @@
 
 한 줄에 JSON 하나다. 요청은 `{"id":N,"op":"…",…}`이고 응답은 `{"id":N,"ok":true,"result":…}` 또는 `{"id":N,"ok":false,"code":3,"error":"…","reason":"…"}`이다. id 는 클라이언트가 고르는 양의 정수이고 진행 중인 요청끼리 겹치면 안 된다. 요청은 동시에 돌고 응답은 끝난 순서로 온다. 모르는 필드는 무시한다.
 
-code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`), `confirm`(백엔드 신호·패턴 일괄 삭제처럼 환경과 상관없이 늘 묻는 것, `confirm:true`)이다. 저장소 op 는 `read_only`(쓰기로 보이는 질의, 다시 보낼 길 없음), `confirm_expensive`(전체 스캔·7일 넘는 범위 같은 비싼 질의 R60.2, 확인 후 `force:true`), `billed`(요청마다 요금이 붙는 AWS 조회 R72, serve 쪽 `DB_ALLOW_BILLED=1` 없이는 확인으로도 풀리지 않음)를 쓴다. error 글은 그대로 확인 창에 보일 수 있는 질문(`prod(app-prod)에 제출 2건: y/N`)이다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
+code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`), `confirm`(백엔드 신호·패턴 일괄 삭제처럼 환경과 상관없이 늘 묻는 것, `confirm:true`), `confirm_analyze`(읽기 전용이 아닌 문장의 EXPLAIN ANALYZE, R9.2, `confirm_analyze:true`)이다. 저장소 op 는 `read_only`(쓰기로 보이는 질의, 다시 보낼 길 없음), `confirm_expensive`(전체 스캔·7일 넘는 범위 같은 비싼 질의 R60.2, 확인 후 `force:true`), `billed`(요청마다 요금이 붙는 AWS 조회 R72, serve 쪽 `DB_ALLOW_BILLED=1` 없이는 확인으로도 풀리지 않음)를 쓴다. error 글은 그대로 확인 창에 보일 수 있는 질문(`prod(app-prod)에 제출 2건: y/N`)이다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
 
 어느 메시지에도 비밀번호·AES 키를 싣지 않는다. 오류 글은 serve 가 그 접속의 비밀번호와 모든 AES 키·IV 를 지우고 제어 문자를 바꾼 것이다. 단, staticEncrypt 암호문은 형식상 앞에 IV 를 싣는다(`IV^|^…`).
 
@@ -30,7 +30,7 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 | `describe`·`ddl` | conn, schema, table(`스키마.테이블` 꼴도) | ResultSet · CREATE 글 |
 | `search` | conn, schema, text | ResultSet(건너뛴 테이블은 note) |
 | `run` | conn, sql(문장 하나), params{이름:값}, confirm_prod, confirm_danger | ResultSet(in_tx, enc() 알림은 note) |
-| `explain` | run 필드 + analyze, buffers, format | ResultSet |
+| `explain` | run 필드 + analyze, buffers, format, confirm_analyze | ResultSet. 판정은 감싸기 전 문장으로 한다: ANALYZE 면 속 문장의 쓰기·위험이 그대로이고, 읽기 전용이 아니면 `confirm_analyze`(R9.2) → prod `confirm_prod` → `confirm_danger` 순으로 묻는다. ANALYZE 없는 EXPLAIN 은 묻지 않는다 |
 | `table_page` | conn, schema, table, where, order_by, offset, limit(기본 200, 상한 1,000), count, estimate | `{result, sql, count?, estimate?}` |
 | `tx_begin`·`tx_rollback`·`tx_state` | conn | `{in_tx, text}` |
 | `tx_commit` | conn, confirm_prod | `{in_tx, text}` |

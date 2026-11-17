@@ -628,3 +628,42 @@ fn 저장소_op_는_쓰기_비싼_질의를_코드_3_까닭으로_거절하고_�
     assert_eq!(err(&r), (2, "보드 없음: nope (.dbtui/boards)", ""));
     s.finish(&secrets(tmp.path()));
 }
+
+#[test]
+fn EXPLAIN_ANALYZE_는_속_문장으로_쓰기와_위험을_가른다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let explain = |sql: &str, conn: &str, extra: Value| {
+        let mut req = json!({"op": "explain", "conn": conn, "sql": sql, "analyze": true, "buffers": true, "format": "JSON"});
+        for (k, v) in extra.as_object().unwrap() {
+            req[k] = v.clone();
+        }
+        req
+    };
+    // 쓰기 문장의 ANALYZE 는 환경과 상관없이 실행 확인(R9.2), 그다음 위험 확인(R25)
+    let r = s.call(explain("delete from t", "app-stg", json!({})));
+    assert_eq!(err(&r), (3, "EXPLAIN ANALYZE 는 문장을 실제로 실행합니다: y/N", "confirm_analyze"));
+    let r = s.call(explain("delete from t", "app-stg", json!({"confirm_analyze": true})));
+    assert_eq!(err(&r), (3, "위험: WHERE 없는 DELETE", "confirm_danger"));
+    // 잠긴 prod: 쓰기의 ANALYZE 는 확인 없이 거절, 열면 실행 확인 → prod 확인 순
+    let r = s.call(explain(
+        "delete from t where id = 1",
+        "app-prod",
+        json!({"confirm_analyze": true, "confirm_prod": true}),
+    ));
+    assert_eq!(err(&r).2, "prod_locked", "{r}");
+    s.call(json!({"op": "prod_lock", "conn": "app-prod", "unlock": true}));
+    let r = s.call(explain("delete from t where id = 1", "app-prod", json!({"confirm_prod": true})));
+    assert_eq!(err(&r).2, "confirm_analyze", "{r}");
+    let r = s.call(explain("delete from t where id = 1", "app-prod", json!({"confirm_analyze": true})));
+    assert_eq!(err(&r).2, "confirm_prod", "{r}");
+    s.call(json!({"op": "prod_lock", "conn": "app-prod", "unlock": false}));
+    // 읽기의 ANALYZE 는 잠긴 prod 에서도 쓰기로 보지 않는다(접속이 없어 실행 오류로 끝난다)
+    let r = s.call(explain("select 1", "app-prod", json!({})));
+    assert_eq!((err(&r).0, err(&r).2), (1, ""), "{r}");
+    // ANALYZE 없는 EXPLAIN 은 속 문장을 실행하지 않아 묻지 않는다(R9.1)
+    let r = s.call(json!({"op": "explain", "conn": "app-prod", "sql": "delete from t", "format": "JSON"}));
+    assert_eq!((err(&r).0, err(&r).2), (1, ""), "{r}");
+    s.finish(&secrets(tmp.path()));
+}
