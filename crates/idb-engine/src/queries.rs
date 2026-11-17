@@ -2,14 +2,12 @@
 //! 화면은 이 op 로만 읽고 쓴다(로컬도 같은 길). 사용자 자신의 쿼리 파일이라 원격에서도 쓰기를 받는다(DB 쓰기가 아님).
 //! 경계: `queries/` 아래 `.sql` 만, `..`·절대 경로를 받지 않고, 읽고 쓰기 전마다 실제 경로(링크를 따라간 곳)가
 //! 프로젝트의 queries 안인지 본다. 한 파일은 1MiB 까지이고, 쓰기는 원자적이며 권한은 원본을 따른다.
-//! 해시 확인과 쓰기, 새 이름 고르기, 매핑 고치기는 잠금 하나로 줄 세운다(프로세스 안은 Mutex, 프로세스끼리는
-//! queries 폴더의 flock). 프로세스 안 잠금은 프로젝트를 가리지 않는 전역이다. 한 serve 는 프로젝트 하나만 열고
-//! 쓰기는 사람이 누르는 빈도라 충분하다. 한 프로세스가 여러 프로젝트를 바쁘게 쓰게 되면 프로젝트별로 나눈다.
+//! 해시 확인과 쓰기, 새 이름 고르기, 매핑 고치기는 queries 폴더의 flock 하나로 줄 세운다. flock 은 연 파일마다
+//! 걸려 같은 프로세스의 두 스레드도 서로 기다리므로 프로세스 안 Mutex 를 따로 두지 않는다(프로젝트마다 따로 잠긴다).
 
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use idb_core::mapping::{WriteError, add_mapping_checked, conflict_path, real_path, unique_query_path, write_project_file};
@@ -52,18 +50,23 @@ fn real(dir: &Path, rel: &str) -> Result<PathBuf, EngineError> {
     Ok(p)
 }
 
-static LOCK: Mutex<()> = Mutex::new(());
-const LOCK_WAIT: Duration = Duration::from_secs(10);
+/// 잠금을 기다리는 상한이다(시험은 짧게)
+const LOCK_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
 
-/// 잡고 있는 동안 다른 쓰기(이 프로세스와 다른 프로세스)가 기다린다.
+/// 잡고 있는 동안 다른 쓰기(이 프로세스의 다른 스레드와 다른 프로세스)가 기다린다. 닫으면 풀린다.
 struct Locked {
-    _mem: MutexGuard<'static, ()>,
     _file: File,
 }
 
 /// queries 폴더(없으면 만든다)에 배타 flock 을 건다. 커밋 폴더에 잠금 파일을 남기지 않으려고 폴더 자체에 건다.
 fn lock(dir: &Path) -> Result<Locked, EngineError> {
-    let mem = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    // LOCK_WAIT 안에 못 얻으면 끝없이 서지 않고 오류다
+    let deadline = Instant::now() + LOCK_WAIT;
+    let timeout = || EngineError::run("queries 잠금을 시간 안에 얻지 못함");
     let outside = || EngineError::usage("queries 폴더의 실제 경로가 프로젝트 밖");
     let root = real_path(dir, "queries").map_err(|_| outside())?;
     std::fs::create_dir_all(&root).map_err(|e| EngineError::run(format!("쿼리 파일을 쓰지 못함: {e}")))?;
@@ -71,16 +74,15 @@ fn lock(dir: &Path) -> Result<Locked, EngineError> {
         return Err(outside());
     }
     let file = File::open(&root).map_err(|e| EngineError::run(format!("queries 잠금: {e}")))?;
-    let deadline = Instant::now() + LOCK_WAIT;
     loop {
         match file.try_lock() {
             Ok(()) => break,
             Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            Err(std::fs::TryLockError::WouldBlock) => return Err(EngineError::run("queries 잠금을 10초 안에 얻지 못함")),
+            Err(std::fs::TryLockError::WouldBlock) => return Err(timeout()),
             Err(std::fs::TryLockError::Error(e)) => return Err(EngineError::run(format!("queries 잠금: {e}"))),
         }
     }
-    Ok(Locked { _mem: mem, _file: file })
+    Ok(Locked { _file: file })
 }
 
 /// 고른 새 이름을 create_new 로 먼저 잡는다. 이미 있으면 false 다(다른 쪽이 그사이 만들었다).
@@ -350,25 +352,23 @@ pub fn favorite_add(dir: &Path, name: &str, conn: &str, sql: &str, overwrite: bo
     if old.is_none() && list.len() >= MAX_FAVS {
         return Err(EngineError::usage(format!("즐겨찾기는 {MAX_FAVS}개까지만 저장")));
     }
-    // JSON 따옴표·이스케이프 몫으로 한 개에 넉넉히 더해 어림한다
-    let size = |f: &Fav| (f.name.len() + f.conn.len() + f.sql.len()) * 2 + 128;
-    let total: usize = list.iter().filter(|f| f.name != name).map(size).sum::<usize>()
-        + size(&Fav {
-            name: name.clone(),
+    // 제어 문자는 JSON 에서 6배까지 늘어 어림이 틀리므로, 실제로 쓸 바이트로 가른다(넘으면 원본을 그대로 둔다)
+    st.put_max(
+        Fav {
+            name,
             conn: conn.into(),
             sql: sql.into(),
             saved: Default::default(),
-        });
-    if total as u64 > MAX_FAV_FILE {
-        return Err(EngineError::usage("즐겨찾기 파일이 4MiB 를 넘게 되어 저장하지 않음"));
-    }
-    st.put(Fav {
-        name,
-        conn: conn.into(),
-        sql: sql.into(),
-        saved: Default::default(),
-    })
-    .map_err(|e| EngineError::run(e.to_string()))?;
+        },
+        MAX_FAV_FILE as usize,
+    )
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::InvalidInput if e.to_string().contains("byte limit") => {
+            EngineError::usage("즐겨찾기 파일이 4MiB 를 넘게 되어 저장하지 않음")
+        }
+        std::io::ErrorKind::InvalidInput => EngineError::usage(e.to_string()),
+        _ => EngineError::run(e.to_string()),
+    })?;
     fav_check(dir)?;
     Ok(FavoriteSaved {
         saved: true,
@@ -562,7 +562,49 @@ mod tests {
             favorite_add(d.path(), "f0001", "", "select 2", true).unwrap().saved,
             "있는 이름은 덮을 수 있다"
         );
+        // 제어 문자는 JSON 에서 \u0001 처럼 6배로 늘어난다. 쓴 뒤 4MiB 를 넘을 저장은 원본을 두고 거절한다
+        std::fs::remove_file(d.path().join(FAV_REL)).unwrap();
+        let ctl = "\u{1}".repeat(MAX_FAV_SQL);
+        let mut saved = 0;
+        let err = loop {
+            match favorite_add(d.path(), &format!("c{saved:02}"), "", &ctl, false) {
+                Ok(_) => saved += 1,
+                Err(e) => break e,
+            }
+            assert!(saved < 10, "4MiB 를 넘기 전에 멈춰야 한다");
+        };
+        assert!(err.error.contains("4MiB"), "{err:?}");
+        assert!(std::fs::metadata(d.path().join(FAV_REL)).unwrap().len() <= MAX_FAV_FILE);
+        assert_eq!(favorites(d.path()).unwrap().len(), saved, "넘기 전 파일은 그대로 읽힌다");
         std::fs::write(d.path().join(FAV_REL), vec![b' '; MAX_FAV_FILE as usize + 1]).unwrap();
         assert!(favorites(d.path()).unwrap_err().error.contains("4MiB"));
+    }
+
+    /// 리뷰: 잠금을 async 안에서 그대로 기다려 바깥 시간 제한이 듣지 않았다.
+    #[tokio::test(flavor = "current_thread")]
+    async fn 잠금을_기다리는_동안에도_바깥_시간_제한이_듣고_끝내_오류다() {
+        let d = tempfile::tempdir().unwrap();
+        let p = proj(d.path());
+        let n = new_file(&p, "app-stg", "a").unwrap();
+        // 다른 쪽이 queries 잠금을 쥐고 있다
+        let held = File::open(d.path().join("queries")).unwrap();
+        held.lock().unwrap();
+        let engine = crate::Engine::Local(std::sync::Arc::new(crate::LocalEngine::new(p, None)));
+        let req = crate::Request::QueryWrite {
+            path: n.path.clone(),
+            content: "b".into(),
+            base_hash: n.hash.clone(),
+            force: false,
+        };
+        let t0 = Instant::now();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), engine.call(req.clone()))
+                .await
+                .is_err()
+        );
+        assert!(t0.elapsed() < Duration::from_millis(250), "{:?}", t0.elapsed());
+        let e = engine.call(req).await.unwrap_err();
+        assert!(e.error.contains("잠금"), "{e:?}");
+        assert_eq!(std::fs::read_to_string(d.path().join(&n.path)).unwrap(), "a");
     }
 }

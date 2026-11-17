@@ -96,7 +96,12 @@ impl Store {
 
     /// 같은 이름이 있으면 덮어쓴다. 덮어쓸지 묻는 것은 부르는 쪽 몫이다(R29.1).
     /// saved 가 비면 지금 시각을 넣고, 초 아래는 버린다(형식 예시 2026-11-14T20:30:00+09:00 와 맞춘다).
-    pub fn put(&self, mut f: Fav) -> io::Result<()> {
+    pub fn put(&self, f: Fav) -> io::Result<()> {
+        self.put_max(f, usize::MAX)
+    }
+
+    /// put 과 같되 쓸 파일이 max 바이트를 넘으면 쓰지 않고 `InvalidInput` 오류다(원본은 그대로).
+    pub fn put_max(&self, mut f: Fav, max: usize) -> io::Result<()> {
         f.name = normalize_name(&f.name)?;
         if f.sql.trim().is_empty() {
             return Err(invalid("favorite sql is empty".into()));
@@ -111,7 +116,7 @@ impl Store {
             Ok(i) => favs[i] = f,
             Err(i) => favs.insert(i, f),
         }
-        self.write_locked(&mut mem, favs)
+        self.write_locked(&mut mem, favs, max)
     }
 
     /// 없는 이름이면 파일을 건드리지 않고 Ok 다(다른 프로세스가 먼저 지웠을 수 있다).
@@ -124,14 +129,20 @@ impl Store {
             return Ok(());
         };
         favs.remove(i);
-        self.write_locked(&mut mem, favs)
+        self.write_locked(&mut mem, favs, usize::MAX)
     }
 
     /// 같은 폴더 임시 파일에 다 쓴 뒤 바꿔 끼운다(R5.2). 실패하면 원본이 그대로 남는다.
-    fn write_locked(&self, mem: &mut Vec<Fav>, favs: Vec<Fav>) -> io::Result<()> {
+    fn write_locked(&self, mem: &mut Vec<Fav>, favs: Vec<Fav>, max: usize) -> io::Result<()> {
         // SQL 의 < > & 가 < 꼴로 바뀌면 git diff 를 읽을 수 없어 HTML 이스케이프를 끈다. 다 지워도 null 이 아니라 [] 다
         let mut data = go_json(&favs, false, true)?;
         data.push(b'\n');
+        if data.len() > max {
+            return Err(invalid(format!(
+                "favorites file would be {} bytes, over the {max} byte limit",
+                data.len()
+            )));
+        }
         mkdir_all(self.path.parent().unwrap_or(Path::new(".")), DIR_PERM)?;
         // 있던 파일은 그 권한을 따르고(R5.2) 새 파일만 0644 다
         let perm = fs::metadata(&self.path).map_or(FILE_PERM, |m| m.permissions().mode() & 0o777);

@@ -104,6 +104,13 @@ struct ExportRx {
     bytes: u64,
 }
 
+/// 파일 일을 blocking 풀에서 돌린다.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, EngineError> + Send + 'static) -> Result<T, EngineError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(EngineError::run(format!("쿼리 파일 작업이 멈춤: {e}"))))
+}
+
 impl LocalEngine {
     pub fn new(proj: Project, cli: Option<CliHandler>) -> LocalEngine {
         LocalEngine {
@@ -597,34 +604,53 @@ impl LocalEngine {
                 self.conn_folder(&names, &folder).await?;
                 json(serde_json::json!({}))
             }
-            // 쿼리 파일·즐겨찾기는 사용자 자신의 프로젝트 파일이라 serve 에서도 쓰기를 받는다(경계는 queries.rs)
-            Request::QueryList => json(crate::queries::list(&self.proj())),
-            Request::QueryRead { path } => json(crate::queries::read(&self.proj(), &path)?),
+            // 쿼리 파일·즐겨찾기는 사용자 자신의 프로젝트 파일이라 serve 에서도 쓰기를 받는다(경계는 queries.rs).
+            // 잠금을 기다리는 파일 일이라 blocking 풀에서 돌려, 부른 쪽의 시간 제한이 이 일을 기다리지 않게 한다
+            Request::QueryList => {
+                let p = self.proj();
+                json(blocking(move || Ok(crate::queries::list(&p))).await?)
+            }
+            Request::QueryRead { path } => {
+                let p = self.proj();
+                json(blocking(move || crate::queries::read(&p, &path)).await?)
+            }
             Request::QueryWrite {
                 path,
                 content,
                 base_hash,
                 force,
-            } => json(crate::queries::write(&self.proj(), &path, &content, &base_hash, force)?),
+            } => {
+                let p = self.proj();
+                json(blocking(move || crate::queries::write(&p, &path, &content, &base_hash, force)).await?)
+            }
             Request::QueryNew { conn, content } => {
-                let w = crate::queries::new_file(&self.proj(), &conn, &content)?;
+                let p = self.proj();
+                let w = blocking(move || crate::queries::new_file(&p, &conn, &content)).await?;
                 self.remember_mapping(&w);
                 json(w)
             }
             Request::QueryConflict { path, content, conn } => {
-                let w = crate::queries::conflict_copy(&self.proj(), &path, &content, &conn)?;
+                let p = self.proj();
+                let w = blocking(move || crate::queries::conflict_copy(&p, &path, &content, &conn)).await?;
                 self.remember_mapping(&w);
                 json(w)
             }
-            Request::FavoritesList => json(crate::queries::favorites(&self.proj().dir)?),
+            Request::FavoritesList => {
+                let dir = self.proj().dir.clone();
+                json(blocking(move || crate::queries::favorites(&dir)).await?)
+            }
             Request::FavoriteAdd {
                 name,
                 conn,
                 sql,
                 overwrite,
-            } => json(crate::queries::favorite_add(&self.proj().dir, &name, &conn, &sql, overwrite)?),
+            } => {
+                let dir = self.proj().dir.clone();
+                json(blocking(move || crate::queries::favorite_add(&dir, &name, &conn, &sql, overwrite)).await?)
+            }
             Request::FavoriteRemove { name } => {
-                crate::queries::favorite_remove(&self.proj().dir, &name)?;
+                let dir = self.proj().dir.clone();
+                blocking(move || crate::queries::favorite_remove(&dir, &name)).await?;
                 json(serde_json::json!({}))
             }
             Request::ReadQuery { conn, sql, limit } => {
