@@ -139,6 +139,7 @@ mod tests {
             db: "d".into(),
             source: "db".into(),
             uuid: String::new(),
+            ..ConnSummary::default()
         }
     }
 

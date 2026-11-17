@@ -20,6 +20,7 @@ fn conn(name: &str, kind: &str, env: &str, folder: &str) -> ConnSummary {
         db: "d".into(),
         source: "datagrip".into(),
         uuid: format!("uuid-{name}"),
+        ..ConnSummary::default()
     }
 }
 

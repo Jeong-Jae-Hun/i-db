@@ -8,6 +8,7 @@ mod conn_cmd;
 mod flows_cmd;
 mod goflag;
 mod history_cmd;
+mod mcp;
 mod output;
 mod source_cmd;
 mod status_cmd;
@@ -61,6 +62,10 @@ fn main() {
                 cli::EXIT_USAGE
             }
         });
+    }
+    if args.first().is_some_and(|a| a == "mcp") {
+        std::panic::set_hook(Box::new(|_| {}));
+        std::process::exit(mcp::run_mcp(&args[1..]));
     }
     if args.first().is_none_or(|a| !cli::is_cli_command(a)) {
         eprintln!("db-rs: unknown command {:?} (db-rs help)", args[0]);

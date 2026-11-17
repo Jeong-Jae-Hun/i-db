@@ -573,7 +573,14 @@ impl App {
         };
         self.set_focus(Focus::Result);
         let name = self.conns[ci].name.clone();
-        self.start_source(Request::SourceOpen { conn: name, path }, job);
+        self.start_source(
+            Request::SourceOpen {
+                conn: name,
+                path,
+                limit: 0,
+            },
+            job,
+        );
     }
 
     /// 로컬 프로젝트의 flows.json 에서 이름이 name 인 흐름 설정이다. 원격(파일 없음)·없음·깨짐이면 None 이다.

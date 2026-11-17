@@ -30,6 +30,8 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "native-tokio", "tls12", "logging"] }
 http-body-util = "0.1"
+# db mcp: 공식 MCP SDK(stdio). 매크로·schemars 없이 Go 판 tools.json 을 그대로 내보낸다
+rmcp = { version = "3.10", default-features = false, features = ["server", "transport-io"] }
 
 [dev-dependencies]
 serde.workspace = true

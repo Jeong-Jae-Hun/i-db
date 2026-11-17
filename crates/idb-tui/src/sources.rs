@@ -178,7 +178,14 @@ impl App {
             started: Instant::now(),
         };
         self.tab = ti;
-        self.start_source(Request::SourceOpen { conn: name, path }, job);
+        self.start_source(
+            Request::SourceOpen {
+                conn: name,
+                path,
+                limit: 0,
+            },
+            job,
+        );
     }
 
     // ─── 편집기 ───

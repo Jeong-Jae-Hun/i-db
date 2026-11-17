@@ -13,8 +13,8 @@ use idb_core::project::{Conn, Kind, Project, SOURCE_DB, folder_of};
 use idb_core::redact::redact;
 use idb_core::result::MAX_ROWS;
 use idb_core::sqlsafe::{
-    ExplainOpt, danger_of, danger_of_redis, explain_sql, first_sql_word, is_read_only_redis, is_read_only_sql, keys_refusal, mask_sql,
-    quote_ident, quote_literal, split_statements,
+    ExplainOpt, check_read_only_sql, danger_of, danger_of_redis, explain_sql, first_sql_word, is_read_only_redis, is_read_only_sql,
+    keys_refusal, mask_sql, quote_ident, quote_literal, split_statements,
 };
 use idb_core::textutil::printable;
 use idb_core::{connstore, statcrypt};
@@ -474,10 +474,14 @@ impl LocalEngine {
                 let b = self.source(&c).await?;
                 json(b.children(&path).await.map_err(|e| self.source_err(&c, e))?)
             }
-            Request::SourceOpen { conn, path } => {
+            Request::SourceOpen { conn, path, limit } => {
                 let c = self.source_conn(&conn)?;
                 let b = self.source(&c).await?;
-                let limit = if c.kind == Some(Kind::Loki) { LOKI_OPEN_LIMIT } else { OPEN_LIMIT };
+                let limit = match limit {
+                    0 if c.kind == Some(Kind::Loki) => LOKI_OPEN_LIMIT,
+                    0 => OPEN_LIMIT,
+                    n => n.min(MAX_ROWS),
+                };
                 let r = b.open(&path, limit).await.map_err(|e| self.source_err(&c, e))?;
                 json(ResultSet::from_query(r))
             }
@@ -586,6 +590,14 @@ impl LocalEngine {
             Request::ConnFolder { names, folder } => {
                 self.conn_folder(&names, &folder).await?;
                 json(serde_json::json!({}))
+            }
+            Request::ReadQuery { conn, sql, limit } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                // 접속을 열기 전에 거른다. 놓친 쓰기는 run_read_only_rows 의 READ ONLY 트랜잭션이 막는다
+                check_read_only_sql(&sql).map_err(|e| EngineError::refused(REASON_READ_ONLY, e.to_string()))?;
+                let limit = if limit == 0 { MAX_ROWS } else { limit.min(MAX_ROWS) };
+                let r = self.pg(&c, |pg| async move { pg.run_read_only_rows(&sql, limit).await }).await?;
+                json(ResultSet::from_query(r))
             }
         }
     }
@@ -996,6 +1008,8 @@ impl LocalEngine {
                 .unwrap_or_else(|| c.db.clone()),
             source: if c.source == SOURCE_DB { SOURCE_DB } else { "datagrip" }.into(),
             uuid: c.uuid.clone(),
+            region: c.region.clone(),
+            profile: c.profile.clone(),
         }
     }
 
@@ -1917,6 +1931,54 @@ mod tests {
         assert_eq!(e.conn_test("dg-stg", None, "").await.unwrap_err().code, CODE_RUN);
         e.conn_folder(&["dg-stg".into()], "ops").await.unwrap();
         assert!(!dir.path().join(".dbtui/connections.json").exists());
+    }
+
+    #[tokio::test]
+    async fn read_query_는_쓰기를_접속_전에_거절하고_project_는_리전_프로필을_싣는다() {
+        let proj = Project {
+            dir: Default::default(),
+            conns: vec![
+                Conn {
+                    name: "app-local".into(),
+                    uuid: "p".into(),
+                    kind: Some(Kind::Pg),
+                    host: "127.0.0.1".into(),
+                    port: 1,
+                    ..Default::default()
+                },
+                Conn {
+                    name: "aws-local".into(),
+                    uuid: "w".into(),
+                    kind: Some(Kind::Aws),
+                    region: "us-east-1".into(),
+                    profile: "infra".into(),
+                    ..Default::default()
+                },
+            ],
+            mapping: Default::default(),
+            warnings: vec![],
+            aes_env: Default::default(),
+        };
+        let e = LocalEngine::new(proj, None);
+        let read = |sql: &str| {
+            e.handle(Request::ReadQuery {
+                conn: "app-local".into(),
+                sql: sql.into(),
+                limit: 0,
+            })
+        };
+        for sql in ["delete from t", "select pg_terminate_backend(1)"] {
+            let err = read(sql).await.unwrap_err();
+            assert_eq!((err.code, err.reason.as_deref()), (CODE_REFUSED, Some(REASON_READ_ONLY)), "{sql}");
+        }
+        // 읽기는 접속을 시도한다(포트 1 이라 실행 오류)
+        assert_eq!(read("select 1").await.unwrap_err().code, CODE_RUN);
+        let p = e.project();
+        assert_eq!((p.conns[1].region.as_str(), p.conns[1].profile.as_str()), ("us-east-1", "infra"));
+        assert!(
+            !serde_json::to_string(&p.conns[0]).unwrap().contains("region"),
+            "빈 리전은 싣지 않는다"
+        );
     }
 
     #[test]

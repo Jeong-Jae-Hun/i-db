@@ -1,0 +1,191 @@
+name: release-rust
+
+# Pushing an rs-v* tag tests the Rust build, then builds db for linux (static musl) and darwin on amd64 and arm64
+# plus i-db.app for darwin arm64, and publishes them as a prerelease. The Go release (release.yml, v* tags) is untouched:
+# a prerelease is skipped by /releases/latest, so neither `db update` nor the install one-liner picks it up.
+# Archive names and checksums.txt match release.yml so `db update` keeps working after the cutover (docs/cutover.md).
+on:
+  push:
+    tags: ["rs-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-rust-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: itpass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DBTUI_TEST_PG_URL: postgres://postgres:itpass@127.0.0.1:5432/postgres
+      DBTUI_TEST_REDIS_ADDR: 127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # 러너에 있는 rustup 으로 rust-toolchain.toml 의 판을 받는다(서드파티 액션 없이)
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo build --locked
+      - run: cargo test --locked
+
+  # 빌드 작업들이 같은 초안에 올리고 publish 가 checksums.txt 를 더해 공개한다(파일을 넘기는 서드파티 액션 없이)
+  draft:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --prerelease --latest=false \
+              --title "$TAG" --generate-notes --verify-tag
+
+  linux:
+    needs: draft
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { arch: arm64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends musl-tools
+          command -v gh >/dev/null || sudo apt-get install -y -qq --no-install-recommends gh
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add "$TARGET"
+      - name: build
+        run: |
+          set -euo pipefail
+          # ring 의 C 코드를 musl 로 빌드한다. glibc 에 묶이지 않는 정적 실행 파일이라 어느 배포판에서도 돈다
+          export "CC_${TARGET//-/_}=musl-gcc"
+          bin=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "idb-cli") | .targets[] | select(.kind == ["bin"]) | .name')
+          IDB_VERSION="$TAG" cargo build --release --locked --target "$TARGET" -p idb-cli
+          exe="target/$TARGET/release/$bin"
+          file "$exe"
+          file "$exe" | grep -Eq 'static-pie linked|statically linked'
+          name="db_linux_${ARCH}"
+          mkdir -p "dist/$name"
+          cp "$exe" "dist/$name/db"
+          tar -C "dist/$name" -czf "dist/$name.tar.gz" db
+      - run: gh release upload "$TAG" "dist/db_linux_${ARCH}.tar.gz" -R "$GITHUB_REPOSITORY" --clobber
+
+  darwin:
+    needs: draft
+    runs-on: macos-14
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: build
+        run: |
+          set -euo pipefail
+          bin=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "idb-cli") | .targets[] | select(.kind == ["bin"]) | .name')
+          for pair in arm64:aarch64-apple-darwin amd64:x86_64-apple-darwin; do
+            arch=${pair%%:*}; target=${pair#*:}
+            IDB_VERSION="$TAG" cargo build --release --locked --target "$target" -p idb-cli
+            name="db_darwin_${arch}"
+            mkdir -p "dist/$name"
+            cp "target/$target/release/$bin" "dist/$name/db"
+            file "dist/$name/db"
+            # 확장 속성(._db)을 싣지 않는다. 묶음에는 db 하나만 있어야 한다
+            COPYFILE_DISABLE=1 tar --no-mac-metadata -C "dist/$name" -czf "dist/$name.tar.gz" db
+            test "$(tar -tzf "dist/$name.tar.gz")" = db
+          done
+          dist/db_darwin_arm64/db help >/dev/null
+      - run: gh release upload "$TAG" dist/db_darwin_arm64.tar.gz dist/db_darwin_amd64.tar.gz -R "$GITHUB_REPOSITORY" --clobber
+
+  gui:
+    needs: draft
+    runs-on: macos-14
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add aarch64-apple-darwin
+      - run: cargo build --release --locked --target aarch64-apple-darwin -p idb-gui --bin i-db
+      - name: bundle
+        run: |
+          set -euo pipefail
+          ver=${TAG#rs-}; ver=${ver#v}
+          app=dist/i-db.app
+          rm -rf "$app" && mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/aarch64-apple-darwin/release/i-db "$app/Contents/MacOS/i-db"
+          sed "s/__VERSION__/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+          iconset="$(mktemp -d)/AppIcon.iconset"
+          mkdir -p "$iconset"
+          for s in 16 32 128 256 512; do
+            sips -z "$s" "$s" packaging/macos/AppIcon.png --out "$iconset/icon_${s}x${s}.png" >/dev/null
+            sips -z "$((s * 2))" "$((s * 2))" packaging/macos/AppIcon.png --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+          # 공증하지 않은 ad-hoc 서명이다. 받은 쪽은 격리 속성을 지워야 열린다(packaging/homebrew/i-db.rb)
+          codesign --force --sign - --timestamp=none "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          # 확장 속성(__MACOSX/._*)은 싣지 않는다. 서명은 실행 파일과 _CodeSignature 에 있어 풀어도 그대로다
+          ditto -c -k --norsrc --noextattr --noqtn --keepParent "$app" dist/i-db_darwin_arm64.zip
+          rm -rf dist/check && mkdir dist/check && ditto -x -k dist/i-db_darwin_arm64.zip dist/check
+          codesign --verify --strict dist/check/i-db.app && rm -rf dist/check
+      - run: gh release upload "$TAG" dist/i-db_darwin_arm64.zip -R "$GITHUB_REPOSITORY" --clobber
+
+  publish:
+    needs: [linux, darwin, gui]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          set -euo pipefail
+          mkdir dist
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D dist -p 'db_*.tar.gz' -p 'i-db_*.zip'
+          test "$(ls dist | wc -l)" -eq 5
+          # release.yml 과 같은 sha256sum 꼴(./이름)이다. db update 는 이름으로 줄을 찾아 zip 줄은 건너뛴다
+          (cd dist && sha256sum ./*.tar.gz ./*.zip > checksums.txt)
+          cat dist/checksums.txt
+          gh release upload "$TAG" dist/checksums.txt -R "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false

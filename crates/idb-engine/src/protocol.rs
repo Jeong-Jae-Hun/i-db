@@ -315,6 +315,9 @@ pub enum Request {
     SourceOpen {
         conn: String,
         path: String,
+        /// 행 수. 0 이면 화면 기본(Loki 100줄, 나머지 50행)이고 MAX_ROWS 를 넘지 않는다
+        #[serde(default)]
+        limit: usize,
     },
     /// 편집기 질의. logs·metrics 범위는 since_ns·until_ns 다
     SourceRun(SourceRunRequest),
@@ -384,6 +387,15 @@ pub enum Request {
         names: Vec<String>,
         #[serde(default)]
         folder: String,
+    },
+    /// 사람이 확인하지 않는 읽기(MCP query). 문장 하나를 버리는 연결의 READ ONLY 트랜잭션에서 limit 행까지 돌린다.
+    /// 쓰기·여러 문장·부수 효과 함수는 접속 전에 거절한다(code 3 read_only)
+    ReadQuery {
+        conn: String,
+        sql: String,
+        /// 0 이면 MAX_ROWS
+        #[serde(default)]
+        limit: usize,
     },
 }
 
@@ -555,6 +567,11 @@ pub struct ConnSummary {
     /// 화면이 세션·최근 기록·쿼리 파일 매핑에 남기는 접속 열쇠다. 옛 serve 는 보내지 않아 빈 글이다
     #[serde(default)]
     pub uuid: String,
+    /// AWS 리전·프로필(dynamodb·athena·aws, sigv4 OpenSearch). 비밀값이 아니다
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub profile: String,
 }
 
 /// 표 결과다. Go `db.Result` 의 Cols·Types·Rows·Text·Truncated·InTx·Elapsed 다.
