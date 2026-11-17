@@ -143,7 +143,7 @@ mod lead_flag_tests {
         );
         assert_eq!(
             lead_flags_after_command(v(&["-p", "x", "conn", "test", "-h"])),
-            v(&["conn", "test", "-h", "-p", "x"])
+            v(&["conn", "test", "-p", "x", "-h"])
         );
         assert_eq!(
             lead_flags_after_command(v(&["--remote", "w", "redis", "-c", "r", "--", "LRANGE", "k", "0", "-1"])),
@@ -157,13 +157,15 @@ mod lead_flag_tests {
 
     #[test]
     fn 뒤에서_다시_준_플래그가_앞_것을_이긴다() {
+        // 앞 것은 명령 바로 뒤에 두고 뒤 것은 그대로 남아, 파서가 마지막 값을 쓴다
         assert_eq!(
             lead_flags_after_command(v(&["-p", "/A", "conns", "-p", "/B"])),
-            v(&["conns", "-p", "/B"])
+            v(&["conns", "-p", "/A", "-p", "/B"])
         );
+        // 다른 플래그의 값으로 온 `-p` 는 건드리지 않는다
         assert_eq!(
-            lead_flags_after_command(v(&["--remote", "devbox", "conns", "--remote=other", "-p", "x"])),
-            v(&["conns", "--remote=other", "-p", "x"])
+            lead_flags_after_command(v(&["-p", "/A", "linked", "--value", "-p"])),
+            v(&["linked", "-p", "/A", "--value", "-p"])
         );
     }
 
