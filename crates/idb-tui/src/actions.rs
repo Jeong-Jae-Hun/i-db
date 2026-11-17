@@ -404,6 +404,7 @@ impl App {
             Pend::SourceKids { conn, node } => self.source_kids_done(conn, node, res),
             Pend::Source(job) => self.source_done(id, *job, res),
             Pend::Health { tab, round, conn } => self.health_done(id, tab, round, conn, res),
+            Pend::Outbox { tab, round } => self.outbox_done(tab, round, res),
             Pend::Flows { tab, round } => self.flows_done(tab, round, res),
             Pend::BoardList => self.board_list_done(res),
             Pend::Board { tab, round } => self.board_done(tab, round, res),

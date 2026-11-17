@@ -488,7 +488,9 @@ impl App {
                 };
                 let name = s.names()[s.cursor].clone();
                 let arn = s.adhoc.get(s.cursor.wrapping_sub(s.items.len())).map(|a| a.arn.clone());
-                return self.open_flow_box(&name, arn, &v);
+                let i = s.sel.min(bs.len().saturating_sub(1));
+                let open = s.items.get(s.cursor).and_then(|f| f.opens.get(i)).cloned();
+                return self.open_flow_box(&name, arn, &v, open);
             }
             _ => return,
         }
@@ -499,12 +501,53 @@ impl App {
 
     /// 상자 상세를 새 결과 탭에 연다(R69.4). 아웃박스는 종류별 수, 종류 줄은 그 종류의 재시도·한도 소진 행, Lambda 는 매핑 표,
     /// 큐·DLQ 는 속성, ARN 토픽은 구독 표다(SQS·SNS 는 요금이 붙어 serve 가 막으면 R72 안내). 이름만 준 토픽은 상세가 없다.
-    fn open_flow_box(&mut self, flow: &str, adhoc_arn: Option<String>, v: &VBox) {
+    /// open 은 serve 가 보낸 상세 길(원격에서도 있음)이고, 없으면(옛 serve) 로컬 flows.json 으로 만든다.
+    fn open_flow_box(&mut self, flow: &str, adhoc_arn: Option<String>, v: &VBox, open: Option<idb_engine::BoxOpen>) {
         let b = &v.b;
         let none = |a: &mut App| a.status = format!("열 상세가 없음: {}", printable(&b.name, false));
         let Some(ci) = self.conns.iter().position(|c| c.name == b.conn) else {
             return none(self);
         };
+        if let Some(o) = open.filter(|o| adhoc_arn.is_none() && !(o.path.is_empty() && o.sql.is_empty())) {
+            let ti = self.new_tab();
+            self.set_conn(ti, Some(ci));
+            self.set_focus(Focus::Result);
+            if !o.sql.is_empty() {
+                let tab = self.tabs[ti].id;
+                let req = Request::Run(RunRequest {
+                    conn: self.conns[ci].name.clone(),
+                    sql: o.sql,
+                    ..Default::default()
+                });
+                let id = self.call(
+                    req,
+                    Pend::Preview {
+                        tab,
+                        title: "아웃박스".into(),
+                    },
+                );
+                self.tabs[ti].running = Some(id);
+                self.tabs[ti].result_conn = Some(ci);
+                return;
+            }
+            let job = SourceJob {
+                tab: self.tabs[ti].id,
+                conn: ci,
+                sql: String::new(),
+                retry: None,
+                started: Instant::now(),
+            };
+            let name = self.conns[ci].name.clone();
+            self.start_source(
+                Request::SourceOpen {
+                    conn: name,
+                    path: o.path,
+                    limit: 0,
+                },
+                job,
+            );
+            return;
+        }
         let conf = self.flow_conf(flow);
         if matches!(b.stage.as_str(), "outbox" | STAGE_TYPE) {
             let Some(o) = conf.as_ref().and_then(|f| f.outbox.clone()) else {

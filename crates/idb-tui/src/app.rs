@@ -155,6 +155,10 @@ pub enum Pend {
     /// 저장소 편집기 실행·트리 미리 보기(R60~R68)
     Source(Box<crate::sources::SourceJob>),
     /// 대시보드 확인 하나(R64)
+    Outbox {
+        tab: u64,
+        round: u64,
+    },
     Health {
         tab: u64,
         round: u64,

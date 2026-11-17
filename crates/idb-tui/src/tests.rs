@@ -838,9 +838,17 @@ fn 대시보드는_모든_접속을_트리_순서로_확인하고_요약과_표�
     a.on_key("ctrl+g");
     assert_eq!(a.cur().title, "대시보드");
     assert_eq!(a.status, "대시보드 확인 중…");
-    let js = jobs(&mut a);
+    let mut js = jobs(&mut a);
+    let (ob, _) = js.pop().unwrap();
+    assert_eq!(js.len(), 3);
     let names: Vec<&str> = js.iter().map(|(_, r)| r["conn"].as_str().unwrap()).collect();
     assert!(js.iter().all(|(_, r)| r["op"] == "health"));
+    // 아웃박스 한도 소진 카드는 세었을 때만 보인다(R64)
+    a.on_done(
+        ob,
+        Ok(json!([{"flow": "hub", "conn": "app-stg", "exhausted": 2}, {"flow": "x", "conn": "app-stg", "exhausted": -1}])),
+    );
+    assert!(screen(&mut a).contains("아웃박스 한도 소진"));
     assert_eq!(names, ["cache", "app-stg", "shop-prod"], "트리 순서(환경 local→stg→prod)");
     let s = screen(&mut a);
     assert!(s.contains("확인 중 3"), "{s}");
@@ -886,10 +894,10 @@ fn 대시보드_r_과_30초_타이머는_이전_확인을_취소하고_다시_�
     let first: Vec<u64> = jobs(&mut a).into_iter().map(|(id, _)| id).collect();
     a.on_key("r");
     let cancels = a.take_cancels();
-    assert_eq!(cancels.len(), 3, "진행 중인 확인을 멈춘다");
+    assert_eq!(cancels.len(), 4, "진행 중인 확인(접속 3·아웃박스 1)을 멈춘다");
     assert!(first.iter().all(|id| cancels.contains(id)));
     let second = jobs(&mut a);
-    assert_eq!(second.len(), 3);
+    assert_eq!(second.len(), 4);
     // 늦게 온 이전 결과는 버린다
     a.on_done(
         first[0],
@@ -901,7 +909,7 @@ fn 대시보드_r_과_30초_타이머는_이전_확인을_취소하고_다시_�
         d.due = std::time::Instant::now() - std::time::Duration::from_secs(1);
     }
     a.tick();
-    assert_eq!(jobs(&mut a).len(), 3);
+    assert_eq!(jobs(&mut a).len(), 4);
     let dash = a.tab;
     a.new_tab();
     a.take_jobs();
@@ -917,7 +925,7 @@ fn 대시보드_r_과_30초_타이머는_이전_확인을_취소하고_다시_�
     // 탭을 닫으면 진행 중인 확인을 멈춘다
     a.take_cancels();
     a.close_tab(dash);
-    assert_eq!(a.take_cancels().len(), 3);
+    assert_eq!(a.take_cancels().len(), 4);
     assert!(a.pending.is_empty());
 }
 
@@ -1156,4 +1164,35 @@ fn 세션에는_대시보드_흐름_보드_탭을_남기지_않고_활성_자리
     let titles: Vec<&str> = st.tabs.iter().map(|t| t.title.as_str()).collect();
     assert_eq!(titles, ["Query 1", "Query 4"]);
     assert_eq!(st.active, 1);
+}
+
+#[test]
+fn 원격에서도_serve_가_보낸_상세_길과_패널_질의로_연다() {
+    let mut a = src_app();
+    a.on_key("alt+f");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let mut ans = flow_answer();
+    let n = ans[0]["boxes"].as_array().unwrap().len();
+    let mut opens = vec![json!({}); n];
+    opens[0] = json!({"sql": "select 1 from public.t_outbox"});
+    ans[0]["opens"] = json!(opens);
+    a.on_done(id, Ok(ans));
+    a.on_key("enter");
+    let (_, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["sql"].as_str()),
+        (Some("run"), Some("select 1 from public.t_outbox"))
+    );
+
+    let mut b = app();
+    b.open_board("ops");
+    let (id, _) = jobs(&mut b).pop().unwrap();
+    let mut ans = board_answer();
+    ans["every_secs"] = json!(30);
+    ans["panels"][1]["query"] = json!("select now()");
+    ans["panels"][1]["since"] = json!("1h");
+    b.on_done(id, Ok(ans));
+    assert!(screen(&mut b).contains("30s마다"), "{}", screen(&mut b));
+    keys(&mut b, &["l", "enter"]);
+    assert_eq!(b.cur().editor.value(), "select now()");
 }

@@ -60,6 +60,9 @@ pub struct DashState {
     pub cursor: usize,
     pub filter: String,
     pub due: Instant,
+    /// 흐름 아웃박스 한도 소진 수(R64 카드). -1 은 세지 못함이라 합에 넣지 않는다. 다시 확인하는 동안 이전 수를 보인다
+    pub outbox: Vec<idb_engine::OutboxExhausted>,
+    pub outbox_job: Option<u64>,
 }
 
 impl App {
@@ -80,7 +83,7 @@ impl App {
     /// 탭 i 의 진행 중인 회차를 멈춘다(다시 볼 때·탭을 닫을 때).
     pub(crate) fn stop_pane(&mut self, i: usize) {
         let ids: Vec<u64> = match &mut self.tabs[i].pane {
-            Some(Pane::Dash(d)) => d.jobs.drain().map(|(id, _)| id).collect(),
+            Some(Pane::Dash(d)) => d.jobs.drain().map(|(id, _)| id).chain(d.outbox_job.take()).collect(),
             Some(Pane::Flow(f)) => f.job.take().into_iter().collect(),
             Some(Pane::Board(b)) => b.job.take().into_iter().collect(),
             None => Vec::new(),
@@ -168,6 +171,8 @@ impl App {
                     cursor: 0,
                     filter: String::new(),
                     due: Instant::now(),
+                    outbox: Vec::new(),
+                    outbox_job: None,
                 }),
             ),
         };
@@ -190,8 +195,10 @@ impl App {
             let id = self.call(Request::Health { conn: name }, Pend::Health { tab, round, conn: c });
             jobs.insert(id, c);
         }
+        let ob = self.call(Request::OutboxExhausted, Pend::Outbox { tab, round });
         if let Some(Pane::Dash(d)) = &mut self.tabs[ti].pane {
             d.jobs = jobs;
+            d.outbox_job = Some(ob);
         }
         self.status = "대시보드 확인 중…".into();
     }
@@ -213,6 +220,20 @@ impl App {
         if d.jobs.is_empty() && self.status.starts_with("대시보드 확인 중") {
             self.status = format!("대시보드 확인함 {}", kst_now());
         }
+    }
+
+    pub(crate) fn outbox_done(&mut self, tab: u64, round: u64, res: Result<Value, EngineError>) {
+        let Some(ti) = self.tab_index(tab) else { return };
+        let Some(Pane::Dash(d)) = &mut self.tabs[ti].pane else { return };
+        if d.round != round {
+            return;
+        }
+        d.outbox_job = None;
+        // 옛 serve(모르는 op)·flows.json 없음은 카드를 보이지 않는다
+        d.outbox = res
+            .ok()
+            .and_then(|v| serde_json::from_value::<Vec<idb_engine::OutboxExhausted>>(v).ok())
+            .unwrap_or_default();
     }
 
     /// 거르기(폴더·이름·환경 부분 글자)를 지난 접속이다.
@@ -322,6 +343,17 @@ impl App {
                 vec![(s.unlocked.to_string(), Style::new().fg(theme::TEXT))],
             ),
         ];
+        let mut cards = cards;
+        let counted: Vec<i64> = d.outbox.iter().map(|o| o.exhausted).filter(|&n| n >= 0).collect();
+        let exhausted: i64 = counted.iter().sum();
+        if !d.outbox.is_empty() {
+            let st = if exhausted > 0 {
+                theme::err()
+            } else {
+                Style::new().fg(theme::TEXT)
+            };
+            cards.push(("아웃박스 한도 소진".into(), vec![(exhausted.to_string(), st)]));
+        }
         let mut lines = card_lines(&cards, w);
         let mut extra: Vec<Segs> = Vec::new();
         if !d.filter.is_empty() {
@@ -333,7 +365,11 @@ impl App {
                 format!(
                     "접속 {} · prod {} · stg {} · local {} · ● {} ✕ {} · PG 활성 {} · Redis 클라이언트 {} · 트랜잭션 {} · 잠금 해제 {}",
                     s.total, s.prod, s.stg, s.local, s.ok, s.fail, s.pg_active, s.redis_clients, s.open_tx, s.unlocked
-                ),
+                ) + &if d.outbox.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · 아웃박스 한도 소진 {exhausted}")
+                },
                 Style::new().fg(theme::TEXT),
             )]];
         }

@@ -171,6 +171,11 @@ impl App {
                 b.elapsed_ms = b.started.elapsed().as_millis() as u64;
                 b.cursor = b.cursor.min(r.panels.len().saturating_sub(1));
                 let title = r.title.clone();
+                // serve 가 refresh 간격을 보내면(원격 포함) 그것을 쓴다. 옛 serve 는 0 이라 로컬 파일 값을 둔다
+                if r.every_secs > 0 {
+                    b.every = Duration::from_secs(r.every_secs).max(BOARD_MIN_EVERY);
+                    b.due = b.started + b.every;
+                }
                 b.res = Some(r);
                 self.tabs[ti].title = title;
                 if self.status.starts_with("보드 확인 중") {
@@ -205,7 +210,16 @@ impl App {
             "enter" if n > 0 => {
                 let i = b.cursor.min(n - 1);
                 let p = b.res.as_ref().unwrap().panels[i].clone();
-                let conf = (b.conf.len() == n).then(|| b.conf[i].clone());
+                // serve 가 패널 질의를 보내면 그것을, 아니면(옛 serve) 로컬 보드 파일 값을 쓴다
+                let conf = if p.query.is_empty() {
+                    (b.conf.len() == n).then(|| b.conf[i].clone())
+                } else {
+                    Some(PanelConf {
+                        conn: p.conn.clone(),
+                        query: p.query.clone(),
+                        since: p.since.clone(),
+                    })
+                };
                 return self.open_panel(p, conf);
             }
             _ => return,
