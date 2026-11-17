@@ -2514,10 +2514,13 @@ impl App {
                 self.status = status;
                 self.refresh_tab(tab);
             }
+            // 화면은 prod 로 보지 않았는데 serve 가 prod 확인을 요구한 경우다. 묻지 않고 다시 보내지 않는다
             Err(e) if e.code == CODE_REFUSED && e.reason.as_deref() == Some(REASON_CONFIRM_PROD) => {
                 let Some(ti) = self.tab_index(tab) else { return };
                 let conn = self.tabs[ti].result_conn.unwrap_or(0);
-                self.send_apply(tab, conn, cs, true);
+                self.confirm(e.error.trim_end_matches(": y/N").to_string(), move |a| {
+                    a.send_apply(tab, conn, cs, true)
+                });
             }
             // 실패하면 묶음 전체가 되돌려졌으므로 보류 중인 편집을 남겨 고쳐 다시 내게 한다
             Err(e) => self.status = format!("제출 실패: {}", one_line(&e.error)),

@@ -1679,3 +1679,32 @@ fn Alt_C_는_stg_prod_를_바꾼_접속을_기본으로_두_곳을_읽기_전용
     assert_eq!(a.cur().summary, "app-stg 기준 shop-prod 비교 +1 −0 ~0");
     assert_eq!(a.cur().subs.len(), 2);
 }
+
+#[test]
+fn 제출이_confirm_prod_로_거절되면_엔진_질문을_보이고_y_뒤에만_다시_보낸다() {
+    let mut a = app();
+    a.open_table(
+        0,
+        idb_engine::TableRef {
+            schema: "public".into(),
+            table: "t".into(),
+        },
+        String::new(),
+    );
+    let (pid, _) = jobs(&mut a).into_iter().find(|(_, r)| r["op"] == "table_page").unwrap();
+    let mut page = rs(&["id", "name"], &[&["1", "a"]]);
+    page["origin"] = json!({"table": {"schema": "public", "table": "t"}, "pk": ["id"], "cols": ["id", "name"]});
+    a.on_done(pid, Ok(json!({"result": page, "sql": ""})));
+    keys(&mut a, &["l", "enter", "backspace", "z", "enter", "ctrl+s", "y"]);
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["confirm_prod"].as_bool()),
+        (Some("apply_changes"), Some(false))
+    );
+    a.on_done(id, Err(refused("confirm_prod", "prod(app-stg)에 제출 1건: y/N")));
+    assert!(jobs(&mut a).is_empty(), "묻지 않고 다시 보내지 않는다");
+    assert!(matches!(&a.overlay, Overlay::Confirm { q, .. } if q == "prod(app-stg)에 제출 1건"));
+    a.on_key("y");
+    let (_, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["confirm_prod"], true);
+}
