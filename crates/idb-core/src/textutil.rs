@@ -89,6 +89,57 @@ pub fn go_upper(s: &str) -> String {
         .collect()
 }
 
+// ─── 수 글 ───
+
+/// Go `textutil.GroupDigits`: 세 자리마다 쉼표를 넣는다. 음수의 부호 뒤에도 넣는 Go 꼴(-,123)까지 같다.
+pub fn group_digits(n: i64) -> String {
+    let mut s = n.to_string();
+    let mut i = s.len() as i64 - 3;
+    while i > 0 {
+        s.insert(i as usize, ',');
+        i -= 3;
+    }
+    s
+}
+
+/// Go `textutil.KoreanCount`: 만·억·조 단위로 줄인다. 1만 미만은 쉼표 꼴이고, 단위로 10 미만이면 소수 한 자리(.0 은 뗌),
+/// 10 이상이면 정수다. 올리지 않고 버린다.
+///   - 예: 37 → "37", 12000 → "1.2만", 1200000 → "120만", 150000000 → "1.5억"
+pub fn korean_count(n: i64) -> String {
+    let sign = if n < 0 { "-" } else { "" };
+    let u = n.unsigned_abs();
+    for (name, size) in [("조", 1_000_000_000_000u64), ("억", 100_000_000), ("만", 10_000)] {
+        if u < size {
+            continue;
+        }
+        let whole = u / size;
+        if whole >= 10 {
+            return format!("{sign}{}{name}", group_digits(whole as i64));
+        }
+        let tenths = u * 10 / size;
+        if tenths.is_multiple_of(10) {
+            return format!("{sign}{}{name}", tenths / 10);
+        }
+        return format!("{sign}{}.{}{name}", tenths / 10, tenths % 10);
+    }
+    format!("{sign}{}", group_digits(u as i64))
+}
+
+/// Go `db.HumanBytes`: 1024 단위로 줄인다(예: 1.5KB).
+pub fn human_bytes(n: i64) -> String {
+    if n < 1024 {
+        return format!("{n}B");
+    }
+    let mut f = n as f64;
+    for u in ["KB", "MB", "GB", "TB"] {
+        f /= 1024.0;
+        if f < 1024.0 || u == "TB" {
+            return format!("{f:.1}{u}");
+        }
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +158,19 @@ mod tests {
         assert_eq!(string_width("ab"), 2);
         assert_eq!(truncate("가나다라", 5, "…"), "가나…");
         assert_eq!(truncate("abc", 3, "…"), "abc");
+    }
+
+    #[test]
+    fn 수를_만_억_단위와_바이트로_줄인다() {
+        assert_eq!(korean_count(37), "37");
+        assert_eq!(korean_count(9999), "9,999");
+        assert_eq!(korean_count(12000), "1.2만");
+        assert_eq!(korean_count(1_200_000), "120만");
+        assert_eq!(korean_count(150_000_000), "1.5억");
+        assert_eq!(korean_count(-20000), "-2만");
+        assert_eq!(korean_count(i64::MIN), "-9,223,372조");
+        assert_eq!(group_digits(-123), "-,123");
+        assert_eq!(human_bytes(1023), "1023B");
+        assert_eq!(human_bytes(1536), "1.5KB");
     }
 }
