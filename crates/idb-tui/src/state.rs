@@ -40,6 +40,16 @@ impl SessionCtx {
         }
     }
 
+    /// 시험용: path 의 세션 파일에만 쓴다(최근 기록·파라미터 값 없음).
+    #[cfg(test)]
+    pub fn at(project: &Path, path: PathBuf) -> SessionCtx {
+        let mut c = SessionCtx::disabled();
+        c.project = project.to_path_buf();
+        c.path = Some(path);
+        c.restore = true;
+        c
+    }
+
     /// project 의 세션·최근 기록·파라미터 값을 읽는다. 원격이면 project 는 serve 쪽 경로이고 키로만 쓴다.
     pub fn load(project: &Path) -> SessionCtx {
         let mut c = SessionCtx::disabled();
@@ -221,8 +231,16 @@ impl App {
         st.panes.editor = self.ed_h;
         st.tabs.clear();
         if self.session.restore {
+            // 대시보드·흐름·보드 탭(R64·R69·R70)은 글이 없어 되살리지 않고, 활성 탭 자리는 남은 탭 기준으로 맞춘다.
             // 기록 사본 탭은 사용자가 글을 고쳤을 때만 남긴다(R11.4)
-            for t in self.tabs.iter().filter(|t| !t.snapshot || t.editor.typed) {
+            st.active = 0;
+            for (i, t) in self.tabs.iter().enumerate() {
+                if t.pane.is_some() || t.snapshot && !t.editor.typed {
+                    continue;
+                }
+                if i == self.tab {
+                    st.active = st.tabs.len() as i64;
+                }
                 let text = t.editor.value().to_string();
                 let unchanged = t.file.is_some() && text == t.disk;
                 st.tabs.push(session::Tab {
@@ -241,7 +259,6 @@ impl App {
                     pinned: t.pinned,
                 });
             }
-            st.active = self.tab as i64;
         }
         if let Some(r) = &mut self.session.recent {
             let closed = self.tree.closed_groups();

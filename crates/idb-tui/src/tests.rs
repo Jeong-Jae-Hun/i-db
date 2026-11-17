@@ -1135,3 +1135,24 @@ fn 로컬_보드는_파일의_refresh_와_패널_질의로_쿼리_탭을_연다(
         (Some("source_run"), Some("{app=\"api\"} |= \"error\""), Some(6 * 3_600_000_000_000))
     );
 }
+
+#[test]
+fn 세션에는_대시보드_흐름_보드_탭을_남기지_않고_활성_자리를_맞춘다() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.json");
+    let info = ProjectInfo {
+        dir: dir.path().to_string_lossy().into_owned(),
+        conns: vec![conn("app-stg", "postgresql", "stg", "app")],
+        warnings: vec![],
+    };
+    let mut a = App::new(info, None, false, SessionCtx::at(dir.path(), path.clone()));
+    a.on_key("ctrl+g");
+    a.on_key("alt+f");
+    a.new_tab();
+    a.cur_mut().editor.set_value("select 1");
+    a.save_session().unwrap();
+    let st = idb_core::session::load(&path, dir.path()).unwrap().unwrap();
+    let titles: Vec<&str> = st.tabs.iter().map(|t| t.title.as_str()).collect();
+    assert_eq!(titles, ["Query 1", "Query 4"]);
+    assert_eq!(st.active, 1);
+}
