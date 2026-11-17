@@ -488,6 +488,10 @@ pub struct App {
     pub quit_notes: Vec<String>,
     /// 칸 값 큰 편집기(R49.3): 편집기·json 열인지·고친 결과 탭
     pub big_edit: Option<(Editor, bool, u64)>,
+    /// 입력 기록 고르기(R75.5): 기록·지금 자리(-1 은 치던 글)·치던 글. 다른 키를 누르면 처음부터다
+    pub hist_pick: Option<(Vec<String>, isize, String)>,
+    /// 파일 기록 뒤에 붙는 기록이다. 상태 파일을 쓰지 않는 시험이 기록을 넣는 자리다
+    pub history_seed: Vec<String>,
 }
 
 impl App {
@@ -543,6 +547,8 @@ impl App {
             lock_at: HashMap::new(),
             quit_notes: Vec::new(),
             big_edit: None,
+            hist_pick: None,
+            history_seed: Vec::new(),
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));

@@ -1595,3 +1595,29 @@ fn 편집기_더블클릭은_낱말을_고른다() {
     a.on_mouse(ev);
     assert_eq!(a.cur().editor.selected_text(), Some("name"));
 }
+
+#[test]
+fn 거르기_입력의_위아래는_이전_거르기를_고르고_끝까지_내리면_치던_글이다() {
+    let mut a = app();
+    a.history_seed = vec!["status=GONE".into(), "id > 1".into()];
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "update t set a=1 where id=1 returning *");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(rs(&["status"], &[&["GONE"], &["A"]])));
+    a.set_focus(Focus::Result);
+    keys(&mut a, &["/", "x"]);
+    assert!(screen(&mut a).contains("↑↓ 이전 거르기"));
+    let filt = |a: &App| a.cur().grid.as_ref().unwrap().input.text.clone();
+    a.on_key("up");
+    assert_eq!(filt(&a), "status=GONE");
+    a.on_key("up");
+    assert_eq!(filt(&a), "id > 1");
+    a.on_key("up");
+    assert_eq!(filt(&a), "id > 1");
+    a.on_key("down");
+    a.on_key("down");
+    assert_eq!(filt(&a), "x");
+}

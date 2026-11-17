@@ -1110,8 +1110,72 @@ impl App {
 
     // ─── 결과 영역 키 ───
 
+    /// 결과 거르기·WHERE 입력의 기록이다. prod·사용자·연결된 곳·사본·고정 결과는 기록을 남기지 않아 고르지도 않는다(R75.5).
+    pub(crate) fn input_history(&self) -> Option<Vec<String>> {
+        let t = self.cur();
+        if let Some(v) = t.view.as_ref().filter(|v| v.typing == Some(crate::tableview::Field::Where)) {
+            let c = t.conn?;
+            let cs = &self.conns[c];
+            let mut h = self.session.wheres(&cs.uuid, &v.table.schema, &v.table.table, cs.env == "prod");
+            h.extend(self.history_seed.clone());
+            return Some(h);
+        }
+        if t.shown().is_some_and(|g| g.screen == Screen::Filter) {
+            let mut h = self.session.filters();
+            h.extend(self.history_seed.clone());
+            return Some(h);
+        }
+        None
+    }
+
+    /// ↑ 는 이전 입력, ↓ 는 다음 입력. 처음 ↑ 는 치던 글을 두고 가장 최근 기록을, 끝까지 ↓ 면 치던 글로 돌아온다.
+    fn pick_history(&mut self, k: &str) -> bool {
+        let Some(hist) = self.input_history().filter(|h| !h.is_empty()) else {
+            return false;
+        };
+        let t = &mut self.tabs[self.tab];
+        let typing_where = t.view.as_ref().is_some_and(|v| v.typing.is_some());
+        let cur_text = if typing_where {
+            t.view.as_ref().unwrap().input.text.clone()
+        } else {
+            t.shown().unwrap().input.text.clone()
+        };
+        let (h, mut at, typed) = self.hist_pick.take().unwrap_or((hist, -1, cur_text));
+        at = if k == "up" { (at + 1).min(h.len() as isize - 1) } else { at - 1 };
+        if at < -1 {
+            at = -1;
+        }
+        let text = if at < 0 { typed.clone() } else { h[at as usize].clone() };
+        let t = &mut self.tabs[self.tab];
+        if typing_where {
+            t.view.as_mut().unwrap().input.set(&text);
+        } else if let Some(g) = t.shown_mut() {
+            g.input.set(&text);
+            g.set_filter(&text);
+        }
+        self.hist_pick = Some((h, at, typed));
+        true
+    }
+
     pub fn result_key(&mut self, k: &str) {
         let ti = self.tab;
+        if matches!(k, "up" | "down") {
+            let is_order = self.tabs[ti]
+                .view
+                .as_ref()
+                .is_some_and(|v| v.typing == Some(crate::tableview::Field::Order));
+            if !is_order && self.input_history().is_some() && self.pick_history(k) {
+                return;
+            }
+        } else {
+            self.hist_pick = None;
+        }
+        // 적용한 WHERE 입력 글(짧은 꼴은 바꾸기 전 글)을 남긴다
+        let where_raw = self.tabs[ti]
+            .view
+            .as_ref()
+            .filter(|v| k == "enter" && v.typing == Some(crate::tableview::Field::Where))
+            .map(|v| (v.input.text.trim().to_string(), v.table.clone()));
         if self.tabs[ti].redis.is_some() {
             return self.redis_key(k);
         }
@@ -1135,6 +1199,13 @@ impl App {
             if a.handled {
                 if !a.status.is_empty() {
                     self.status = a.status;
+                }
+                if a.requery
+                    && let (Some((w, tbl)), Some(c)) = (where_raw.as_ref(), self.tabs[ti].conn)
+                    && !w.is_empty()
+                {
+                    let cs = self.conns[c].clone();
+                    self.session.add_where(&cs.uuid, &tbl.schema, &tbl.table, w, cs.env == "prod");
                 }
                 if a.requery {
                     self.requery_view(ti);

@@ -112,6 +112,25 @@ impl SessionCtx {
         }
     }
 
+    pub fn filters(&self) -> Vec<String> {
+        self.recent.as_ref().map(|r| r.filters()).unwrap_or_default()
+    }
+
+    /// 테이블 보기 WHERE 입력 기록이다. prod 는 남기지 않아 없다(R75.5).
+    pub fn wheres(&self, conn: &str, schema: &str, table: &str, prod: bool) -> Vec<String> {
+        self.recent
+            .as_ref()
+            .map(|r| r.wheres(conn, schema, table, prod))
+            .unwrap_or_default()
+    }
+
+    pub fn add_where(&mut self, conn: &str, schema: &str, table: &str, w: &str, prod: bool) {
+        if let Some(r) = &mut self.recent {
+            r.add_where(conn, schema, table, w, prod, GoTime::now());
+            let _ = r.save();
+        }
+    }
+
     pub fn add_filter(&mut self, f: &str) {
         if let Some(r) = &mut self.recent {
             r.add_filter(f);

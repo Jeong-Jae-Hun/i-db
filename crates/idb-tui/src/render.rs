@@ -777,10 +777,15 @@ impl App {
             out.extend(s(help::REDIS_HINTS));
             return out;
         }
+        let has_hist = self.input_history().is_some_and(|h| !h.is_empty());
         if let Some(v) = &t.view
             && v.typing.is_some()
         {
-            return s(help::WHERE_HINTS);
+            let mut out = s(help::WHERE_HINTS);
+            if has_hist && v.typing == Some(crate::tableview::Field::Where) {
+                out.push("↑↓ 이전 조건".into());
+            }
+            return out;
         }
         if t.plan.is_some() {
             return s(&["Enter 접기·펴기", "t JSON", "esc 닫기", "? 키"]);
@@ -804,7 +809,13 @@ impl App {
             return s(help::NONE_HINTS);
         };
         match g.screen {
-            Screen::Filter => return s(help::FILTER_HINTS),
+            Screen::Filter => {
+                let mut out = s(help::FILTER_HINTS);
+                if has_hist {
+                    out.push("↑↓ 이전 거르기".into());
+                }
+                return out;
+            }
             Screen::Edit => return s(help::CELL_EDIT_HINTS),
             Screen::Select => return s(help::SELECT_HINTS),
             Screen::Record => return s(help::RECORD_HINTS),
