@@ -12,7 +12,8 @@ path = "src/main.rs"
 [dependencies]
 idb-core.workspace = true
 idb-sources.workspace = true
-tokio.workspace = true
+idb-engine.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
 
 [dev-dependencies]
 serde.workspace = true

@@ -239,39 +239,46 @@ fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind
     Ok(c)
 }
 
-/// 위치 인자, -f 파일, 표준 입력 순으로 SQL·명령 글을 읽는다.
-/// 표준 입력은 닫히지 않는 파이프에서도 --timeout 에 끝나게 따로 읽고, CLI_MAX_STDIN 을 넘으면 오류다.
+/// 위치 인자, -f 파일, 표준 입력 순으로 SQL·명령 글을 읽는다. 빈 글이면 사용법 오류다.
 async fn read_input(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<String, CmdError> {
-    let o = env.o;
-    let text = if !o.args.is_empty() {
-        o.args.join(" ")
-    } else if !o.file.is_empty() {
-        let b = std::fs::read(&o.file).map_err(|e| Error::msg(format!("open {}: {}", o.file, go_io_text(&e))))?;
-        String::from_utf8_lossy(&b).into_owned()
-    } else if let Some(mut stdin) = stdin {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        // 시간 초과로 돌아가도 읽는 스레드는 남는다. CLI 는 곧 끝나므로 둔다
-        std::thread::spawn(move || {
-            let mut b = Vec::new();
-            let r = (&mut stdin).take(CLI_MAX_STDIN as u64 + 1).read_to_end(&mut b).map(|_| b);
-            let _ = tx.send(r);
-        });
-        match tokio::time::timeout_at(env.deadline, rx).await {
-            Err(_) => return Err(Error::msg("표준 입력 읽기: context deadline exceeded").into()),
-            Ok(Err(_)) => return Err(Error::msg("표준 입력 읽기 실패").into()),
-            Ok(Ok(Err(e))) => return Err(Error::msg(go_io_text(&e)).into()),
-            Ok(Ok(Ok(b))) if b.len() > CLI_MAX_STDIN => {
-                return Err(Error::msg("표준 입력이 16MiB 를 넘음 (-f 파일로도 같은 문장 하나만 실행함)").into());
-            }
-            Ok(Ok(Ok(b))) => String::from_utf8_lossy(&b).into_owned(),
-        }
-    } else {
-        String::new()
+    let text = match &env.o.input {
+        // serve 는 클라이언트가 읽어 보낸 글만 쓴다. 서버의 -f 파일·표준 입력(프로토콜 줄)은 읽지 않는다
+        Some(input) => input.clone().map_err(Error::msg)?,
+        None => fetch_input(env.o, stdin, env.deadline).await?,
     };
     if text.trim().is_empty() {
         return Err(usage("실행할 글이 없음 (인자, -f 파일, 표준 입력)"));
     }
     Ok(text)
+}
+
+/// 위치 인자, -f 파일, 표준 입력 순으로 글을 읽는다. `--remote` 는 이것으로 읽은 글을 원격에 보낸다.
+/// 표준 입력은 닫히지 않는 파이프에서도 deadline 에 끝나게 따로 읽고, CLI_MAX_STDIN 을 넘으면 오류다.
+pub async fn fetch_input(o: &Opts, stdin: Option<Box<dyn Read + Send>>, deadline: Instant) -> Result<String, Error> {
+    if !o.args.is_empty() {
+        return Ok(o.args.join(" "));
+    }
+    if !o.file.is_empty() {
+        let b = std::fs::read(&o.file).map_err(|e| Error::msg(format!("open {}: {}", o.file, go_io_text(&e))))?;
+        return Ok(String::from_utf8_lossy(&b).into_owned());
+    }
+    let Some(mut stdin) = stdin else {
+        return Ok(String::new());
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // 시간 초과로 돌아가도 읽는 스레드는 남는다. CLI 는 곧 끝나므로 둔다
+    std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let r = (&mut stdin).take(CLI_MAX_STDIN as u64 + 1).read_to_end(&mut b).map(|_| b);
+        let _ = tx.send(r);
+    });
+    match tokio::time::timeout_at(deadline, rx).await {
+        Err(_) => Err(Error::msg("표준 입력 읽기: context deadline exceeded")),
+        Ok(Err(_)) => Err(Error::msg("표준 입력 읽기 실패")),
+        Ok(Ok(Err(e))) => Err(Error::msg(go_io_text(&e))),
+        Ok(Ok(Ok(b))) if b.len() > CLI_MAX_STDIN => Err(Error::msg("표준 입력이 16MiB 를 넘음 (-f 파일로도 같은 문장 하나만 실행함)")),
+        Ok(Ok(Ok(b))) => Ok(String::from_utf8_lossy(&b).into_owned()),
+    }
 }
 
 /// Go os 오류 글의 까닭 부분이다.
@@ -298,7 +305,7 @@ async fn pg_statement(
     if stmts.len() != 1 {
         return Err(usage(format!("문장 하나만 실행함 ({}개)", stmts.len())));
     }
-    let (sent, note) = expand_enc(env.proj, c, stmts[0]).map_err(usage)?;
+    let (sent, note) = env.proj.expand_enc(c, stmts[0]).map_err(usage)?;
     if !note.is_empty() {
         stderr.push_str(&note);
         stderr.push('\n');
@@ -316,18 +323,6 @@ async fn pg_statement(
         return Err(usage(format!("문장에 없는 파라미터: {k}")));
     }
     Ok((sql, args))
-}
-
-/// 화면(R52)과 CLI(R58)가 같이 쓰는 enc() 확장이다. 보낼 글과 알림 글을 돌려준다.
-fn expand_enc(proj: &Project, c: &Conn, sql: &str) -> Result<(String, String), String> {
-    let (key, iv) = proj.aes_key_iv(c);
-    let (out, n, server) = statcrypt::expand_enc(sql, &key, &iv)?;
-    let note = match (n, server) {
-        (0, _) => String::new(),
-        (_, true) => "키·IV 가 없어 서버 staticEncrypt 로 실행".into(),
-        _ => format!("enc() {n}개 암호화"),
-    };
-    Ok((out, note))
 }
 
 /// describe·ddl 의 대상이다. -s 가 없으면 스키마.테이블 꼴을 나누고, 그것도 없으면 public 이다.

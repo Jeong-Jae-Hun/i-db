@@ -10,6 +10,11 @@ use std::io::{IsTerminal, Write};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "serve") {
+        // 패닉 값에는 SQL·서버 응답이 섞여 비밀번호가 나올 수 있어 찍지 않는다
+        std::panic::set_hook(Box::new(|_| {}));
+        std::process::exit(cli::run_serve(&args[1..]));
+    }
     if args.first().is_none_or(|a| !cli::is_cli_command(a)) {
         eprintln!("db-rs: only CLI commands are ported yet (db-rs help)");
         std::process::exit(cli::EXIT_USAGE);
