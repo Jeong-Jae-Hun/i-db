@@ -1559,7 +1559,9 @@ impl Workspace {
         if let Some(next) = self.queued.remove(&id) {
             if next.force || !self.autosave_stopped.contains_key(&id) {
                 self.send_save(id, next, cx);
-            } else if open.is_none() {
+            } else if open.is_none() || next.keep {
+                // 닫으며 모은 글은 탭이 열려 있어도 버리지 않고 사본에 남긴다(R45.3)
+                self.file_text.insert(id, next.text.clone());
                 self.conflict_copy(next.rel, next.text, next.conn, cx);
             }
         }
@@ -4246,6 +4248,8 @@ mod tests {
 
     fn closed(cx: &mut VisualTestContext, ws: &Entity<Workspace>) -> bool {
         for _ in 0..500 {
+            // wait_saves 의 50ms 타이머는 시험 시계를 움직여야 돈다
+            cx.executor().advance_clock(Duration::from_millis(50));
             cx.run_until_parked();
             if ws.read_with(cx, |w, _| saves_done(w) && w.close_ready) {
                 return true;
@@ -4288,6 +4292,41 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("queries/app").join(&copies[0])).unwrap(),
             "select 8"
+        );
+    }
+
+    /// 리뷰: 자동 저장이 가는 중에 창을 닫으면 닫기 저장이 뒤에 모이는데, 앞 쓰기가 충돌하면 그 글을 버리고 닫았다.
+    #[gpui::test]
+    fn 자동_저장이_가는_중에_창을_닫아도_충돌하면_마지막_글을_사본에_남긴다(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&offline_project(), dir.path());
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_query("queries/app/a.sql".into(), window, cx)));
+        wait(cx, &ws, |w| w.query_tab("queries/app/a.sql").is_some());
+        let id = cx.update(|_, cx| ws.read(cx).tabs.active().unwrap().id);
+        let file = dir.path().join("queries/app/a.sql");
+        std::fs::write(&file, "-- 다른 편집기").unwrap();
+        set_text(cx, &ws, id, "select 1");
+        cx.update(|_, cx| ws.update(cx, |w, cx| w.autosave(id, cx)));
+        set_text(cx, &ws, id, "select 2");
+        // 앞 쓰기의 답이 오기 전에 닫는다
+        let close_now = cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                assert!(w.saving.contains(&id), "앞 쓰기가 가는 중이다");
+                w.should_close(window, cx)
+            })
+        });
+        assert!(!close_now);
+        assert!(closed(cx, &ws), "사본을 남기면 닫는다");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- 다른 편집기");
+        let copies = conflict_copies(dir.path());
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("queries/app").join(&copies[0])).unwrap(),
+            "select 2"
         );
     }
 
