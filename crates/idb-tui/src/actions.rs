@@ -436,6 +436,7 @@ impl App {
             Pend::Health { tab, round, conn } => self.health_done(id, tab, round, conn, res),
             Pend::Outbox { tab, round } => self.outbox_done(tab, round, res),
             Pend::ConnGet => self.conn_got(res),
+            Pend::Compare { tab, side, conn } => self.compare_done(tab, side, conn, res),
             Pend::ConnTested { save } => self.conn_tested(save, res),
             Pend::ConnSaved => self.conn_saved(res),
             Pend::ConnChanged { what } => self.conn_changed(what, res),

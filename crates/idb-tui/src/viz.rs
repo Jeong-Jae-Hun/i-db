@@ -222,6 +222,123 @@ impl App {
         });
     }
 
+    /// Alt+C: 커서 문장을 다른 PostgreSQL 접속에서도 읽기 전용으로 돌려 비교한다(R53.1). 지금 탭 접속이 기준이다.
+    pub(crate) fn compare_conns(&mut self) {
+        let t = self.cur();
+        let Some(base) = t.conn.filter(|&c| self.is_pg(c)) else {
+            self.status = "PostgreSQL 탭에서만 비교".into();
+            return;
+        };
+        let text = t.editor.value().to_string();
+        let src = t
+            .editor
+            .selected_text()
+            .map(str::to_string)
+            .unwrap_or_else(|| idb_core::sqlsafe::statement_at(&text, t.editor.cursor()).to_string());
+        let stmts = idb_core::sqlsafe::split_statements(&src);
+        let why = if stmts.len() != 1 {
+            "문장 하나만 비교"
+        } else if !idb_core::sqlsafe::is_read_only_sql(stmts[0]) {
+            "읽기 문장만 비교"
+        } else if !idb_core::params::bind(stmts[0]).1.is_empty() {
+            "파라미터 문장은 비교하지 않음"
+        } else {
+            ""
+        };
+        if !why.is_empty() {
+            self.status = why.into();
+            return;
+        }
+        let sql = stmts[0].trim().to_string();
+        let name = self.conns[base].name.clone();
+        let want = if name.contains("stg") {
+            name.replace("stg", "prod")
+        } else {
+            name.replace("prod", "stg")
+        };
+        let others: Vec<String> = self
+            .conns
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| *i != base && c.kind == "postgresql")
+            .map(|(_, c)| c.name.clone())
+            .collect();
+        if others.is_empty() {
+            self.status = "비교할 다른 PostgreSQL 접속이 없음".into();
+            return;
+        }
+        let sel = others.iter().position(|n| *n == want).unwrap_or(0);
+        self.picker(format!("{name} 와 비교할 접속"), others, move |a, other| {
+            let Some(oc) = a.conns.iter().position(|c| c.name == other) else {
+                return;
+            };
+            let i = a.new_tab();
+            a.set_conn(i, Some(base));
+            a.tabs[i].title = format!("비교 {name}↔{other}");
+            a.tabs[i].editor.set_value(&sql);
+            a.tabs[i].editor.typed = false;
+            let tab = a.tabs[i].id;
+            a.tabs[i].compare = vec![None, None];
+            for (k, c) in [base, oc].into_iter().enumerate() {
+                let req = idb_engine::Request::ReadQuery {
+                    conn: a.conns[c].name.clone(),
+                    sql: sql.clone(),
+                    limit: 0,
+                };
+                a.call(req, crate::app::Pend::Compare { tab, side: k, conn: c });
+            }
+            a.tabs[i].summary = "비교 중…".into();
+            a.set_focus(crate::help::Focus::Result);
+        });
+        if let crate::app::Overlay::Picker { sel: s, .. } = &mut self.overlay {
+            *s = sel;
+        }
+    }
+
+    pub(crate) fn compare_done(&mut self, tab: u64, side: usize, conn: usize, res: Result<serde_json::Value, idb_engine::EngineError>) {
+        let name = self.conns[conn].name.clone();
+        let r =
+            res.and_then(|v| serde_json::from_value::<idb_engine::ResultSet>(v).map_err(|e| idb_engine::EngineError::run(e.to_string())));
+        let Some(t) = self.tab_by_id(tab) else { return };
+        if t.compare.len() != 2 {
+            return;
+        }
+        t.compare[side] = Some(r.map(|rs| (name.clone(), rs)).map_err(|e| format!("비교 실패 {name}: {}", e.error)));
+        if t.compare.iter().any(Option::is_none) {
+            return;
+        }
+        let parts: Vec<_> = std::mem::take(&mut t.compare).into_iter().flatten().collect();
+        if let Some(Err(e)) = parts.iter().find(|p| p.is_err()) {
+            t.err = e.clone();
+            t.summary = "비교 실패".into();
+            let e = e.clone();
+            self.status = e;
+            return;
+        }
+        let ok: Vec<(String, idb_engine::ResultSet)> = parts.into_iter().map(|p| p.unwrap()).collect();
+        let (a, b) = (Grid::new(ok[0].1.clone()), Grid::new(ok[1].1.clone()));
+        // 기준(지금 탭 접속)에서 다른 접속이 어떻게 다른지다
+        let d = diff(&a, &b);
+        t.subs = ok
+            .iter()
+            .map(|(n, rs)| crate::app::Pin {
+                title: n.clone(),
+                grid: Grid::new(rs.clone()),
+                pinned: false,
+            })
+            .collect();
+        t.grid = Some(a);
+        match d {
+            Ok(d) => {
+                t.summary = format!("{} 기준 {} 비교 {}", ok[0].0, ok[1].0, d.summary);
+                t.diff = Some(d);
+            }
+            Err(e) => t.summary = e,
+        }
+        let s = t.summary.clone();
+        self.status = s;
+    }
+
     pub(crate) fn draw_diff(d: &DiffView, buf: &mut Buffer, r: Rect) {
         buf.set_stringn(r.x, r.y, &d.summary, r.width as usize, Style::new().fg(theme::TEXT));
         for (i, (k, l)) in d.lines.iter().skip(d.top).take(r.height.saturating_sub(1) as usize).enumerate() {

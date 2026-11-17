@@ -1656,3 +1656,26 @@ fn 트리_펼침_기억은_Go_와_같은_id_로_남긴다() {
     a.on_key("h");
     assert_eq!(a.tree_snapshot().1, ["g:app"]);
 }
+
+#[test]
+fn Alt_C_는_stg_prod_를_바꾼_접속을_기본으로_두_곳을_읽기_전용으로_비교한다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "delete from t");
+    a.on_key("alt+c");
+    assert_eq!(a.status, "읽기 문장만 비교");
+    a.cur_mut().editor.set_value("select id from t");
+    a.on_key("alt+c");
+    let Overlay::Picker { items, sel, .. } = &a.overlay else { panic!() };
+    assert_eq!(items[*sel], "shop-prod");
+    a.on_key("enter");
+    let js = jobs(&mut a);
+    assert!(js.iter().all(|(_, r)| r["op"] == "read_query" && r["sql"] == "select id from t"));
+    let (x, y) = (js[js.len() - 2].0, js[js.len() - 1].0);
+    a.on_done(y, Ok(rs(&["id"], &[&["1"], &["2"]])));
+    a.on_done(x, Ok(rs(&["id"], &[&["1"]])));
+    assert_eq!(a.cur().summary, "app-stg 기준 shop-prod 비교 +1 −0 ~0");
+    assert_eq!(a.cur().subs.len(), 2);
+}

@@ -163,6 +163,11 @@ pub enum Pend {
         round: u64,
     },
     Estimate,
+    Compare {
+        tab: u64,
+        side: usize,
+        conn: usize,
+    },
     ConnGet,
     ConnTested {
         save: bool,
@@ -319,6 +324,8 @@ pub struct Tab {
     pub linked: Option<String>,
     /// 남기지 못한 글을 버리고 닫기로 했다
     pub close_ok: bool,
+    /// 접속 비교(R53.1) 두 쪽의 답(접속 이름·결과 또는 오류 글)
+    pub compare: Vec<Option<Result<(String, idb_engine::ResultSet), String>>>,
     /// 차트(R28)·비교(R31.2) 화면. 있으면 결과 영역이 그것이다
     pub chart: Option<crate::viz::Chart>,
     pub diff: Option<crate::viz::DiffView>,
@@ -363,6 +370,7 @@ impl Tab {
             plan: None,
             linked: None,
             close_ok: false,
+            compare: Vec::new(),
             chart: None,
             diff: None,
             base: None,
@@ -1021,9 +1029,7 @@ impl App {
             "ctrl+]" => self.cycle_range(),
             "?" if self.focus != Focus::Tree && self.cur().pane.is_some() => self.open_keys(),
             "f7" => self.full_export(),
-            "alt+c" => {
-                self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", self.label(&key_label(k)));
-            }
+            "alt+c" => self.compare_conns(),
             _ => {
                 if let Some(n) = k.strip_prefix("alt+").and_then(|d| d.parse::<usize>().ok())
                     && (1..=9).contains(&n)
