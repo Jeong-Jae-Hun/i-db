@@ -20,6 +20,15 @@ pub use local::{CliHandler, LocalEngine};
 pub use protocol::*;
 pub use remote::{RemoteEngine, RemoteSpec};
 
+/// 묶음의 미리 보기 문장이다(`changes_sql` op 와 같은 글). applied 가 있으면 되돌리기 묶음의 문장이다.
+/// 접속을 쓰지 않는 계산이라 화면이 원격에서도 요청 없이 바로 부른다(fk_where 와 같다).
+pub fn changes_preview(cs: &ChangeSet, applied: Option<&Applied>) -> Result<Vec<String>, String> {
+    match applied {
+        Some(a) => idb_sources::undo_changes(cs, a).map(|u| idb_sources::changes_sql(&u)),
+        None => Ok(idb_sources::changes_sql(cs)),
+    }
+}
+
 #[derive(Clone)]
 pub enum Engine {
     Local(Arc<LocalEngine>),

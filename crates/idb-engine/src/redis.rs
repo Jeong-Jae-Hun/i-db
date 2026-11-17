@@ -338,19 +338,7 @@ pub(crate) fn command_unavailable(e: &Error) -> bool {
     matches!(e, Error::Other(m) if m.contains("unknown command") || m.contains("unknown subcommand") || m.starts_with("NOPERM"))
 }
 
-/// Go textutil.GroupDigits.
-fn group_digits(n: i64) -> String {
-    let s = n.to_string();
-    let (neg, digits) = s.strip_prefix('-').map_or((false, s.as_str()), |d| (true, d));
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if neg { format!("-{out}") } else { out }
-}
+use idb_core::textutil::group_digits;
 
 fn digits(s: &str) -> String {
     match s.parse::<i64>() {
