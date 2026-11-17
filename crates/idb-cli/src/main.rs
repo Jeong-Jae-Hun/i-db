@@ -8,6 +8,7 @@ mod conn_cmd;
 mod flows_cmd;
 mod goflag;
 mod history_cmd;
+mod mcp;
 mod output;
 mod source_cmd;
 mod status_cmd;
@@ -22,6 +23,10 @@ fn main() {
         // 패닉 값에는 SQL·서버 응답이 섞여 비밀번호가 나올 수 있어 찍지 않는다
         std::panic::set_hook(Box::new(|_| {}));
         std::process::exit(cli::run_serve(&args[1..]));
+    }
+    if args.first().is_some_and(|a| a == "mcp") {
+        std::panic::set_hook(Box::new(|_| {}));
+        std::process::exit(mcp::run_mcp(&args[1..]));
     }
     if args.first().is_none_or(|a| !cli::is_cli_command(a)) {
         eprintln!("db-rs: only CLI commands are ported yet (db-rs help)");
