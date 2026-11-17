@@ -535,7 +535,7 @@ impl Workspace {
                     h_flex()
                         .gap_2()
                         .py_1()
-                        .child(div().w(px(120.)).text_sm().child(n.clone()))
+                        .child(div().w(px(120.)).child(n.clone()))
                         .child(div().flex_1().child(Input::new(i))),
                 );
             }
@@ -854,7 +854,7 @@ impl Workspace {
         let mut remotes = v_flex().gap_1();
         match &self.remotes {
             Ok(names) if names.is_empty() => {
-                remotes = remotes.child(div().text_sm().text_color(theme.muted_foreground).child(picker::NO_REMOTES));
+                remotes = remotes.child(div().text_color(theme.muted_foreground).child(picker::NO_REMOTES));
             }
             Ok(names) => {
                 for (i, c) in picker::remote_choices(names).into_iter().enumerate() {
@@ -866,7 +866,7 @@ impl Workspace {
                     );
                 }
             }
-            Err(e) => remotes = remotes.child(div().text_sm().text_color(theme.danger).child(e.clone())),
+            Err(e) => remotes = remotes.child(div().text_color(theme.danger).child(e.clone())),
         }
         let mut recent = v_flex().gap_1();
         for (i, t) in self.prefs.recent.iter().enumerate() {
@@ -878,20 +878,13 @@ impl Workspace {
                     .on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t2.clone(), w, cx))),
             );
         }
-        let section = |title: &str| {
-            div()
-                .pt_4()
-                .pb_1()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(title.to_string())
-        };
+        let section = |title: &str| div().pt_4().pb_1().text_color(theme.muted_foreground).child(title.to_string());
         v_flex().size_full().items_center().justify_center().child(
             v_flex()
                 .w(px(600.))
                 .gap_1()
                 .child(div().text_2xl().child(picker::TITLE))
-                .child(div().text_sm().text_color(theme.muted_foreground).child(picker::SUBTITLE))
+                .child(div().text_color(theme.muted_foreground).child(picker::SUBTITLE))
                 .child(section(picker::REMOTE_SECTION))
                 .child(remotes)
                 .child(section(picker::LOCAL_SECTION))
@@ -934,7 +927,6 @@ impl Workspace {
                 .child(
                     div()
                         .pt_4()
-                        .text_sm()
                         .text_color(if self.status.1 { theme.danger } else { theme.muted_foreground })
                         .child(self.status.0.clone()),
                 ),
@@ -961,7 +953,6 @@ impl Workspace {
                         .gap_1()
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.list_hover))
-                        .text_sm()
                         .child(
                             div()
                                 .w(px(12.))
@@ -997,7 +988,7 @@ impl Workspace {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().text_sm().text_color(color).truncate().child(name))
+                                .child(div().text_color(color).truncate().child(name))
                                 .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(row.detail)),
                         )
                         .when(tone(&env) != Tone::Local, |d| {
@@ -1049,7 +1040,6 @@ impl Workspace {
                             .id(("table", i))
                             .pl_4()
                             .pr_2()
-                            .text_sm()
                             .cursor_pointer()
                             .hover(|st| st.bg(theme.list_hover))
                             .child(
@@ -1115,7 +1105,6 @@ impl Workspace {
                     .gap_2()
                     .child(
                         div()
-                            .text_sm()
                             .text_color(if is_prod { theme.danger } else { theme.foreground })
                             .child(s.name.clone()),
                     )
@@ -1125,12 +1114,7 @@ impl Workspace {
                             .text_color(theme.muted_foreground)
                             .child(format!("{} · {}", s.env, s.db)),
                     ),
-                None => h_flex().child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("접속 없음 — 왼쪽 트리에서 고른다"),
-                ),
+                None => h_flex().child(div().text_color(theme.muted_foreground).child("접속 없음 — 왼쪽 트리에서 고른다")),
             })
             .child(div().flex_1())
             .when(is_pg, |d| {
@@ -1227,7 +1211,7 @@ impl Workspace {
                     .cursor_pointer()
                     .when(active, |d| d.bg(theme.background))
                     .when(prod, |d| d.border_t_2().border_color(theme.danger))
-                    .child(div().text_sm().child(t.title()))
+                    .child(div().child(t.title()))
                     .child(
                         div()
                             .id(("close", i))
@@ -1264,7 +1248,6 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
                 .text_color(theme.muted_foreground)
                 .child(msg.to_string())
                 .into_any_element()
@@ -1352,6 +1335,8 @@ impl Render for Workspace {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .font_family(theme.font_family.clone())
+            .text_size(theme.font_size)
             .on_action(cx.listener(|ws, _: &RunQuery, w, cx| ws.run_query(false, w, cx)))
             .on_action(cx.listener(|ws, _: &ExplainQuery, w, cx| ws.run_query(true, w, cx)))
             .on_action(cx.listener(|ws, _: &NewTab, w, cx| {

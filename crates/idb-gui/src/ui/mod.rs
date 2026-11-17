@@ -5,12 +5,14 @@ mod results;
 mod sql_completion;
 mod workspace;
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, actions, px, size};
 use gpui_component::{Root, Theme};
 
-use crate::vm::runtime::{Runtime, Target};
+use crate::vm::font::{self, FontChoice};
+use crate::vm::runtime::{Prefs, Runtime, Target};
 use workspace::Workspace;
 
 actions!(
@@ -42,6 +44,34 @@ fn initial_target() -> Result<Option<Target>, String> {
     }
 }
 
+/// gui.json 의 글꼴을 정하고, 설치돼 있지 않으면 넣어 둔 D2Coding 을 등록한다.
+fn load_font(cx: &mut App) -> FontChoice {
+    let prefs = Prefs::path().map(|p| Prefs::load(&p)).unwrap_or_default();
+    let installed = cx.text_system().all_font_names();
+    let mut choice = font::resolve(&prefs.font, prefs.font_size, &installed);
+    if choice.embed {
+        let fonts = vec![Cow::Borrowed(font::D2CODING_REGULAR), Cow::Borrowed(font::D2CODING_BOLD)];
+        if let Err(e) = cx.text_system().add_fonts(fonts) {
+            // 등록도 못 하면 gpui-component 기본 글꼴로 둔다
+            eprintln!("i-db: D2Coding 등록 실패: {e}");
+            choice.family = String::new();
+        }
+    }
+    choice
+}
+
+/// 화면 글·편집기·결과 표가 같은 글꼴을 쓰게 테마에 넣는다.
+fn apply_font(f: &FontChoice, cx: &mut App) {
+    Theme::update(cx, |t| {
+        if !f.family.is_empty() {
+            t.font_family = f.family.clone().into();
+            t.mono_font_family = f.family.clone().into();
+        }
+        t.font_size = px(f.size);
+        t.mono_font_size = px(f.size);
+    });
+}
+
 pub fn run() {
     let initial = match initial_target() {
         Ok(t) => t,
@@ -61,6 +91,7 @@ pub fn run() {
         .with_assets(gpui_kit_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            let font = load_font(cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-q", Quit, None),
                 // 편집기(Input)가 cmd-enter 를 줄바꿈으로 먹지 않게 같은 맥락에 나중에 묶는다
@@ -108,6 +139,7 @@ pub fn run() {
             let rt = rt.clone();
             let opened = cx.open_window(opts, move |window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
+                apply_font(&font, cx);
                 let ws = cx.new(|cx| {
                     let mut ws = Workspace::new(rt, window, cx);
                     if let Some(t) = initial {
@@ -123,4 +155,24 @@ pub fn run() {
             }
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use gpui_component::ActiveTheme as _;
+
+    #[gpui::test]
+    fn 기본_글꼴을_테마의_글과_편집기에_넣는다(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let f = font::resolve(font::DEFAULT_FONT, font::DEFAULT_SIZE, &[]);
+            apply_font(&f, cx);
+            let t = cx.theme();
+            assert_eq!(t.font_family.as_ref(), "D2Coding");
+            assert_eq!(t.mono_font_family.as_ref(), "D2Coding");
+            assert_eq!((t.font_size, t.mono_font_size), (px(13.), px(13.)));
+        });
+    }
 }

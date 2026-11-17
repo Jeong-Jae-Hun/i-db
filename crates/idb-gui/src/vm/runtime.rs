@@ -116,11 +116,34 @@ impl Runtime {
 
 // ─── 기억 ───
 
-/// 최근 연 곳이다. `~/.config/db/gui.json` 에 둔다. 비밀값은 싣지 않는다.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// GUI 설정과 최근 연 곳이다. `~/.config/db/gui.json` 에 둔다. 비밀값은 싣지 않는다.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Prefs {
     #[serde(default)]
     pub recent: Vec<Target>,
+    /// 화면 전체(글·편집기·결과 표) 글꼴. 없으면 넣어 둔 D2Coding 을 쓴다
+    #[serde(default = "default_font")]
+    pub font: String,
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
+}
+
+fn default_font() -> String {
+    super::font::DEFAULT_FONT.into()
+}
+
+fn default_font_size() -> f32 {
+    super::font::DEFAULT_SIZE
+}
+
+impl Default for Prefs {
+    fn default() -> Prefs {
+        Prefs {
+            recent: Vec::new(),
+            font: default_font(),
+            font_size: default_font_size(),
+        }
+    }
 }
 
 const MAX_RECENT: usize = 8;
@@ -173,6 +196,18 @@ mod tests {
         assert_eq!(p.recent.len(), MAX_RECENT);
         assert_eq!(p.recent[0], Target::Remote("r5".into()));
         assert_eq!(p.recent.iter().filter(|t| **t == Target::Remote("r5".into())).count(), 1);
+    }
+
+    #[test]
+    fn 글꼴_설정을_읽고_없으면_기본값이다() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui.json");
+        std::fs::write(&path, r#"{"font": "Menlo", "font_size": 14}"#).unwrap();
+        let p = Prefs::load(&path);
+        assert_eq!((p.font.as_str(), p.font_size), ("Menlo", 14.0));
+        std::fs::write(&path, r#"{"recent": []}"#).unwrap();
+        let p = Prefs::load(&path);
+        assert_eq!((p.font.as_str(), p.font_size), ("D2Coding", 13.0));
     }
 
     #[test]

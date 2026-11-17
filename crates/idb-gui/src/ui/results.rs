@@ -108,7 +108,7 @@ impl TableDelegate for GridDelegate {
         v_flex()
             .size_full()
             .justify_center()
-            .child(div().text_sm().child(self.grid.cols[col_ix].clone()))
+            .child(div().child(self.grid.cols[col_ix].clone()))
             .when(!ty.is_empty() || editable, |d| {
                 d.child(
                     div()
@@ -133,7 +133,6 @@ impl TableDelegate for GridDelegate {
         div()
             .size_full()
             .overflow_hidden()
-            .text_sm()
             .when(is_null, |d| d.text_color(cx.theme().muted_foreground).italic())
             .when(mark == CellMark::Edited, |d| d.bg(cx.theme().warning.opacity(0.25)))
             .when(mark == CellMark::Deleted, |d| d.bg(cx.theme().danger.opacity(0.2)).line_through())
@@ -698,7 +697,6 @@ impl Render for ResultsView {
                     .p_3()
                     .overflow_y_scroll()
                     .font_family(theme.mono_font_family.clone())
-                    .text_sm()
                     .child(if self.text.is_empty() {
                         "결과 없음".to_string()
                     } else {

@@ -2,6 +2,7 @@
 
 pub mod completion;
 pub mod edits;
+pub mod font;
 pub mod grid;
 pub mod picker;
 pub mod runtime;

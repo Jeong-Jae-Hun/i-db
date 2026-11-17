@@ -167,7 +167,6 @@ impl Render for RedisView {
                 div()
                     .id(("key", i))
                     .px_2()
-                    .text_sm()
                     .truncate()
                     .cursor_pointer()
                     .when(selected, |d| d.bg(theme.list_active))
@@ -216,7 +215,6 @@ impl Render for RedisView {
                             Some(v) => v.clone().into_any_element(),
                             None => div()
                                 .p_3()
-                                .text_sm()
                                 .text_color(theme.muted_foreground)
                                 .child("키를 고르면 값을 보인다")
                                 .into_any_element(),

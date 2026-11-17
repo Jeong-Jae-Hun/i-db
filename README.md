@@ -379,3 +379,5 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`: tests against Postgres 
 ## License
 
 To be decided. Until a license file is added, no license is granted.
+
+The macOS GUI (`crates/idb-gui`) bundles the D2Coding 1.3.2 font by NAVER, unmodified, under the SIL Open Font License 1.1 (`crates/idb-gui/assets/fonts/OFL.txt`). The GUI uses an installed D2Coding first and registers the bundled copy only when it is missing; `font` and `font_size` in `~/.config/db/gui.json` change the font (default `"D2Coding"`, `13`).
