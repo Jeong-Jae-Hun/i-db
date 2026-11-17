@@ -89,6 +89,43 @@ pub fn go_upper(s: &str) -> String {
         .collect()
 }
 
+/// 세 자리마다 쉼표를 넣는다(행 번호·개수). Go `textutil.GroupDigits` 와 같다.
+pub fn group_digits(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// 개수를 만·억·조 단위로 줄인다(대시보드 R64). 1만 미만은 쉼표 꼴이고, 단위로 10 미만이면
+/// 소수 한 자리(.0 은 뗌), 10 이상이면 정수다. 올리면 단위 경계를 넘을 수 있어(9.99만 → 10.0만) 버린다.
+///   - 예: 37 → "37", 12000 → "1.2만", 1200000 → "120만", 150000000 → "1.5억"
+pub fn korean_count(n: i64) -> String {
+    let sign = if n < 0 { "-" } else { "" };
+    let u = n.unsigned_abs();
+    for (name, size) in [("조", 1_000_000_000_000u64), ("억", 100_000_000), ("만", 10_000)] {
+        if u < size {
+            continue;
+        }
+        let whole = u / size;
+        if whole >= 10 {
+            return format!("{sign}{}{name}", group_digits(whole));
+        }
+        let tenths = u * 10 / size; // u < 10*size 라 넘치지 않는다
+        return if tenths.is_multiple_of(10) {
+            format!("{sign}{}{name}", tenths / 10)
+        } else {
+            format!("{sign}{}.{}{name}", tenths / 10, tenths % 10)
+        };
+    }
+    format!("{sign}{}", group_digits(u))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +144,30 @@ mod tests {
         assert_eq!(string_width("ab"), 2);
         assert_eq!(truncate("가나다라", 5, "…"), "가나…");
         assert_eq!(truncate("abc", 3, "…"), "abc");
+    }
+
+    #[test]
+    fn 개수는_만_억_조_단위로_줄이고_경계는_버린다() {
+        for (n, want) in [
+            (0, "0"),
+            (37, "37"),
+            (9999, "9,999"),
+            (10000, "1만"),
+            (12000, "1.2만"),
+            (99999, "9.9만"),
+            (100000, "10만"),
+            (1200000, "120만"),
+            (99999999, "9,999만"),
+            (100000000, "1억"),
+            (150000000, "1.5억"),
+            (1234567890123, "1.2조"),
+            (-12000, "-1.2만"),
+            (-37, "-37"),
+            (-150000000, "-1.5억"),
+            (i64::MAX, "9,223,372조"),
+            (i64::MIN, "-9,223,372조"),
+        ] {
+            assert_eq!(korean_count(n), want, "{n}");
+        }
     }
 }
