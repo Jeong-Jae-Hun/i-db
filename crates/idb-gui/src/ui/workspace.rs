@@ -47,18 +47,28 @@ pub type Done<T> = Rc<dyn Fn(&mut Workspace, T, &mut Window, &mut Context<Worksp
 /// `guarded` 의 덧붙임이다. precheck 는 (확인 뒤 다시 보낼 때도) 보내기 바로 전에 돌고, Err 면 보내지 않는다.
 /// fail 은 답이 성공이 아니면(오류·거절·멈춤·확인 취소·precheck 실패) 한 번 돈다.
 pub type Precheck = Rc<dyn Fn(&Workspace) -> Result<(), String>>;
-pub type OnFail = Rc<dyn Fn(&mut Workspace, &mut Context<Workspace>)>;
+pub type OnFail = Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
 
 #[derive(Clone, Default)]
 pub struct Hooks {
     pub precheck: Option<Precheck>,
     pub fail: Option<OnFail>,
+    /// 멈춤(⌘.)으로 답을 못 받았을 때. 엔진이 이미 했는지 모르는 상태라 확실한 실패(fail)와 따로 둔다.
+    /// 없으면 fail 이 돈다
+    pub cancelled: Option<OnFail>,
 }
 
 impl Hooks {
-    fn failed(&self, ws: &mut Workspace, cx: &mut Context<Workspace>) {
+    fn failed(&self, ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
         if let Some(f) = &self.fail {
-            f(ws, cx);
+            f(ws, window, cx);
+        }
+    }
+
+    fn cancelled(&self, ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+        match &self.cancelled {
+            Some(f) => f(ws, window, cx),
+            None => self.failed(ws, window, cx),
         }
     }
 }
@@ -291,11 +301,11 @@ impl Workspace {
     {
         if let Some(Err(msg)) = hooks.precheck.as_ref().map(|p| p(self)) {
             self.set_status(format!("{label}: {msg}"), true, cx);
-            hooks.failed(self, cx);
+            hooks.failed(self, window, cx);
             return;
         }
         let Some(engine) = self.engine.clone() else {
-            hooks.failed(self, cx);
+            hooks.failed(self, window, cx);
             return;
         };
         let job = self.rt.spawn(make(engine, confirms));
@@ -310,7 +320,7 @@ impl Workspace {
                 match r {
                     Err(_) => {
                         ws.set_status(format!("{label}: 멈춤"), true, cx);
-                        hooks.failed(ws, cx);
+                        hooks.cancelled(ws, window, cx);
                     }
                     Ok(Ok(v)) => {
                         ws.status = (String::new(), false);
@@ -346,12 +356,12 @@ impl Workspace {
                     window.push_notification(Notification::warning("트랜잭션이 열려 있다. 커밋하거나 되돌려야 한다"), cx);
                 }
                 self.set_status(format!("{label}: {msg}"), true, cx);
-                hooks.failed(self, cx);
+                hooks.failed(self, window, cx);
             }
             Gate::Locked(msg) => {
                 self.set_status(format!("{msg} (⌘L 로 prod 잠금을 연다)"), true, cx);
                 window.push_notification(Notification::warning("prod 가 잠겨 있다. ⌘L 로 잠시 연다"), cx);
-                hooks.failed(self, cx);
+                hooks.failed(self, window, cx);
             }
             Gate::Ask { ask, question } => {
                 let this = cx.entity().downgrade();
@@ -377,8 +387,8 @@ impl Workspace {
                             });
                             true
                         })
-                        .on_cancel(move |_, _, cx| {
-                            let _ = this_c.update(cx, |ws, cx| hooks_c.failed(ws, cx));
+                        .on_cancel(move |_, window, cx| {
+                            let _ = this_c.update(cx, |ws, cx| hooks_c.failed(ws, window, cx));
                             true
                         })
                 });
@@ -494,6 +504,10 @@ impl Workspace {
 
     /// 트랜잭션·잠금 상태를 읽는다.
     pub fn refresh_conn_state(&mut self, conn: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // 전환을 멈춘 뒤 확인하지 못한 접속이면 다시 확인한다
+        if self.is_switching(conn) && self.busy.is_none() {
+            self.resync_db(conn, window, cx);
+        }
         let name = conn.to_string();
         let kind_pg = self.conn(conn).is_some_and(|c| c.kind == "postgresql");
         let n = name.clone();
@@ -631,13 +645,18 @@ impl Workspace {
         // 보내기 전에 얼린다. 실패하면 풀고, 성공하면 옛 결과로 무효화한다
         self.switching.insert(conn.clone());
         self.set_frozen(&conn, true, cx);
-        let c_fail = conn.clone();
+        let (c_fail, c_cancel) = (conn.clone(), conn.clone());
         let hooks = Hooks {
             precheck: None,
-            fail: Some(Rc::new(move |ws: &mut Workspace, cx: &mut Context<Workspace>| {
+            // 엔진이 오류·거절로 답했다: 바뀌지 않은 것이 확실해 푼다
+            fail: Some(Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
                 ws.switching.remove(&c_fail);
                 ws.set_frozen(&c_fail, false, cx);
             })),
+            // 멈춤: 원격은 이미 바꿨을 수 있다(cancel 은 되돌리지 않는다)
+            cancelled: Some(Rc::new(
+                move |ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| ws.on_switch_cancelled(&c_cancel, window, cx),
+            )),
         };
         self.guarded_with(
             "데이터베이스 바꾸기",
@@ -658,6 +677,76 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    /// 바꾸기를 멈췄다. 바뀌었는지 모르므로 옛 결과는 무효로 하고(세대 올림) 얼린 채,
+    /// 엔진에 그 접속의 지금 데이터베이스를 물어 확인되면 푼다. 확인 못 하면 쓰기를 계속 막는다.
+    pub(super) fn on_switch_cancelled(&mut self, conn: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_db_switched(conn, cx);
+        self.switching.insert(conn.to_string());
+        self.resync_db(conn, window, cx);
+    }
+
+    /// 엔진(serve)이 아는 그 접속의 데이터베이스를 읽는다(project 의 db 는 switch_db 를 반영한다).
+    fn resync_db(&mut self, conn: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let (c_done, c_fail, c_cancel) = (conn.to_string(), conn.to_string(), conn.to_string());
+        let hooks = Hooks {
+            precheck: None,
+            fail: Some(Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
+                ws.db_unconfirmed(&c_fail, cx)
+            })),
+            cancelled: Some(Rc::new(move |ws: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
+                ws.db_unconfirmed(&c_cancel, cx)
+            })),
+        };
+        self.guarded_with(
+            "데이터베이스 확인",
+            Rc::new(|e: Engine, _| async move { e.project().await }),
+            Rc::new(move |ws: &mut Workspace, info: ProjectInfo, window, cx| {
+                let Some(found) = info.conns.into_iter().find(|c| c.name == c_done) else {
+                    ws.db_unconfirmed(&c_done, cx);
+                    return;
+                };
+                ws.db_confirmed(&c_done, found.db, window, cx);
+            }),
+            hooks,
+            Confirms::default(),
+            window,
+            cx,
+        );
+    }
+
+    /// 지금 데이터베이스를 알았다. 옛 결과는 이미 무효라 새로 실행한 결과부터 쓸 수 있다.
+    pub(super) fn db_confirmed(&mut self, conn: &str, db: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.switching.remove(conn);
+        if let Some(c) = self.tree.conns.iter_mut().find(|c| c.name == conn) {
+            c.db = db.clone();
+        }
+        let search_path = self.sessions.get(conn).map(|s| s.search_path.clone()).unwrap_or_default();
+        let in_tx = self.tx.get(conn).copied().unwrap_or(false);
+        self.sessions.insert(
+            conn.to_string(),
+            SessionState {
+                conn: conn.to_string(),
+                db: db.clone(),
+                search_path,
+                in_tx,
+            },
+        );
+        self.catalogs.remove(conn);
+        self.ensure_catalog(conn, window, cx);
+        self.set_status(
+            format!("데이터베이스 전환을 멈췄다. 지금 {db} 이다 — 결과는 다시 실행한다"),
+            true,
+            cx,
+        );
+    }
+
+    /// 확인하지 못했다. 쓰기는 계속 막는다(접속을 다시 누르면 또 확인한다).
+    pub(super) fn db_unconfirmed(&mut self, conn: &str, cx: &mut Context<Self>) {
+        self.switching.insert(conn.to_string());
+        self.set_frozen(conn, true, cx);
+        self.set_status("데이터베이스 전환 결과를 확인하지 못해 결과를 다시 실행한다", true, cx);
     }
 
     /// R27.2: 기본 스키마(search_path)를 바꾼다.
@@ -2304,6 +2393,84 @@ mod tests {
             assert!(!r.read(cx).frozen && !r.read(cx).stale);
             assert_eq!(r.read(cx).pending(cx), 1, "실패하면 바꿈을 그대로 둔다");
         });
+    }
+
+    /// 재리뷰: 바꾸기를 멈추면(⌘.) 원격은 이미 바꿨을 수 있다. 옛 결과는 무효로 하고 엔진에 물어 확인한 뒤에 푼다.
+    #[gpui::test]
+    fn 바꾸기를_멈추면_옛_결과를_무효로_하고_지금_데이터베이스를_확인한_뒤_푼다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let r = edited_result(&ws, cx);
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| w.on_switch_cancelled("app-stg", window, cx));
+            let w = ws.read(cx);
+            assert_eq!(w.db_gen("app-stg"), 1, "옛 결과는 무효다");
+            assert!(w.is_switching("app-stg"), "확인 전에는 쓰기를 막는다");
+            assert!(w.write_ok("app-stg", 1).is_err());
+            assert!(r.read(cx).stale);
+            assert_eq!(r.read(cx).pending(cx), 0);
+        });
+        wait(cx, &ws, |w| !w.is_switching("app-stg"));
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert_eq!(
+                w.sessions.get("app-stg").map(|s| s.db.as_str()),
+                Some("app"),
+                "엔진이 아는 DB 로 맞춘다"
+            );
+            assert!(w.write_ok("app-stg", 1).is_ok(), "확인한 뒤 새 결과는 쓸 수 있다");
+            assert!(w.write_ok("app-stg", 0).is_err(), "옛 결과는 여전히 막는다");
+        });
+    }
+
+    #[gpui::test]
+    fn 전환_결과를_확인하지_못하면_쓰기를_계속_막는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let r = edited_result(&ws, cx);
+        cx.update(|_, cx| ws.update(cx, |w, cx| w.db_unconfirmed("app-stg", cx)));
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(w.is_switching("app-stg"));
+            assert!(w.write_ok("app-stg", 0).is_err());
+            assert_eq!(w.status.0, "데이터베이스 전환 결과를 확인하지 못해 결과를 다시 실행한다");
+            assert!(r.read(cx).frozen);
+        });
+    }
+
+    /// 멈춤은 확실한 실패(fail)와 따로 간다. cancelled 가 없을 때만 fail 로 떨어진다.
+    #[gpui::test]
+    fn 멈춤은_실패와_다른_길로_간다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        let log = Rc::new(std::cell::RefCell::new(Vec::<&str>::new()));
+        let (l1, l2) = (log.clone(), log.clone());
+        let both = Hooks {
+            precheck: None,
+            fail: Some(Rc::new(move |_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>| {
+                l1.borrow_mut().push("fail")
+            })),
+            cancelled: Some(Rc::new(move |_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>| {
+                l2.borrow_mut().push("cancel")
+            })),
+        };
+        let l3 = log.clone();
+        let only_fail = Hooks {
+            precheck: None,
+            fail: Some(Rc::new(move |_: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>| {
+                l3.borrow_mut().push("fail-only")
+            })),
+            cancelled: None,
+        };
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                both.cancelled(w, window, cx);
+                both.failed(w, window, cx);
+                only_fail.cancelled(w, window, cx);
+            })
+        });
+        assert_eq!(*log.borrow(), vec!["cancel", "fail", "fail-only"]);
     }
 
     /// 리뷰 3: 모두 실행 중 탭을 바꾸면 남은 결과가 새 탭에 붙었다.

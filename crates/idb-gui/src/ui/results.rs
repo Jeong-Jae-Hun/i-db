@@ -739,6 +739,7 @@ fn write_hooks(conn: String, gen0: u64) -> Hooks {
     Hooks {
         precheck: Some(Rc::new(move |ws: &Workspace| ws.write_ok(&conn, gen0))),
         fail: None,
+        cancelled: None,
     }
 }
 
