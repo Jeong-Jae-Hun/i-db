@@ -1429,6 +1429,7 @@ name = "idb-engine"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "idb-core",
  "idb-sources",
  "serde",
