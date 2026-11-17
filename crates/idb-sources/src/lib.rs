@@ -18,7 +18,10 @@ use std::future::Future;
 
 use tokio::time::Instant;
 
-pub use pg::{Clients, Pg, Session, TableRef};
+pub use pg::{
+    Applied, Catalog, CatalogColumn, CatalogSchema, CatalogTable, Change, ChangeOp, ChangeSet, Clients, ERR_NOT_FOUND, Fk, Object, Origin,
+    Pg, Ran, Session, TableRef, changes_sql, fk_where, undo_changes,
+};
 
 /// 서버가 돌려준 오류다. 글은 pgx `PgError.Error()` 와 같다.
 #[derive(Clone, Debug, PartialEq, Eq)]

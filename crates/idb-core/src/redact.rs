@@ -18,6 +18,72 @@ pub fn redact(s: &str, secret: &str) -> String {
     out
 }
 
+/// 비밀값이 든 실행 글 대신 기록·화면에 남기는 글이다.
+pub const MASKED_SQL: &str = "-- (비밀값이 있어 기록하지 않음)";
+
+/// 비밀번호를 싣는 문장이 있으면 글 전체를 MASKED_SQL 로 바꾼다(Go `MaskSecrets`). 정규식
+/// `(?im)\bpassword\s+(e?'|\$)|^\s*(auth|acl\s+setuser|config\s+set\s+(requirepass|masterauth))\b|^\s*(hello|migrate)\b.*\bauth2?\b`
+/// 과 같은 판정을 바이트로 한다. 리터럴만 골라 지우면 따옴표·이스케이프 변형에서 새므로 글 전체를 가린다.
+pub fn mask_secrets(text: &str) -> String {
+    if has_secret(text) { MASKED_SQL.into() } else { text.into() }
+}
+
+fn is_word(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c')
+}
+
+/// s 가 word 로 시작하고 그 뒤가 낱말 글자가 아닌지(\b)다.
+fn starts_word(s: &[u8], word: &str) -> bool {
+    s.len() >= word.len() && s[..word.len()].eq_ignore_ascii_case(word.as_bytes()) && s.get(word.len()).is_none_or(|&b| !is_word(b))
+}
+
+fn has_secret(text: &str) -> bool {
+    let b = text.as_bytes();
+    // password\s+(e?'|$)
+    for i in 0..b.len() {
+        if (i == 0 || !is_word(b[i - 1])) && b.len() - i >= 8 && b[i..i + 8].eq_ignore_ascii_case(b"password") {
+            let mut j = i + 8;
+            let ws = j;
+            while j < b.len() && is_space(b[j]) {
+                j += 1;
+            }
+            if j > ws {
+                let rest = &b[j..];
+                if rest.first().is_some_and(|&c| c == b'\'' || c == b'$')
+                    || rest.len() >= 2 && rest[0].eq_ignore_ascii_case(&b'e') && rest[1] == b'\''
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    text.split('\n').any(|line| {
+        let t: Vec<&[u8]> = line.as_bytes().split(|&c| is_space(c)).filter(|w| !w.is_empty()).collect();
+        let Some(first) = t.first() else { return false };
+        let word = |i: usize, w: &str| t.get(i).is_some_and(|x| x.eq_ignore_ascii_case(w.as_bytes()));
+        if starts_word(first, "auth")
+            || word(0, "acl") && t.get(1).is_some_and(|x| starts_word(x, "setuser"))
+            || word(0, "config")
+                && word(1, "set")
+                && t.get(2)
+                    .is_some_and(|x| starts_word(x, "requirepass") || starts_word(x, "masterauth"))
+        {
+            return true;
+        }
+        if !(starts_word(first, "hello") || starts_word(first, "migrate")) {
+            return false;
+        }
+        // 첫 낱말 뒤 어디든 낱말 auth·auth2
+        let lb = line.as_bytes();
+        let start = lb.iter().position(|&c| !is_space(c)).unwrap_or(0) + 5;
+        (start..lb.len()).any(|i| (i == 0 || !is_word(lb[i - 1])) && (starts_word(&lb[i..], "auth") || starts_word(&lb[i..], "auth2")))
+    })
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Query,
@@ -91,6 +157,32 @@ fn replace_pattern(s: &str, pat: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 비밀번호_문장은_글_전체를_가린다() {
+        for s in [
+            "alter role a password 'x'",
+            "CREATE USER u WITH PASSWORD E'x'",
+            "alter user u password $$x$$",
+            "select 1;\n  AUTH secret",
+            "acl  setuser bob on >pw",
+            "CONFIG SET requirepass x",
+            "hello 3 AUTH u p",
+            "migrate h 6379 k 0 5000 AUTH2 u p",
+        ] {
+            assert_eq!(mask_secrets(s), MASKED_SQL, "{s}");
+        }
+        for s in [
+            "select password from users",
+            "select 'password'",
+            "authors",
+            "hello world",
+            "config get requirepass",
+            "select mypassword 'x'",
+        ] {
+            assert_eq!(mask_secrets(s), s, "{s}");
+        }
+    }
 
     #[test]
     fn 원문과_URL_인코딩과_소문자_퍼센트를_지운다() {

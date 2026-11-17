@@ -45,6 +45,8 @@ pub(crate) struct Config {
 /// 실행 결과다. 칸은 서버 텍스트이고 None 은 NULL 이다. limit 행이나 결과 예산을 넘으면 버리고 truncated 를 세운다.
 pub(crate) struct Rows {
     pub fields: Vec<(String, Oid)>,
+    /// 열마다 출처 테이블 OID 와 열 번호(RowDescription). 식 열은 (0, 0) 이다
+    pub sources: Vec<(Oid, i16)>,
     pub rows: Vec<Vec<Option<String>>>,
     pub truncated: bool,
     pub tag: String,
@@ -241,6 +243,11 @@ impl Conn {
         !self.broken && self.tx_status == b'I'
     }
 
+    /// 오류가 난 트랜잭션 안이다(ROLLBACK 만 받는다).
+    pub fn tx_failed(&self) -> bool {
+        self.tx_status == b'E'
+    }
+
     /// 읽다·쓰다 끊겨 다시 쓸 수 없는 연결인지다.
     pub fn is_broken(&self) -> bool {
         self.broken
@@ -315,6 +322,7 @@ impl Conn {
 
         let mut out = Rows {
             fields: Vec::new(),
+            sources: Vec::new(),
             rows: Vec::new(),
             truncated: false,
             tag: String::new(),
@@ -328,6 +336,7 @@ impl Conn {
                     let mut fields = body.fields();
                     while let Ok(Some(f)) = fields.next() {
                         out.fields.push((f.name().to_string(), f.type_oid()));
+                        out.sources.push((f.table_oid(), f.column_id()));
                     }
                 }
                 Message::DataRow(body) => {
@@ -367,6 +376,36 @@ impl Conn {
                         return Err(Error::msg(format!("catalog result exceeds {} bytes", self.result_budget)));
                     }
                     return first.map_or(Ok(out), Err);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// simple protocol 로 `COPY … FROM STDIN` 을 보내고 data 를 한 번에 넣는다. 돌려주는 것은 명령 태그다.
+    pub async fn copy_in(&mut self, sql: &str, data: &[u8]) -> Result<String, Error> {
+        let mut buf = BytesMut::new();
+        frontend::query(sql, &mut buf).map_err(|e| Error::msg(e.to_string()))?;
+        self.send_or_break(&buf).await?;
+        let (mut first, mut tag): (Option<Error>, String) = (None, String::new());
+        loop {
+            match self.read_or_break().await? {
+                Message::CopyInResponse(_) => {
+                    let mut b = BytesMut::new();
+                    // 큰 메시지 하나로 보내지 않고 1MiB 조각으로 나눈다
+                    for chunk in data.chunks(1 << 20) {
+                        frontend::CopyData::new(chunk).map_err(|e| Error::msg(e.to_string()))?.write(&mut b);
+                    }
+                    frontend::copy_done(&mut b);
+                    self.send_or_break(&b).await?;
+                }
+                Message::CommandComplete(body) => tag = body.tag().unwrap_or_default().to_string(),
+                Message::ErrorResponse(body) => {
+                    first.get_or_insert(Error::Pg(pg_error(&body)));
+                }
+                Message::ReadyForQuery(body) => {
+                    self.tx_status = body.status();
+                    return first.map_or(Ok(tag), Err);
                 }
                 _ => {}
             }

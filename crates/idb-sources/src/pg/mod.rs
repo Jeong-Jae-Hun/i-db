@@ -1,6 +1,8 @@
 //! PostgreSQL 접속 풀과 CLI 가 쓰는 조회. Go `internal/db` 의 backend·readonly·meta·export(SearchData)·schemadiff·linked 와 같다.
 
+mod edit;
 mod meta;
+mod ops;
 mod session;
 mod types;
 mod wire;
@@ -17,8 +19,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::linked::{self, LinkedColumn};
 use crate::schemadiff::{SnapColumn, SnapTable, Snapshot, column_def};
 use crate::{Error, redis};
+pub use edit::{Applied, Change, ChangeOp, ChangeSet, Origin, changes_sql, undo_changes};
 pub use meta::TableRef;
-pub use session::Session;
+pub use ops::{Catalog, CatalogColumn, CatalogSchema, CatalogTable, ERR_NOT_FOUND, Fk, Object, fk_where};
+pub use session::{Ran, Session};
 use wire::{Config, Rows};
 
 /// 풀 하나가 여는 연결 수 상한(pgxpool MaxConns)
@@ -70,6 +74,19 @@ impl Clients {
         let r = Arc::new(tokio::sync::Mutex::new(redis::RedisConn::open(c).await?));
         *slot = Some(r.clone());
         Ok(r)
+    }
+
+    /// 접속 uuid 의 풀을 닫고 칸을 비운다. 다음 pg 는 넘긴 Conn(바꾼 DB 등)으로 새로 연다(R27.1).
+    pub async fn forget(&self, uuid: &str) {
+        let slot = self.slots.lock().unwrap().get(uuid).cloned();
+        if let Some(slot) = slot
+            && let Some(pg) = slot.lock().await.take()
+        {
+            let idle: Vec<wire::Conn> = std::mem::take(&mut *pg.0.idle.lock().unwrap());
+            for c in idle {
+                c.close().await;
+            }
+        }
     }
 
     /// 풀에 남은 연결을 Terminate 로 닫는다. 소켓만 끊으면 서버 로그에 비정상 종료가 남는다.
@@ -255,7 +272,7 @@ impl Pg {
         let start = Instant::now();
         let mut p = self.acquire().await?;
         let params: Vec<Option<&str>> = args.iter().map(|a| Some(a.as_str())).collect();
-        let mut res = run_on(p.conn(), sql, &params).await?;
+        let (mut res, _) = run_on(p.conn(), sql, &params).await?;
         p.release();
         res.elapsed = start.elapsed();
         Ok(res)
@@ -455,10 +472,15 @@ impl Pg {
 
 /// 연결 c 에서 문장 하나를 실행한다(Go RunArgs 본문). 값은 텍스트로 바인딩해 서버가 타입을 정한다.
 /// select·values·table 읽기 문장은 커서로 MAX_ROWS+1 행만 받고, 그 밖의 문장(쓰기·RETURNING·SHOW·EXPLAIN)은 끝까지 받되 MAX_ROWS 행만 싣는다.
-pub(crate) async fn run_on(c: &mut wire::Conn, sql: &str, params: &[Option<&str>]) -> Result<QueryResult, Error> {
+/// 결과와 열마다의 출처(테이블 OID, 열 번호)를 돌려준다.
+pub(crate) async fn run_on(
+    c: &mut wire::Conn,
+    sql: &str,
+    params: &[Option<&str>],
+) -> Result<(QueryResult, Vec<(postgres_protocol::Oid, i16)>), Error> {
     let w = first_sql_word(sql);
     if !matches!(w.as_str(), "select" | "values" | "table") || !is_read_only_sql(sql) {
-        return c.query_cells(sql, params, MAX_ROWS).await.map(to_result);
+        return c.query_cells(sql, params, MAX_ROWS).await.map(with_sources);
     }
     // 트랜잭션 밖이면 커서용 트랜잭션을 직접 열고, 실패하면 직접 닫는다
     let began = !c.in_tx();
@@ -479,7 +501,7 @@ pub(crate) async fn run_on(c: &mut wire::Conn, sql: &str, params: &[Option<&str>
         if began {
             c.exec("COMMIT").await?;
         }
-        Ok(to_result(rows))
+        Ok(with_sources(rows))
     }
     .await;
     if r.is_err() && began {
@@ -514,6 +536,11 @@ async fn read_only(c: &mut wire::Conn, sql: &str, limit: usize) -> Result<QueryR
     };
     let rows = c.query_cells(run, &[], limit).await?;
     Ok(to_result(rows))
+}
+
+fn with_sources(mut rows: Rows) -> (QueryResult, Vec<(postgres_protocol::Oid, i16)>) {
+    let sources = std::mem::take(&mut rows.sources);
+    (to_result(rows), sources)
 }
 
 /// 텍스트 결과를 표로 만든다. NULL 은 "NULL" 이고 긴 칸은 query_cells 가 이미 잘랐다. 열이 없으면 명령 태그를 text 에 싣는다.
