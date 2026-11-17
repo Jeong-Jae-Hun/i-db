@@ -152,6 +152,8 @@ jobs:
           app=dist/i-db.app
           rm -rf "$app" && mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp target/aarch64-apple-darwin/release-gui/i-db "$app/Contents/MacOS/i-db"
+          # 동봉한 글꼴(OFL)·Orca 색(MIT)·Lucide 아이콘(ISC) 고지를 앱 안에도 둔다
+          cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
           sed "s/__VERSION__/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           plutil -lint "$app/Contents/Info.plist"
           iconset="$(mktemp -d)/AppIcon.iconset"
