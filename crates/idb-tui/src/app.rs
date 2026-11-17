@@ -139,6 +139,14 @@ pub enum Pend {
     User360 {
         tab: u64,
     },
+    PatternKeys {
+        conn: usize,
+        pattern: String,
+    },
+    Unlink,
+    Diff {
+        tab: u64,
+    },
 }
 
 pub type Then = Box<dyn FnOnce(&mut App, String)>;
@@ -378,6 +386,7 @@ pub struct App {
     pub signal_retry: HashMap<u64, (u64, usize, i64, bool)>,
     pub history: Option<crate::history::History>,
     pub history_view: Option<crate::history::HistoryView>,
+    pub deleting: Option<crate::ops::Deleting>,
 }
 
 impl App {
@@ -425,6 +434,7 @@ impl App {
             signal_retry: HashMap::new(),
             history: None,
             history_view: None,
+            deleting: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -661,6 +671,21 @@ impl App {
     pub fn on_key(&mut self, k: &str) {
         if !self.overlay.is_none() {
             return self.overlay_key(k);
+        }
+        // 키를 지우는 동안은 esc 로 멈추고, 종료는 멈춘 뒤에 한다(R42.1)
+        if let Some(d) = &mut self.deleting {
+            match k {
+                "esc" => {
+                    d.stop = true;
+                    self.status = "멈추는 중…".into();
+                    return;
+                }
+                "q" | "ctrl+c" => {
+                    self.status = "키를 지우는 중 — esc 로 멈춘 뒤 종료".into();
+                    return;
+                }
+                _ => {}
+            }
         }
         if self.history_view.is_some() {
             return self.history_key(k);
@@ -1085,7 +1110,9 @@ impl App {
             "X" => self.pattern_delete(n),
             "?" => self.open_keys(),
             "q" => self.request_quit(),
-            "I" | "F" | "=" | "N" | "E" | "M" | "alt+X" => {
+            "F" => self.data_search(n),
+            "=" => self.schema_compare(n),
+            "I" | "N" | "E" | "M" | "alt+X" => {
                 self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", key_label(k));
             }
             _ => {}

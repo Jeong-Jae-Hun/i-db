@@ -541,3 +541,41 @@ fn 쓰기_결과는_받은_행만_정렬하고_까닭을_알린다() {
     assert!(jobs(&mut a).is_empty());
     assert_eq!(a.status, "받은 행만 정렬: 쓰기 문장");
 }
+
+#[test]
+fn 패턴_일괄_삭제는_세고_미리_보인_뒤_500개씩_지운다() {
+    let mut a = app();
+    select_conn(&mut a, "cache");
+    a.on_key("X");
+    typed(&mut a, ":x");
+    a.on_key("enter");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["pattern"].as_str()),
+        (Some("redis_pattern_keys"), Some("*:x"))
+    );
+    let keys: Vec<String> = (0..600).map(|i| format!("k{i}:x")).collect();
+    a.on_done(id, Ok(json!({"keys": keys, "truncated": false})));
+    let s = screen(&mut a);
+    assert!(s.contains("미리 보기 21줄") && s.contains("k0:x"), "{s}");
+    assert!(s.lines().last().unwrap().contains("cache에서 키 600개 지움: y/N"));
+    a.on_key("y");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["keys"].as_array().unwrap().len(), req["confirm"].as_bool()),
+        (Some("redis_unlink"), 500, Some(true))
+    );
+    a.on_key("q");
+    assert!(!a.quit && a.status == "키를 지우는 중 — esc 로 멈춘 뒤 종료");
+    a.on_key("esc");
+    a.on_done(id, Ok(json!({"rows": 500})));
+    assert_eq!(a.status, "멈춤: 500개 지움");
+    assert!(a.deleting.is_none());
+    // 100,000개를 넘으면 묻지 않는다
+    a.on_key("X");
+    a.on_key("enter");
+    let (id, _) = jobs(&mut a).into_iter().find(|(_, r)| r["op"] == "redis_pattern_keys").unwrap();
+    a.on_done(id, Ok(json!({"keys": ["a"], "truncated": true})));
+    assert!(a.overlay.is_none());
+    assert_eq!(a.status, "키가 100,000개를 넘어 지우지 않음 (패턴을 좁히세요)");
+}

@@ -396,6 +396,9 @@ impl App {
                 }
                 Err(e) => self.result_done(tab, Err(e), "연결된 곳"),
             },
+            Pend::PatternKeys { conn, pattern } => self.pattern_counted(conn, pattern, res),
+            Pend::Unlink => self.unlinked(res),
+            Pend::Diff { tab } => self.diff_done(tab, res),
             Pend::User360 { tab } => match res.and_then(decode::<Vec<User360Item>>) {
                 Ok(items) => {
                     let Some(t) = self.tab_by_id(tab) else { return };
@@ -875,12 +878,6 @@ impl App {
         }
         let name = self.conns[conn].name.clone();
         self.call(Request::SwitchDb { conn: name, db }, Pend::SwitchDb { conn });
-    }
-
-    /// Redis 패턴 일괄 삭제(R42)는 미리 세기 → 확인 → 배치 UNLINK 인데 진행 표시·멈춤이 아직 없다.
-    pub(crate) fn pattern_delete(&mut self, n: usize) {
-        let _ = n;
-        self.status = "X 패턴 일괄 삭제는 Rust 화면에 아직 옮기지 않음".into();
     }
 
     // ─── Redis 값 (R4.1·R20) ───

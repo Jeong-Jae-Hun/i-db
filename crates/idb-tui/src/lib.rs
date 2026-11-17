@@ -13,6 +13,7 @@ pub mod help;
 mod history;
 pub mod input;
 pub mod keys;
+mod ops;
 mod render;
 mod state;
 pub mod tableview;
