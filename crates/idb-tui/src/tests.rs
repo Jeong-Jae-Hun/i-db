@@ -1024,6 +1024,7 @@ fn 흐름_탭은_모든_흐름을_한_번에_풀고_목록과_그림을_그린�
     a.switch_tab(a.tabs.len() - 2);
     keys(&mut a, &["h", "h", "enter"]);
     assert_eq!(a.status, "열 상세가 없음: hub");
+    a.remote = true;
     keys(&mut a, &["h", "enter"]);
     assert_eq!(a.status, "원격 접속에서는 아웃박스 상세를 열지 않음");
 }
@@ -1117,6 +1118,7 @@ fn 보드는_목록에서_골라_한_회차를_돌리고_패널_격자를_그린
     // 120칸 오른쪽 영역은 2열이다: j 는 아래 줄, Enter 는 설정 오류면 까닭만 보인다
     keys(&mut a, &["j", "enter"]);
     assert_eq!(a.status, "설정 오류: no such connection: x");
+    a.remote = true;
     keys(&mut a, &["k", "l", "enter"]);
     assert_eq!(a.status, "원격 접속에서는 패널 질의를 열지 않음");
     // 흐름 패널은 흐름 탭에서 그 흐름을 고른다
@@ -1148,8 +1150,7 @@ fn 로컬_보드는_파일의_refresh_와_패널_질의로_쿼리_탭을_연다(
         conns: vec![conn("logs-stg", "loki", "stg", "obs")],
         warnings: vec![],
     };
-    let files = crate::files::Files::new(dir.path().to_path_buf(), Default::default());
-    let mut a = App::new(info, Some(files), false, SessionCtx::disabled());
+    let mut a = App::new(info, None, false, SessionCtx::disabled());
     a.w = 120;
     a.h = 32;
     a.take_jobs();
@@ -1818,4 +1819,131 @@ fn 새_판_알림은_상태_글_뒤에_잇는다() {
     a.status.clear();
     a.update_available("v1.0.1");
     assert_eq!(a.status, "새 판 v1.0.1 — db update");
+}
+
+// ─── 쿼리 파일·즐겨찾기 (엔진 op) ───
+
+/// 골든 offline 프로젝트 사본을 LocalEngine 으로 열고 Files 가 그 엔진의 op 로 읽고 쓰게 한다.
+fn file_app() -> (App, tempfile::TempDir) {
+    fn copy(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for e in std::fs::read_dir(src).unwrap().flatten() {
+            if e.file_type().unwrap().is_dir() {
+                copy(&e.path(), &dst.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), dst.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    copy(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/offline"),
+        dir.path(),
+    );
+    let rt = std::sync::Arc::new(tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap());
+    let proj = idb_core::project::load_project(dir.path()).unwrap();
+    let engine = idb_engine::Engine::Local(std::sync::Arc::new(idb_engine::LocalEngine::new(proj, None)));
+    let info = rt.block_on(engine.project()).unwrap();
+    let e = engine.clone();
+    let files = crate::files::Files::new(Box::new(move |req| rt.block_on(e.call(req))));
+    let mut a = App::new(info, Some(files), false, SessionCtx::disabled());
+    a.w = 120;
+    a.h = 32;
+    (a, dir)
+}
+
+#[test]
+fn 쿼리_파일은_엔진으로_열고_자동_저장하고_밖에서_바뀌면_멈춘_뒤_사본을_남긴다() {
+    let (mut a, dir) = file_app();
+    let path = dir.path().join("queries/app/a.sql");
+    let before = std::fs::read_to_string(&path).unwrap();
+    a.open_query_file("queries/app/a.sql");
+    assert_eq!(a.cur().editor.value(), before);
+    assert_eq!(
+        a.cur().conn.map(|c| a.conns[c].name.as_str()),
+        Some("app-stg"),
+        "매핑된 접속으로 연다"
+    );
+
+    a.cur_mut().editor.set_value("select 2;\n");
+    let ti = a.tab;
+    a.autosave(ti);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "select 2;\n");
+
+    // 그 기계에서 파일을 바꾸면 자동 저장은 덮지 않고 멈춘다
+    std::fs::write(&path, "select 9;\n").unwrap();
+    a.cur_mut().editor.set_value("select 3;\n");
+    a.autosave(ti);
+    assert!(a.cur().autosave_stopped);
+    assert!(a.status.starts_with("파일이 밖에서 바뀌어 자동 저장 멈춤"), "{}", a.status);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "select 9;\n");
+
+    // 닫을 때는 충돌 사본에 남기고 원래 접속을 붙인다
+    let note = a.keep_text(ti).unwrap();
+    let copy = a
+        .files
+        .as_ref()
+        .unwrap()
+        .paths()
+        .into_iter()
+        .find(|p| p.contains("a-conflict-"))
+        .unwrap();
+    assert!(note.contains(&copy), "{note}");
+    assert_eq!(std::fs::read_to_string(dir.path().join(&copy)).unwrap(), "select 3;\n");
+    assert_eq!(
+        a.files.as_ref().unwrap().mapped(&copy),
+        Some(a.conns[a.cur().conn.unwrap()].uuid.as_str())
+    );
+
+    // Ctrl+S 는 덮어쓴다
+    a.on_key("ctrl+s");
+    assert_eq!(a.status, "저장함: queries/app/a.sql");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "select 3;\n");
+    assert!(!a.cur().autosave_stopped);
+}
+
+#[test]
+fn 첫_실행_저장은_엔진이_정한_길에_쓰고_트리_쿼리_묶음에_붙는다() {
+    let (mut a, dir) = file_app();
+    let c = a.conns.iter().position(|c| c.name == "app-stg").unwrap();
+    let before = a.files.as_ref().unwrap().for_conn(&a.conns[c].uuid).len();
+    let i = a.new_tab();
+    a.set_conn(i, Some(c));
+    a.tabs[i].editor.set_value("select 42;\n");
+    a.save_new_query(i);
+    let rel = a.tabs[i].file.clone().expect("파일이 붙는다");
+    assert!(rel.starts_with("queries/") && rel.contains("app-stg-"), "{rel}");
+    assert_eq!(a.status, format!("저장함: {rel}"));
+    assert_eq!(std::fs::read_to_string(dir.path().join(&rel)).unwrap(), "select 42;\n");
+    let f = a.files.as_ref().unwrap();
+    assert_eq!(f.for_conn(&a.conns[c].uuid).len(), before + 1);
+    assert_eq!(a.queries_for(c).unwrap().0, format!("쿼리 ({})", before + 1));
+}
+
+#[test]
+fn queries_밖의_길은_화면에서도_열지_않는다() {
+    let (mut a, _dir) = file_app();
+    a.open_query_file("../.env");
+    assert!(a.status.starts_with("열지 못함: 쿼리 파일 경로가 아님"), "{}", a.status);
+    assert!(a.tabs.iter().all(|t| t.file.is_none()));
+}
+
+#[test]
+fn 즐겨찾기는_엔진으로_저장하고_같은_이름은_물은_뒤_덮고_골라_연다() {
+    let (mut a, _dir) = file_app();
+    a.cur_mut().editor.set_value("select 1");
+    a.save_favorite();
+    typed(&mut a, "q1");
+    a.on_key("enter");
+    assert_eq!(a.status, "즐겨찾기 저장: q1");
+    a.cur_mut().editor.set_value("select 2");
+    a.save_favorite();
+    typed(&mut a, "q1");
+    a.on_key("enter");
+    assert!(matches!(a.overlay, Overlay::Confirm { .. }), "같은 이름은 묻는다");
+    a.on_key("y");
+    assert_eq!(a.status, "즐겨찾기 저장: q1");
+    a.open_favorites();
+    a.on_key("enter");
+    assert_eq!((a.cur().name.as_str(), a.cur().editor.value()), ("q1", "select 2"));
 }

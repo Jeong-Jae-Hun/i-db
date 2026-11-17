@@ -117,7 +117,7 @@ pub fn run(opts: Options) -> i32 {
             return 1;
         }
     };
-    let (engine, files) = match &opts.remote {
+    let engine = match &opts.remote {
         Some(name) => {
             let spec = match RemoteSpec::resolve(name) {
                 Ok(s) => s,
@@ -127,7 +127,7 @@ pub fn run(opts: Options) -> i32 {
                 }
             };
             match rt.block_on(RemoteEngine::connect(&spec)) {
-                Ok(r) => (Engine::Remote(Arc::new(r)), None),
+                Ok(r) => Engine::Remote(Arc::new(r)),
                 Err(e) => {
                     eprintln!("{e}");
                     return 1;
@@ -143,8 +143,7 @@ pub fn run(opts: Options) -> i32 {
                     return 1;
                 }
             };
-            let files = files::Files::new(proj.dir.clone(), proj.mapping.clone());
-            (Engine::Local(Arc::new(LocalEngine::new(proj, None))), Some(files))
+            Engine::Local(Arc::new(LocalEngine::new(proj, None)))
         }
     };
     let info = match rt.block_on(engine.project()) {
@@ -154,9 +153,11 @@ pub fn run(opts: Options) -> i32 {
             return 1;
         }
     };
+    // 쿼리 파일은 로컬이든 원격이든 엔진 op 로 읽고 쓴다
+    let files = files::Files::engine(engine.clone(), rt.handle().clone());
     let session = state::SessionCtx::load(std::path::Path::new(&info.dir));
     let kitty = keys::kitty_wanted() && std::io::IsTerminal::is_terminal(&std::io::stdin());
-    let mut app = App::new(info, files, keys::mac_style(kitty), session);
+    let mut app = App::new(info, Some(files), keys::mac_style(kitty), session);
     app.remote = opts.remote.is_some();
     match history::History::open() {
         Ok(h) => app.history = Some(h),
