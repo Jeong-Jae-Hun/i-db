@@ -6,6 +6,50 @@ use std::borrow::Cow;
 use gpui::{AssetSource, Hsla, IntoElement, ParentElement as _, Pixels, SharedString, Styled as _, div, svg};
 
 const MARK_BODY: &[u8] = include_bytes!("../../../../assets/brand/mark-body.svg");
+/// 접속 종류 아이콘(Lucide, ISC — THIRD_PARTY_NOTICES.md)
+const KINDS: &[(&str, &str, &[u8])] = &[
+    (
+        "postgresql",
+        "kind/postgresql.svg",
+        include_bytes!("../../../../assets/icons/kinds/postgresql.svg"),
+    ),
+    (
+        "redis",
+        "kind/redis.svg",
+        include_bytes!("../../../../assets/icons/kinds/redis.svg"),
+    ),
+    (
+        "opensearch",
+        "kind/opensearch.svg",
+        include_bytes!("../../../../assets/icons/kinds/opensearch.svg"),
+    ),
+    ("loki", "kind/loki.svg", include_bytes!("../../../../assets/icons/kinds/loki.svg")),
+    (
+        "prometheus",
+        "kind/prometheus.svg",
+        include_bytes!("../../../../assets/icons/kinds/prometheus.svg"),
+    ),
+    (
+        "grafana",
+        "kind/grafana.svg",
+        include_bytes!("../../../../assets/icons/kinds/grafana.svg"),
+    ),
+    (
+        "dynamodb",
+        "kind/dynamodb.svg",
+        include_bytes!("../../../../assets/icons/kinds/dynamodb.svg"),
+    ),
+    (
+        "athena",
+        "kind/athena.svg",
+        include_bytes!("../../../../assets/icons/kinds/athena.svg"),
+    ),
+    ("aws", "kind/aws.svg", include_bytes!("../../../../assets/icons/kinds/aws.svg")),
+];
+
+pub fn kind_icon_path(kind: &str) -> Option<&'static str> {
+    KINDS.iter().find(|(k, _, _)| *k == kind).map(|(_, p, _)| *p)
+}
 const MARK_DOT: &[u8] = include_bytes!("../../../../assets/brand/mark-dot.svg");
 
 /// 앱 자산: 브랜드 마크 조각 + gpui-kit 아이콘
@@ -16,6 +60,7 @@ impl AssetSource for Assets {
         match path {
             "brand/mark-body.svg" => Ok(Some(Cow::Borrowed(MARK_BODY))),
             "brand/mark-dot.svg" => Ok(Some(Cow::Borrowed(MARK_DOT))),
+            p if p.starts_with("kind/") => Ok(KINDS.iter().find(|(_, kp, _)| *kp == p).map(|(_, _, b)| Cow::Borrowed(*b))),
             _ => gpui_kit_assets::Assets.load(path),
         }
     }

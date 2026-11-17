@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use idb_core::sqlsafe::split_args;
 use idb_engine::{Engine, PatternKeys, RawValue, RedisEditResult, ResultSet, ScanResult};
 
@@ -301,20 +301,13 @@ impl RedisView {
                     .child(div().flex_1())
                     .child(
                         Button::new("redis-form-cancel")
-                            .small()
                             .label("취소")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
-                    .child(
-                        Button::new("redis-form-ok")
-                            .small()
-                            .primary()
-                            .label("확인")
-                            .on_click(move |_, window, cx| {
-                                ok2(window, cx);
-                                window.close_dialog(cx);
-                            }),
-                    ),
+                    .child(Button::new("redis-form-ok").primary().label("확인").on_click(move |_, window, cx| {
+                        ok2(window, cx);
+                        window.close_dialog(cx);
+                    })),
             )
             .on_ok(move |_, window, cx| {
                 ok(window, cx);
@@ -424,7 +417,7 @@ impl RedisView {
         let raw = self.raw.as_ref()?;
         let theme = cx.theme().clone();
         let typ = raw.typ.clone();
-        let btn = |id: &'static str, label: &'static str| Button::new(id).xsmall().ghost().label(label);
+        let btn = |id: &'static str, label: &'static str| Button::new(id).ghost().label(label);
         let mut bar = h_flex()
             .gap_1()
             .px_2()
@@ -587,7 +580,6 @@ impl RedisView {
             })))
             .child(
                 Button::new("r-del")
-                    .xsmall()
                     .danger()
                     .label("키 지우기")
                     .on_click(cx.listener(|v, _, w, cx| v.confirm_delete_key(w, cx))),
@@ -645,6 +637,7 @@ impl RedisView {
 impl Render for RedisView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let sc = super::kit::scale(&theme);
         let edit_bar = self.render_edit_bar(cx);
         let mut list = v_flex().id("redis-keys").flex_1().min_h_0().overflow_y_scroll();
         for (i, k) in self.keys.iter().enumerate() {
@@ -654,6 +647,9 @@ impl Render for RedisView {
                 div()
                     .id(("key", i))
                     .px_2()
+                    .min_h(px(sc.row()))
+                    .py(px(sc.s4()))
+                    .rounded(theme.radius)
                     .truncate()
                     .cursor_pointer()
                     .when(selected, |d| d.bg(theme.list_active))
@@ -687,16 +683,10 @@ impl Render for RedisView {
                                 h_flex()
                                     .p_1()
                                     .gap_1()
-                                    .child(div().flex_1().child(Input::new(&self.pattern).small()))
-                                    .child(
-                                        Button::new("scan")
-                                            .xsmall()
-                                            .label("찾기")
-                                            .on_click(cx.listener(|v, _, w, cx| v.scan(w, cx))),
-                                    )
+                                    .child(div().flex_1().child(Input::new(&self.pattern)))
+                                    .child(Button::new("scan").label("찾기").on_click(cx.listener(|v, _, w, cx| v.scan(w, cx))))
                                     .child(
                                         Button::new("pattern-del")
-                                            .xsmall()
                                             .ghost()
                                             .label("지우기…")
                                             .tooltip("패턴에 맞는 키를 세어 보이고 확인하면 지운다")
@@ -722,10 +712,9 @@ impl Render for RedisView {
                     .gap_1()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(div().flex_1().child(Input::new(&self.command).small()))
+                    .child(div().flex_1().child(Input::new(&self.command)))
                     .child(
                         Button::new("redis-run")
-                            .xsmall()
                             .primary()
                             .label("보내기")
                             .on_click(cx.listener(|v, _, w, cx| v.run_command(w, cx))),

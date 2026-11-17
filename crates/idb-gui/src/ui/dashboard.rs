@@ -10,7 +10,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, rems,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
-use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, IconName, h_flex, v_flex};
 use idb_engine::{BoardResult, BoardSummary, ConnSummary, Engine, FlowResult, HealthInfo, OutboxExhausted};
 
 use crate::vm::dashboard::{self, PanelKind, State};
@@ -185,6 +185,7 @@ impl DashboardView {
 
     fn render_health(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
+        let sc = super::kit::scale(&theme);
         let exhausted: i64 = self.outbox.iter().map(|o| o.exhausted).sum();
         let mut cards = h_flex().gap_2().flex_wrap();
         for (title, value, warn) in dashboard::summary(&self.conns, &self.health, exhausted) {
@@ -225,7 +226,8 @@ impl DashboardView {
                 h_flex()
                     .gap_3()
                     .px_3()
-                    .h(rems(2.0))
+                    .min_h(px(sc.row()))
+                    .py(px(sc.s4()))
                     .rounded(theme.radius)
                     .hover(|s| s.bg(theme.secondary.opacity(0.5)))
                     .child(div().w(rems(1.0)).text_color(self.state_color(st, cx)).child(st.symbol()))
@@ -262,6 +264,7 @@ impl DashboardView {
 
     fn render_flows(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
+        let sc = super::kit::scale(&theme);
         let flows = match &self.flows {
             None => return div().text_color(theme.muted_foreground).child("읽는 중…").into_any_element(),
             Some(Err(e)) => return div().text_color(theme.danger).child(e.clone()).into_any_element(),
@@ -282,7 +285,8 @@ impl DashboardView {
                     .id(("flow", i))
                     .gap_2()
                     .px_2()
-                    .h(rems(1.9))
+                    .min_h(px(sc.row()))
+                    .py(px(sc.s4()))
                     .rounded(theme.radius)
                     .cursor_pointer()
                     .when(i == sel, |d| d.bg(theme.secondary))
@@ -469,7 +473,6 @@ impl DashboardView {
                     .gap_2()
                     .child(
                         Button::new("board-prod")
-                            .xsmall()
                             .with_variant(if self.board_prod {
                                 ButtonVariant::Danger
                             } else {
@@ -497,9 +500,9 @@ impl DashboardView {
 impl Render for DashboardView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let sc = super::kit::scale(&theme);
         let tab = |id: &'static str, label: &'static str, s: Section, cur: Section| {
             Button::new(id)
-                .small()
                 .with_variant(if s == cur { ButtonVariant::Secondary } else { ButtonVariant::Ghost })
                 .label(label)
         };
@@ -515,7 +518,7 @@ impl Render for DashboardView {
                 h_flex()
                     .gap_1()
                     .px_3()
-                    .h(rems(2.5))
+                    .min_h(px(sc.hit() + sc.s8()))
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
@@ -543,7 +546,6 @@ impl Render for DashboardView {
                     })
                     .child(
                         Button::new("dash-refresh")
-                            .small()
                             .ghost()
                             .icon(IconName::RefreshCw)
                             .label("다시 보기")
