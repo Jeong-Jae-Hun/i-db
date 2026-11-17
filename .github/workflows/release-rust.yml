@@ -104,7 +104,7 @@ jobs:
 
   darwin:
     needs: draft
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 40
     permissions:
       contents: write
@@ -134,7 +134,7 @@ jobs:
 
   gui:
     needs: draft
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     permissions:
       contents: write
