@@ -1,0 +1,33 @@
+args: ["help"]
+exit: 0
+--- stdout
+사용법: db                 화면(TUI) 실행
+        db mcp             읽기 전용 MCP 서버
+        db <명령> [플래그]  화면 없이 실행하고 끝냄
+
+명령:
+  conns        접속 목록(이름·그룹·종류·환경·호스트·DB, 비밀번호 없음)
+  schemas      스키마 목록
+  tables       테이블·뷰 목록(기본 스키마 public). 저장소 접속은 맨 위 목록(인덱스·라벨·지표·테이블)
+  describe     열·제약·인덱스(tsv·csv 에서 제약·인덱스는 stderr). 테이블은 스키마.테이블 로도 쓴다
+  ddl          CREATE 문
+  query        SQL 한 문장 실행(기본 READ ONLY). 저장소 접속은 그 질의(OpenSearch·LogQL·PromQL·PartiQL)를 보내고 비싼 질의는 --force
+  logs         Loki 로그 질의(query 와 같고 범위 플래그를 받음, Grafana 접속도)
+  metrics      Prometheus 지표 질의(Grafana 접속도)
+  explain      실행 계획(ANALYZE 없음)
+  redis        Redis 명령 하나(기본 읽기 명령만). - 로 시작하는 인자는 -- 뒤에 쓴다
+  user360      사용자 한눈에 보기(R51). prod 를 조회해 --prod 가 필요하다
+  search       스키마의 글자 열 전체 검색(테이블당 5행)
+  linked       칸 값이 든 다른 테이블을 이름 규칙으로 찾아 셈(R73). 같은 그룹·환경의 PostgreSQL 접속도, 실패가 있으면 1
+  schema-diff  두 스키마의 테이블·열·제약·인덱스 비교
+  status       모든 접속(또는 -c 로 고른 접속)을 동시에 확인해 상태·지연·버전·주요 수치를 찍음(R64.3). prod 는 --prod 일 때만, 하나라도 실패하면 1
+  flows        이벤트 흐름(.dbtui/flows.json: 아웃박스 → SNS → SQS → DLQ·Lambda)을 한 번 풀어 상자마다 한 줄을 찍음(R69). prod 는 --prod 일 때만, 설정 오류·실패가 있으면 1
+  board        쿼리 보드(.dbtui/boards/<이름>.json)의 패널을 한 번 돌려 패널마다 한 줄을 찍음(R70). 이름이 없으면 보드 목록, prod 패널은 --prod 일 때만, 실패한 패널이 있으면 1
+  history      실행 기록 목록과 결과 사본(R11.5). db help history
+  update       GitHub 릴리스의 최신 판으로 db 를 바꿈(R65). --check 는 새 판이 있으면 10. db help update
+  conn         db 전용 접속 추가·고치기·지우기·시험(R59, .dbtui/connections.json). db help conn
+
+공통 플래그: -p 경로 -c 접속 --format table|tsv|csv|json --max-rows N --timeout 30s --prod --decrypt
+종료 코드: 0 성공 · 1 실행 오류 · 2 사용법 · 3 안전장치 거절
+명령별 사용법: db help <명령> 또는 db <명령> -h
+--- stderr

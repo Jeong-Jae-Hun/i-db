@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourceManagerImpl" format="xml" multifile-model="true">
+    <data-source source="LOCAL" name="app-stg" group="grp" uuid="00000000-0000-0000-0000-000000000001">
+      <driver-ref>postgresql</driver-ref>
+      <jdbc-url>jdbc:postgresql://127.0.0.1:1/app</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="app-prod" group="grp" uuid="00000000-0000-0000-0000-000000000002">
+      <driver-ref>postgresql</driver-ref>
+      <jdbc-url>jdbc:postgresql://127.0.0.1:1/app?sslmode=require</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="app-stg-redis" group="grp" uuid="00000000-0000-0000-0000-000000000003">
+      <driver-ref>redis</driver-ref>
+      <jdbc-url>jdbc:redis://127.0.0.1:1/0</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="app-prod-redis" group="grp" uuid="00000000-0000-0000-0000-000000000004">
+      <driver-ref>redis</driver-ref>
+      <jdbc-url>jdbc:redis://127.0.0.1:1/0</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="nogroup-stg" uuid="00000000-0000-0000-0000-000000000005">
+      <driver-ref>postgresql</driver-ref>
+      <jdbc-url>jdbc:postgresql://127.0.0.1:1/other</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="한글-stg" group="팀" uuid="00000000-0000-0000-0000-000000000006">
+      <driver-ref>postgresql</driver-ref>
+      <jdbc-url>jdbc:postgresql://localhost/app</jdbc-url>
+    </data-source>
+  </component>
+</project>

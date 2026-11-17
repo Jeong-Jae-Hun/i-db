@@ -1,0 +1,23 @@
+args: ["help","conn"]
+exit: 0
+--- stdout
+사용법:
+  db conn add <이름> --url URL [--group 그룹] [--kind 종류] [--user 사용자] [--auth A] [--region R] [--profile P] [--workgroup W] [--output S3] [--password-stdin] [--force]
+  db conn edit <이름> [--url URL] [--host 호스트] [--port 포트] [--db DB] [--user 사용자] [--group 그룹] [--auth A] [--region R] [--profile P] [--workgroup W] [--output S3] [--password-stdin] [--force]
+  db conn rm <이름> [--yes]
+  db conn test <이름> | --url URL
+  db conn folder <이름> <폴더> | <이름> --reset | --rename <옛 폴더> <새 폴더>
+
+  접속은 .dbtui/connections.json, 비밀번호는 .env 의 PG_<이름>_PASSWORD·REDIS_<이름>_PASSWORD(URL 인코딩)에 둔다.
+  읽기 전용 저장소(R60)는 --kind opensearch|loki|prometheus|grafana|dynamodb|athena 와 http(s) --url 로 더한다(DynamoDB 의 --url 은 선택 엔드포인트, Athena 는 --url 없음).
+  Athena(R68)는 --region 이 필요하고 --workgroup(비우면 primary)·--output s3://bucket/prefix/(비우면 작업 그룹 설정)를 받는다.
+  --auth 는 basic·sigv4(OpenSearch)·token(Grafana), sigv4·DynamoDB 는 --region 이 필요하다. 비밀값 키는 OS_·LOKI_·PROM_·GRAFANA_<이름>_TOKEN 이다.
+  비밀번호는 --url 또는 --password-stdin 으로만 받고 찍지 않는다. edit 에서 주지 않으면 그대로 둔다.
+  add·edit 는 저장 전에 접속을 시험하고, 실패하면 --force 없이는 저장하지 않는다(종료 코드 1).
+  rm 은 묻고 지운다. 표준 입력이 터미널이 아니면 --yes 가 필요하다. DataGrip 접속은 DataGrip 에서 고친다.
+  prod 접속(R6.2)에 붙는 add·edit·test 는 --prod 가 필요하다.
+  folder 는 트리에 보일 폴더만 바꾼다(.dbtui/folders.json, DataGrip 접속도). 그룹·암호화 키는 그대로다.
+
+공통 플래그: -p 경로 --timeout 30s
+종료 코드: 0 성공 · 1 실행 오류(시험 실패 포함) · 2 사용법 · 3 안전장치 거절
+--- stderr

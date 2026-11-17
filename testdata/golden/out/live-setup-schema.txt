@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","create schema golden","--write","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","text":"CREATE SCHEMA","elapsed_ms":0}
+--- stderr

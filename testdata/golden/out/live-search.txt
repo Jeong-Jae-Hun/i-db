@@ -1,0 +1,5 @@
+args: ["search","-p","{P}","-c","golden-local","-s","golden","넓은","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["테이블","열","PK","값"],"types":[],"rows":[["t","name","id=3","넓은글자열맞춤"]],"truncated":false,"elapsed_ms":0}
+--- stderr

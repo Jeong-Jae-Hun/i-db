@@ -1,0 +1,8 @@
+args: ["query","-p","{P}","-c","golden-local","select * from golden.t order by id","--format","tsv"]
+exit: 0
+--- stdout
+id	name	score	ok	at	doc	tags	raw	uid	note
+1	하나	1.50	t	2026-01-02 03:04:05	{"a": 1, "b": [1, 2]}	{x,y}	\\x0102	00000000-0000-0000-0000-00000000000a	NULL
+2	two\ttab	-3.00	f	NULL	NULL	{}	NULL	NULL	line1\nline2
+3	넓은글자열맞춤	1000000.00	NULL	2026-12-31 23:59:59	[]	NULL	\\x	NULL	
+--- stderr

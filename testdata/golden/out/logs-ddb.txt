@@ -1,0 +1,5 @@
+args: ["logs","-p","{P}","-c","ddb-stg","{app=\"x\"}"]
+exit: 2
+--- stdout
+--- stderr
+ddb-stg 는 logs 접속이 아님 (dynamodb)

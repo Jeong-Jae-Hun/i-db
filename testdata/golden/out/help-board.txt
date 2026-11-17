@@ -1,0 +1,20 @@
+args: ["help","board"]
+exit: 0
+--- stdout
+사용법: db board [이름] [--format table|tsv|json] [--prod]
+  쿼리 보드(.dbtui/boards/<이름>.json)의 패널을 한 번 돌려 패널마다 한 줄을 찍음(R70). 이름이 없으면 보드 목록, prod 패널은 --prod 일 때만, 실패한 패널이 있으면 1
+
+플래그:
+  -c string
+    	접속 이름(db conns)
+  -format string
+    	출력 형식 table|tsv|csv|json (기본: 터미널이면 table, 아니면 tsv)
+  -max-rows int
+    	최대 행 수(상한 10000) (default 200)
+  -p string
+    	DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더 (default "/golden/project")
+  -prod
+    	prod 접속 허용(읽기만)
+  -timeout duration
+    	전체 시간 제한 (default 30s)
+--- stderr

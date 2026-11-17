@@ -1,0 +1,5 @@
+args: ["conn","add","x","--kind","redis","--url","postgres://u@h/d","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn add: --kind redis 가 URL 종류(postgresql)와 다름

@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","select 1"]
+exit: 2
+--- stdout
+--- stderr
+-c <접속 이름> 이 필요함 (db conns)

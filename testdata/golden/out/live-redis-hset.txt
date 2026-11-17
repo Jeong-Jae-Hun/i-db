@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","golden-local-redis","--write","HSET","golden:h","f1","v1","f2","v2","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local-redis","text":"2","elapsed_ms":0}
+--- stderr

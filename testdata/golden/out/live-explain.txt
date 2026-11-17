@@ -1,0 +1,5 @@
+args: ["explain","-p","{P}","-c","golden-local","select 1","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["QUERY PLAN"],"types":["text"],"rows":[["Result  (cost=0.00..0.01 rows=1 width=4)"]],"truncated":false,"elapsed_ms":0}
+--- stderr

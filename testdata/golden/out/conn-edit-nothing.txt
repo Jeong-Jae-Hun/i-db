@@ -1,0 +1,5 @@
+args: ["conn","edit","logs-stg","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn edit: 고칠 값이 없음 (--url --host --port --db --user --group --auth --region --profile --workgroup --output --password-stdin)

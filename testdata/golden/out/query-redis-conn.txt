@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","app-stg-redis","select 1"]
+exit: 2
+--- stdout
+--- stderr
+app-stg-redis 는 postgresql 접속이 아님

@@ -1,0 +1,5 @@
+args: ["linked","-p","{P}","-c","app-stg","--column","user_id"]
+exit: 2
+--- stdout
+--- stderr
+--column 과 --value 가 필요함

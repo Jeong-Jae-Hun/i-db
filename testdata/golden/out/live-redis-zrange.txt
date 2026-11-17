@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","golden-local-redis","--format","json","--","ZRANGE","golden:z","0","-1","WITHSCORES"]
+exit: 0
+--- stdout
+{"conn":"golden-local-redis","cols":["#","value"],"types":[],"rows":[["0","[one, 1]"],["1","[two, 2]"]],"truncated":false,"elapsed_ms":0}
+--- stderr

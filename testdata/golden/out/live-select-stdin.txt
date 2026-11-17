@@ -1,0 +1,6 @@
+args: ["query","-p","{P}","-c","golden-local","--format","tsv"]
+exit: 0
+--- stdout
+n
+3
+--- stderr

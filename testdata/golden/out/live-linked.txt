@@ -1,0 +1,5 @@
+args: ["linked","-p","{P}","-c","golden-local","--table","golden.gparent","--column","id","--value","1","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["connection","table","column","rows","note"],"types":["text","text","text","text","text"],"rows":[["golden-local","golden.gparent","id","1","주인 테이블"],["golden-local","golden.gchild","gparent_id","2",""]],"text":"연결된 곳 2 · 접속 1곳","truncated":false,"elapsed_ms":0}
+--- stderr

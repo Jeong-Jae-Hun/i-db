@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","select * from golden.none","--format","json"]
+exit: 1
+--- stdout
+--- stderr
+ERROR: relation "golden.none" does not exist (SQLSTATE 42P01)

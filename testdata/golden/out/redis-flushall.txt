@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","app-stg-redis","--write","FLUSHALL"]
+exit: 3
+--- stdout
+--- stderr
+위험: FLUSHALL (--force)

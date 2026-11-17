@@ -1,0 +1,621 @@
+[
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Show the detail table of an openable aws_tree node (subscriptions, queue attributes, event source mappings, rule targets, schedule, recent executions, S3 object metadata and small text body). Read-only. SNS, SQS and S3 nodes are refused unless DB_ALLOW_BILLED=1.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "aws connection name"
+        },
+        "path": {
+          "type": "string",
+          "description": "node path from aws_tree; empty for the top folders"
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "additionalProperties": false
+    },
+    "name": "aws_open",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "description": "non-tabular result such as a command tag or a string value"
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "true when rows or values were cut to fit the limits"
+        }
+      },
+      "required": [
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List the children of a node in an aws connection (SNS topics and subscriptions, SQS queues with depth and DLQ, Lambda, EventBridge, Scheduler, Step Functions, S3). Read-only List/Get/Describe calls only; never receives, sends or deletes messages. SNS, SQS and S3 are billed per request and are hidden (and refused by path) unless the server runs with DB_ALLOW_BILLED=1. Start with an empty path.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "aws connection name"
+        },
+        "path": {
+          "type": "string",
+          "description": "node path from aws_tree; empty for the top folders"
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "additionalProperties": false
+    },
+    "name": "aws_tree",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "nodes": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string",
+                "description": "pass to aws_tree or aws_open"
+              },
+              "info": {
+                "type": "string"
+              },
+              "warn": {
+                "type": "boolean",
+                "description": "info needs attention, e.g. messages waiting in a dead-letter queue"
+              },
+              "has_children": {
+                "type": "boolean"
+              },
+              "openable": {
+                "type": "boolean",
+                "description": "aws_open returns a table for this node"
+              }
+            },
+            "required": [
+              "name",
+              "path",
+              "has_children",
+              "openable"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "nodes",
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Describe a PostgreSQL table or view: columns (name, type, nullable, default, comment) as rows, plus comment, constraints and indexes as text.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "PostgreSQL connection name"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "schema",
+        "table"
+      ],
+      "additionalProperties": false
+    },
+    "name": "describe_table",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "description": "non-tabular result such as a command tag or a string value"
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "true when rows or values were cut to fit the limits"
+        }
+      },
+      "required": [
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List PostgreSQL, Redis and read-only source connections (name, group, kind, env, and AWS region/profile). Passwords, tokens and credentials are never returned.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "list_connections",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "connections": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "group": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "description": "postgresql, redis, or a read-only source: opensearch, loki, prometheus, grafana, dynamodb, athena, aws"
+              },
+              "env": {
+                "type": "string",
+                "description": "prod, stg or local (derived from the name)"
+              },
+              "region": {
+                "type": "string",
+                "description": "AWS region (dynamodb, athena, aws)"
+              },
+              "profile": {
+                "type": "string",
+                "description": "AWS profile name; empty means the default credential chain"
+              }
+            },
+            "required": [
+              "name",
+              "group",
+              "kind",
+              "env"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "connections"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List non-system schemas of a PostgreSQL connection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "connection name from list_connections"
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "additionalProperties": false
+    },
+    "name": "list_schemas",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "names": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "names",
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List tables, views, materialized views and foreign tables in a PostgreSQL schema.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "PostgreSQL connection name"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "schema"
+      ],
+      "additionalProperties": false
+    },
+    "name": "list_tables",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "names": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "names",
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Run one read-only statement. PostgreSQL: inside a READ ONLY transaction (30s timeout) on a connection that is discarded afterwards; writes and multiple statements are rejected, and calls to known side-effect functions (pg_terminate_backend, pg_notify, dblink, advisory locks, file access, large objects, ...) are blocked on a best-effort basis only, so connect with a read-only database role for real protection. Read-only sources (Athena, DynamoDB, OpenSearch, Loki, Prometheus, Grafana) get their own query language; write-like queries are refused before sending, and expensive ones (Athena SELECT without LIMIT or WHERE, DynamoDB full scan, OpenSearch size over 10000) are refused unless force is true. Athena and DynamoDB data reads are billed per request or byte scanned, so they are refused unless the server runs with DB_ALLOW_BILLED=1 (the error says so; nothing was sent). aws connections have no query language; use aws_tree and aws_open.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "PostgreSQL or read-only source connection name (not aws)"
+        },
+        "sql": {
+          "type": "string",
+          "description": "a single read-only statement: PostgreSQL or Athena SQL (select, with, show, describe, explain), OpenSearch SQL or DSL, LogQL, PromQL or DynamoDB PartiQL SELECT"
+        },
+        "max_rows": {
+          "type": "integer",
+          "description": "maximum rows to return; capped by the server limit"
+        },
+        "force": {
+          "type": "boolean",
+          "description": "send a query the source flagged as expensive. Athena bills per byte scanned and DynamoDB scans read the whole table; set only after the user accepts the cost. Ignored for PostgreSQL"
+        }
+      },
+      "required": [
+        "connection",
+        "sql"
+      ],
+      "additionalProperties": false
+    },
+    "name": "query",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "description": "non-tabular result such as a command tag or a string value"
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "true when rows or values were cut to fit the limits"
+        }
+      },
+      "required": [
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Run one read-only Redis command such as GET, HGET, TTL or LRANGE key 0 99. Write and admin commands, KEYS, CLIENT, SLOWLOG, MONITOR and whole-collection reads (SMEMBERS, HGETALL, HKEYS, HVALS) are rejected; range reads must be bounded (LRANGE/ZRANGE index span, XRANGE COUNT, ZRANGE BYSCORE LIMIT) and SCAN COUNT is at most 1000.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "Redis connection name"
+        },
+        "args": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "command and arguments, e.g. [\"HGET\", \"user:1\", \"name\"]"
+        }
+      },
+      "required": [
+        "connection",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "name": "redis_command",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "description": "non-tabular result such as a command tag or a string value"
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "true when rows or values were cut to fit the limits"
+        }
+      },
+      "required": [
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Show a Redis key's type, TTL and value (strings, hashes, lists, sets, sorted sets, streams).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "Redis connection name"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "connection",
+        "key"
+      ],
+      "additionalProperties": false
+    },
+    "name": "redis_get",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rows": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": [
+              "null",
+              "array"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "description": "non-tabular result such as a command tag or a string value"
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "true when rows or values were cut to fit the limits"
+        }
+      },
+      "required": [
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List Redis keys matching a pattern using SCAN (sorted, deduplicated, stops after 10s).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "type": "string",
+          "description": "Redis connection name"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "SCAN MATCH pattern, default *"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "maximum keys to return, default 100, at most 1000"
+        }
+      },
+      "required": [
+        "connection"
+      ],
+      "additionalProperties": false
+    },
+    "name": "redis_scan",
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "names": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "names",
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

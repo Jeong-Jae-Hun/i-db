@@ -1,0 +1,5 @@
+args: ["history","--format","tsv"]
+exit: 0
+--- stdout
+id	time	conn	rows	elapsed	result	sql	err
+--- stderr

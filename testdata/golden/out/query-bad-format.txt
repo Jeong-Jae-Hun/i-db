@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","app-stg","--format","xml","select 1"]
+exit: 2
+--- stdout
+--- stderr
+db query: --format must be one of table|tsv|csv|json

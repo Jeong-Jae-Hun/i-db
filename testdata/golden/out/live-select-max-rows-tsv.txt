@@ -1,0 +1,9 @@
+args: ["query","-p","{P}","-c","golden-local","select g from generate_series(1, 5) g","--max-rows","3","--format","tsv"]
+exit: 0
+--- stdout
+g
+1
+2
+3
+--- stderr
+결과가 잘림: 3행까지 (--max-rows 로 늘림)

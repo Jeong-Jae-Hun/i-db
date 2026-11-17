@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","select g from generate_series(1, 5) g","--max-rows","3","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["g"],"types":["int4"],"rows":[["1"],["2"],["3"]],"truncated":true,"elapsed_ms":0}
+--- stderr

@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","create table golden.gchild (id int primary key, gparent_id int)","--write","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","text":"CREATE TABLE","elapsed_ms":0}
+--- stderr

@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","select 1::int2 a, 2::int8 b, 1.5::float8 c, 'x'::varchar d, now()::date - now()::date e, interval '1 day 2 hours' f, '{\"k\":\"v\"}'::json g, array[1,2] h, null::text i","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["a","b","c","d","e","f","g","h","i"],"types":["int2","int8","float8","varchar","int4","interval","json","_int4","text"],"rows":[["1","2","1.5","x","0","1 day 02:00:00","{\"k\":\"v\"}","{1,2}",null]],"truncated":false,"elapsed_ms":0}
+--- stderr

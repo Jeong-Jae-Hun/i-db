@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","golden-local","insert into golden.t values (1, '하나', 1.50, true, '2026-01-02 03:04:05', '{\"a\": 1, \"b\": [1, 2]}', '{x,y}', '\\x0102', '00000000-0000-0000-0000-00000000000a', null), (2, 'two\ttab', -3, false, null, null, '{}', null, null, 'line1\nline2'), (3, '넓은글자열맞춤', 1000000, null, '2026-12-31 23:59:59', '[]', null, '\\x', null, '')","--write","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","text":"INSERT 0 3","elapsed_ms":0}
+--- stderr

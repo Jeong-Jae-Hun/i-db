@@ -1,0 +1,5 @@
+args: ["redis","-p","{P}","-c","app-prod-redis","--prod","--write","SET","a","b"]
+exit: 3
+--- stdout
+--- stderr
+prod 쓰기는 CLI 에서 하지 않음 (화면에서 R6·R54 를 거침)

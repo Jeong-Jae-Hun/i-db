@@ -1,0 +1,6 @@
+args: ["query","-p","{P}","-c","golden-local","select enc('a@example.com') as e","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","cols":["e"],"types":["text"],"rows":[["00112233445566778899aabbccddeeff^|^b778f7fe6b0577adc333512737845edc"]],"truncated":false,"elapsed_ms":0}
+--- stderr
+enc() 1개 암호화

@@ -1,0 +1,7 @@
+[
+  {"uuid": "10000000-0000-0000-0000-000000000001", "name": "logs-stg", "group": "mon", "kind": "loki", "user": "loki_user", "url": "http://127.0.0.1:1", "auth": "basic"},
+  {"uuid": "10000000-0000-0000-0000-000000000002", "name": "search-stg", "group": "data", "kind": "opensearch", "url": "http://127.0.0.1:1"},
+  {"uuid": "10000000-0000-0000-0000-000000000003", "name": "metrics-prod", "group": "mon", "kind": "prometheus", "url": "http://127.0.0.1:1"},
+  {"uuid": "10000000-0000-0000-0000-000000000004", "name": "ddb-stg", "group": "aws", "kind": "dynamodb", "region": "ap-northeast-2", "profile": "golden"},
+  {"uuid": "10000000-0000-0000-0000-000000000005", "name": "aws-stg", "group": "aws", "kind": "aws", "region": "ap-northeast-2", "profile": "golden"}
+]

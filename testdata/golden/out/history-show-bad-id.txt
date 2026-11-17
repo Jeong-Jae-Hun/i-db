@@ -1,0 +1,5 @@
+args: ["history","show","../x"]
+exit: 1
+--- stdout
+--- stderr
+결과 사본이 없음: ../x

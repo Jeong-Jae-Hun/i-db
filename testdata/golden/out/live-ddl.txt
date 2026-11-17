@@ -1,0 +1,5 @@
+args: ["ddl","-p","{P}","-c","golden-local","-s","golden","t","--format","json"]
+exit: 0
+--- stdout
+{"conn":"golden-local","text":"CREATE TABLE \"golden\".\"t\" (\n    \"id\" integer NOT NULL,\n    \"name\" text NOT NULL,\n    \"score\" numeric(10,2),\n    \"ok\" boolean,\n    \"at\" timestamp without time zone,\n    \"doc\" jsonb,\n    \"tags\" text[],\n    \"raw\" bytea,\n    \"uid\" uuid,\n    \"note\" text,\n    CONSTRAINT \"t_pkey\" PRIMARY KEY (id)\n);\n","elapsed_ms":0}
+--- stderr
