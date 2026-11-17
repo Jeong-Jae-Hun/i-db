@@ -1175,7 +1175,7 @@ impl Render for ResultsView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(DataTable::new(&self.table).stripe(true))
+                    .child(DataTable::new(&self.table).stripe(false))
                     .into_any_element()
             } else {
                 div()

@@ -1,5 +1,6 @@
 //! 화면과 상관없는 상태와 규칙이다. GPU 없이 시험한다.
 
+pub mod brand;
 pub mod completion;
 pub mod crashlog;
 pub mod dashboard;

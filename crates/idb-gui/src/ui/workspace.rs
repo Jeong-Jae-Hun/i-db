@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::vm::brand;
 use crate::vm::palette;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions,
@@ -14,6 +15,7 @@ use gpui::{
 };
 use gpui::{ClickEvent, ClipboardItem, MouseButton, rems};
 use gpui_component::Disableable as _;
+use gpui_component::TitleBar;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
@@ -1601,86 +1603,126 @@ impl Focusable for Workspace {
 impl Workspace {
     fn render_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let mut remotes = v_flex().gap_1();
+        // Orca 첫 화면 문법: 가운데 마크·글자표·한 줄 소개, 아래 고를 것들은 둥근 줄(28px)
+        let row = |id: (&'static str, usize), label: String, detail: &'static str| {
+            h_flex()
+                .id(id)
+                .h(rems(1.9))
+                .px_3()
+                .gap_2()
+                .rounded(theme.radius)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.secondary))
+                .child(div().flex_1().truncate().child(label))
+                .child(div().text_xs().text_color(theme.muted_foreground).child(detail))
+        };
+        let header = |title: &'static str| {
+            div()
+                .px_3()
+                .pt_4()
+                .pb_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(title)
+        };
+        let mut remotes = v_flex().gap_px();
         match &self.remotes {
             Ok(names) if names.is_empty() => {
-                remotes = remotes.child(div().text_color(theme.muted_foreground).child(picker::NO_REMOTES));
+                remotes = remotes.child(div().px_3().text_xs().text_color(theme.muted_foreground).child(picker::NO_REMOTES));
             }
             Ok(names) => {
                 for (i, c) in picker::remote_choices(names).into_iter().enumerate() {
                     let t = c.target;
-                    remotes = remotes.child(
-                        Button::new(("remote", i))
-                            .label(c.label)
-                            .on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t.clone(), w, cx))),
-                    );
+                    let name = match &t {
+                        Target::Remote(n) => n.clone(),
+                        Target::Local(p) => p.display().to_string(),
+                    };
+                    remotes = remotes
+                        .child(row(("remote", i), name, "ssh").on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t.clone(), w, cx))));
                 }
             }
-            Err(e) => remotes = remotes.child(div().text_color(theme.danger).child(e.clone())),
+            Err(e) => remotes = remotes.child(div().px_3().text_xs().text_color(theme.danger).child(e.clone())),
         }
-        let mut recent = v_flex().gap_1();
+        let mut recent = v_flex().gap_px();
         for (i, t) in self.prefs.recent.iter().enumerate() {
             let t2 = t.clone();
-            recent = recent.child(
-                Button::new(("recent", i))
-                    .ghost()
-                    .label(t.label())
-                    .on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t2.clone(), w, cx))),
-            );
+            let detail = if matches!(t, Target::Remote(_)) { "원격" } else { "로컬" };
+            recent = recent
+                .child(row(("recent", i), t.label(), detail).on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t2.clone(), w, cx))));
         }
-        let section = |title: &str| div().pt_4().pb_1().text_color(theme.muted_foreground).child(title.to_string());
-        v_flex().size_full().items_center().justify_center().child(
-            v_flex()
-                .w(px(600.))
-                .gap_1()
-                .child(div().text_2xl().child(picker::TITLE))
-                .child(div().text_color(theme.muted_foreground).child(picker::SUBTITLE))
-                .child(section(picker::REMOTE_SECTION))
-                .child(remotes)
-                .child(section(picker::LOCAL_SECTION))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().flex_1().child(Input::new(&self.dir_input)))
-                        .child(
-                            Button::new("pick-dir")
-                                .label(picker::PICK_DIR)
-                                .on_click(cx.listener(|_, _, window, cx| {
-                                    let rx = cx.prompt_for_paths(PathPromptOptions {
-                                        files: false,
-                                        directories: true,
-                                        multiple: false,
-                                        prompt: Some("프로젝트 폴더".into()),
-                                    });
-                                    cx.spawn_in(window, async move |this, cx| {
-                                        let Ok(Ok(Some(paths))) = rx.await else { return };
-                                        let Some(p) = paths.into_iter().next() else { return };
-                                        let _ = this.update_in(cx, move |ws, window, cx| ws.open_target(Target::Local(p), window, cx));
-                                    })
-                                    .detach();
-                                })),
-                        )
-                        .child(
-                            Button::new("open-dir")
-                                .primary()
-                                .label(picker::OPEN)
-                                .loading(self.connecting)
-                                .on_click(cx.listener(|ws, _, window, cx| {
-                                    let dir = expand_home(&ws.dir_input.read(cx).value());
-                                    ws.open_target(Target::Local(dir), window, cx);
-                                })),
-                        ),
-                )
-                .when(!self.prefs.recent.is_empty(), |d| {
-                    d.child(section(picker::RECENT_SECTION)).child(recent)
-                })
-                .child(
-                    div()
-                        .pt_4()
-                        .text_color(if self.status.1 { theme.danger } else { theme.muted_foreground })
-                        .child(self.status.0.clone()),
-                ),
-        )
+        v_flex()
+            .id("picker")
+            .size_full()
+            .overflow_y_scroll()
+            .items_center()
+            .justify_center()
+            .gap_6()
+            .py_8()
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(super::brand::mark(px(64.), theme.foreground, super::brand::accent()))
+                    .child(super::brand::wordmark(px(40.), theme.foreground))
+                    .child(div().text_color(theme.muted_foreground).child(brand::TAGLINE)),
+            )
+            .child(
+                v_flex()
+                    .w(px(520.))
+                    .child(header(picker::REMOTE_SECTION))
+                    .child(remotes)
+                    .child(header(picker::LOCAL_SECTION))
+                    .child(
+                        h_flex()
+                            .px_3()
+                            .gap_2()
+                            .child(div().flex_1().child(Input::new(&self.dir_input).small()))
+                            .child(
+                                Button::new("pick-dir")
+                                    .small()
+                                    .label(picker::PICK_DIR)
+                                    .on_click(cx.listener(|_, _, window, cx| {
+                                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                                            files: false,
+                                            directories: true,
+                                            multiple: false,
+                                            prompt: Some("프로젝트 폴더".into()),
+                                        });
+                                        cx.spawn_in(window, async move |this, cx| {
+                                            let Ok(Ok(Some(paths))) = rx.await else { return };
+                                            let Some(p) = paths.into_iter().next() else { return };
+                                            let _ = this.update_in(cx, move |ws, window, cx| ws.open_target(Target::Local(p), window, cx));
+                                        })
+                                        .detach();
+                                    })),
+                            )
+                            .child(
+                                Button::new("open-dir")
+                                    .small()
+                                    .primary()
+                                    .label(picker::OPEN)
+                                    .loading(self.connecting)
+                                    .on_click(cx.listener(|ws, _, window, cx| {
+                                        let dir = expand_home(&ws.dir_input.read(cx).value());
+                                        ws.open_target(Target::Local(dir), window, cx);
+                                    })),
+                            ),
+                    )
+                    .when(!self.prefs.recent.is_empty(), |d| {
+                        d.child(header(picker::RECENT_SECTION)).child(recent)
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(if self.status.1 { theme.danger } else { theme.muted_foreground })
+                    .child(if self.status.0.is_empty() {
+                        format!("{} · ⌘, 설정 · ⌘/ 단축키", brand::version())
+                    } else {
+                        self.status.0.clone()
+                    }),
+            )
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1707,7 +1749,7 @@ impl Workspace {
                         .id(("folder", i))
                         .mx_1()
                         .px_2()
-                        .h(rems(1.6))
+                        .h(rems(1.75))
                         .gap_1()
                         .rounded(theme.radius)
                         .cursor_pointer()
@@ -1716,7 +1758,19 @@ impl Workspace {
                         .text_color(theme.muted_foreground)
                         .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
                         .child(div().flex_1().truncate().child(row.label))
-                        .child(div().child(count.to_string()))
+                        .child(
+                            // 개수 알약(Orca 의 18px 배지)
+                            div()
+                                .min_w(px(18.))
+                                .h(px(18.))
+                                .px_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(theme.secondary)
+                                .child(count.to_string()),
+                        )
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             ws.tree.toggle(&label);
                             cx.notify();
@@ -1855,7 +1909,16 @@ impl Workspace {
         }
 
         let queries_el = self.render_queries(&filter, cx);
-        let section = |title: &'static str| div().px_3().pt_3().pb_1().text_xs().text_color(theme.muted_foreground).child(title);
+        let section = |title: &'static str| {
+            div()
+                .px_4()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(title)
+        };
         v_flex()
             .size_full()
             .bg(theme.sidebar)
@@ -1978,19 +2041,12 @@ impl Workspace {
         }
     }
 
-    fn render_toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// 상태 줄 왼쪽의 접속·데이터베이스·스키마 고르기다(Orca 처럼 무거운 도구 줄 없이).
+    fn render_conn_selector(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let conn = self.active_conn();
         let summary = conn.as_ref().and_then(|c| self.conn(c)).cloned();
-        let in_tx = conn.as_ref().is_some_and(|c| self.tx.get(c).copied().unwrap_or(false));
         let is_prod = summary.as_ref().is_some_and(|s| tone(&s.env) == Tone::Prod);
-        let is_pg = summary.as_ref().is_some_and(|s| s.kind == "postgresql");
-        let lock = conn.as_ref().and_then(|c| self.locks.get(c)).map(|(l, at)| {
-            let left = l.remaining_secs.saturating_sub(at.elapsed().as_secs());
-            (l.locked || left == 0, left)
-        });
-        let locked = lock.is_none_or(|(l, _)| l);
-        let busy = self.busy.is_some();
 
         // 접속·데이터베이스·스키마 고르기
         let conns: Vec<(String, String)> = self
@@ -2009,7 +2065,7 @@ impl Workspace {
         let ws = cx.entity().downgrade();
         let cur = conn.clone();
         let selector = Button::new("conn-selector")
-            .small()
+            .xsmall()
             .ghost()
             .icon(IconName::ChevronsUpDown)
             .label(self.conn_label())
@@ -2051,58 +2107,67 @@ impl Workspace {
 
         h_flex()
             .gap_1()
-            .px_2()
-            .h(rems(2.5))
-            .border_b_1()
-            .border_color(theme.border)
-            .when(is_prod, |d| d.bg(theme.danger.opacity(0.08)))
             .child(selector)
             .when_some(summary.as_ref(), |d, s| d.child(env_pill(&s.env, theme.is_dark())))
-            .child(div().flex_1())
+    }
+
+    /// 제목 줄 오른쪽의 작은 아이콘 버튼들이다(실행·EXPLAIN·멈춤·트랜잭션·prod 잠금).
+    fn render_actions(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let conn = self.active_conn();
+        let summary = conn.as_ref().and_then(|c| self.conn(c)).cloned();
+        let in_tx = conn.as_ref().is_some_and(|c| self.tx.get(c).copied().unwrap_or(false));
+        let is_prod = summary.as_ref().is_some_and(|s| tone(&s.env) == Tone::Prod);
+        let is_pg = summary.as_ref().is_some_and(|s| s.kind == "postgresql");
+        let lock = conn.as_ref().and_then(|c| self.locks.get(c)).map(|(l, at)| {
+            let left = l.remaining_secs.saturating_sub(at.elapsed().as_secs());
+            (l.locked || left == 0, left)
+        });
+        let locked = lock.is_none_or(|(l, _)| l);
+        let busy = self.busy.is_some();
+        h_flex()
+            .gap_0p5()
+            .pr_2()
             .when(is_pg, |d| {
                 d.child(
                     Button::new("run")
-                        .small()
+                        .xsmall()
                         .ghost()
                         .icon(IconName::Play)
-                        .label("실행")
                         .tooltip("커서 문장 또는 선택 실행 (⌘↵)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_query(false, w, cx))),
                 )
                 .child(
                     Button::new("run-all")
-                        .small()
+                        .xsmall()
                         .ghost()
                         .icon(IconName::ArrowRight)
-                        .label("모두")
                         .tooltip("편집기 문장 모두 실행 (⇧⌘↵)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_all(w, cx))),
                 )
                 .child(
                     Button::new("explain")
-                        .small()
+                        .xsmall()
                         .ghost()
                         .icon(IconName::Search)
-                        .label("EXPLAIN")
                         .tooltip("실행 계획 (⌘E)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_query(true, w, cx))),
                 )
             })
             .child(
                 Button::new("stop")
-                    .small()
+                    .xsmall()
                     .ghost()
                     .icon(IconName::Square)
-                    .label("멈춤")
                     .disabled(!busy)
                     .tooltip("진행 중인 요청 멈춤 (⌘.)")
                     .on_click(cx.listener(|ws, _, _, cx| ws.cancel(cx))),
             )
             .when(is_pg, |d| {
-                d.child(div().w_px().h(rems(1.2)).bg(theme.border).mx_1())
+                d.child(div().w_px().h(rems(1.0)).bg(theme.border).mx_1())
                     .child(
                         Button::new("tx")
-                            .small()
+                            .xsmall()
                             .with_variant(if in_tx { ButtonVariant::Warning } else { ButtonVariant::Ghost })
                             .label(if in_tx { "트랜잭션 중" } else { "BEGIN" })
                             .tooltip(if in_tx {
@@ -2119,18 +2184,18 @@ impl Workspace {
                     .when(in_tx, |d| {
                         d.child(
                             Button::new("commit")
-                                .small()
+                                .xsmall()
                                 .ghost()
                                 .icon(IconName::Check)
-                                .label("COMMIT")
+                                .tooltip("COMMIT")
                                 .on_click(cx.listener(|ws, _, w, cx| ws.tx_op("COMMIT", w, cx))),
                         )
                         .child(
                             Button::new("rollback")
-                                .small()
+                                .xsmall()
                                 .ghost()
                                 .icon(IconName::Undo2)
-                                .label("ROLLBACK")
+                                .tooltip("ROLLBACK")
                                 .on_click(cx.listener(|ws, _, w, cx| ws.tx_op("ROLLBACK", w, cx))),
                         )
                     })
@@ -2138,11 +2203,11 @@ impl Workspace {
             .when(is_prod, |d| {
                 let label = match lock {
                     Some((false, left)) => format!("prod 열림 {}:{:02}", left / 60, left % 60),
-                    _ => "prod 잠김".into(),
+                    _ => "prod".into(),
                 };
                 d.child(
                     Button::new("lock")
-                        .small()
+                        .xsmall()
                         .with_variant(if locked { ButtonVariant::Ghost } else { ButtonVariant::Danger })
                         .icon(IconName::TriangleAlert)
                         .label(label)
@@ -2150,17 +2215,29 @@ impl Workspace {
                         .on_click(cx.listener(|ws, _, w, cx| ws.toggle_lock(w, cx))),
                 )
             })
+            .child(div().w_px().h(rems(1.0)).bg(theme.border).mx_1())
+            .child(
+                Button::new("dashboard-top")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::LayoutDashboard)
+                    .tooltip("대시보드 (⌘G)")
+                    .on_click(cx.listener(|ws, _, w, cx| ws.open_dashboard(w, cx))),
+            )
+            .child(
+                Button::new("settings-top")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .tooltip("설정 (⌘,)")
+                    .on_click(cx.listener(|ws, _, w, cx| super::dialogs::open_settings(ws, w, cx))),
+            )
     }
 
     fn render_tabs(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let mut bar = h_flex()
-            .id("tabs")
-            .h(rems(2.25))
-            .overflow_x_scroll()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.tab_bar);
+        // 제목 줄 안의 탭(Orca): 작은 높이, 고른 탭만 바탕을 깔고 아래 강조선을 둔다
+        let mut bar = h_flex().id("tabs").h_full().gap_0p5().items_center().overflow_x_scroll();
         for (i, t) in self.tabs.tabs.iter().enumerate() {
             let active = i == self.tabs.active;
             let prod = t
@@ -2173,28 +2250,37 @@ impl Workspace {
             bar = bar.child(
                 h_flex()
                     .id(("tab", i))
-                    .group("tab")
-                    .h_full()
-                    .px_3()
-                    .gap_2()
-                    .border_r_1()
-                    .border_color(theme.border)
+                    .group(SharedString::from(format!("tab-{i}")))
+                    .h(rems(1.6))
+                    .pl_2p5()
+                    .pr_1()
+                    .gap_1()
+                    .rounded(theme.radius)
                     .cursor_pointer()
+                    .text_xs()
                     .text_color(if active { theme.foreground } else { theme.muted_foreground })
-                    .when(active, |d| d.bg(theme.background))
+                    .when(active, |d| {
+                        d.bg(theme.secondary)
+                            .border_b_2()
+                            .border_color(if prod { theme.danger } else { theme.ring })
+                    })
                     .when(!active, |d| d.hover(|s| s.bg(theme.secondary.opacity(0.5))))
-                    .when(prod, |d| d.border_t_2().border_color(theme.danger))
-                    .child(div().child(base.title()))
+                    .when(prod && !active, |d| d.text_color(theme.danger.opacity(0.8)))
+                    .child(div().max_w(px(180.)).truncate().child(base.title()))
                     .child(
                         div()
                             .id(("close", i))
                             .w(rems(1.0))
+                            .h(rems(1.0))
                             .flex()
+                            .items_center()
                             .justify_center()
                             .rounded(theme.radius)
-                            .text_xs()
-                            .hover(|s| s.bg(theme.secondary))
-                            // 고친 탭은 점을 보이고, 올리면 닫기 단추가 된다
+                            .hover(|s| s.bg(theme.accent))
+                            // 고친 탭은 점을 늘 보이고, 아니면 올렸을 때만 닫기 단추가 보인다
+                            .when(!t.dirty && !active, |d| {
+                                d.opacity(0.).group_hover(format!("tab-{i}"), |s| s.opacity(1.))
+                            })
                             .child(if t.dirty { "●" } else { "×" })
                             .tooltip(|window, cx| Tooltip::new("탭 닫기 (⌘W)").build(window, cx))
                             .on_click(cx.listener(move |ws, _, _, cx| {
@@ -2287,8 +2373,9 @@ impl Workspace {
             _ => None,
         });
         let pill = |text: String, bg: gpui::Hsla, fg: gpui::Hsla| div().px_2().rounded_full().bg(bg).text_color(fg).child(text);
+        let selector = self.render_conn_selector(cx);
         h_flex()
-            .px_3()
+            .px_1()
             .h(rems(1.6))
             .gap_3()
             .border_t_1()
@@ -2296,7 +2383,7 @@ impl Workspace {
             .bg(theme.status_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(div().child(self.target.as_ref().map(Target::label).unwrap_or_default()))
+            .child(selector)
             .when(in_tx, |d| {
                 d.child(pill("트랜잭션 중".into(), theme.warning.opacity(0.2), theme.warning))
             })
@@ -2318,6 +2405,7 @@ impl Workspace {
                     .child(self.status.0.clone()),
             )
             .when_some(summary, |d, s| d.child(div().child(s)))
+            .child(div().pr_2().child(self.target.as_ref().map(Target::label).unwrap_or_default()))
             .when(self.prefs.zoom != zoom::DEFAULT, |d| {
                 d.child(div().child(zoom::label(self.prefs.zoom)))
             })
@@ -2393,21 +2481,53 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &About, w, cx| super::dialogs::open_about(w, cx)))
             .on_action(cx.listener(|_, _: &Minimize, w, _| w.minimize_window()));
         if self.engine.is_none() {
-            return root.child(self.render_picker(cx));
+            let bar = TitleBar::new().child(
+                h_flex()
+                    .gap_2()
+                    .child(super::brand::mark(px(14.), theme.foreground, super::brand::accent()))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(brand::NAME)),
+            );
+            return root.child(
+                v_flex()
+                    .size_full()
+                    .child(bar)
+                    .child(div().flex_1().min_h_0().child(self.render_picker(cx))),
+            );
         }
         let sidebar = self.render_sidebar(cx);
-        let toolbar = self.render_toolbar(cx);
+        let actions = self.render_actions(cx);
         let tabs = self.render_tabs(cx);
         let body = self.render_body(cx);
         let status = self.render_status(cx);
-        let main = v_flex()
-            .size_full()
-            .child(tabs)
-            .child(toolbar)
-            .child(div().flex_1().min_h_0().child(body));
+        // 제목 줄(Orca): 신호등 자리 뒤에 사이드바 단추·마크, 가운데 탭, 오른쪽 작은 아이콘 단추
+        let titlebar = TitleBar::new().child(
+            h_flex()
+                .size_full()
+                .gap_1()
+                .child(
+                    Button::new("toggle-sidebar")
+                        .xsmall()
+                        .ghost()
+                        .icon(if self.show_sidebar {
+                            IconName::PanelLeftClose
+                        } else {
+                            IconName::PanelLeftOpen
+                        })
+                        .tooltip("사이드바 (⌘B)")
+                        .on_click(cx.listener(|ws, _, _, cx| {
+                            ws.show_sidebar = !ws.show_sidebar;
+                            cx.notify();
+                        })),
+                )
+                .child(super::brand::mark(px(14.), theme.foreground, super::brand::accent()))
+                .child(div().flex_1().min_w_0().h_full().child(tabs))
+                .child(actions),
+        );
+        let main = v_flex().size_full().child(div().flex_1().min_h_0().child(body));
         root.child(
             v_flex()
                 .size_full()
+                .child(titlebar)
                 .child(
                     div().flex_1().min_h_0().child(
                         h_resizable(SharedString::from("main-split"))
