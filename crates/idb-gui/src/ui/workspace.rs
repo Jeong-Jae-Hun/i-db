@@ -456,6 +456,17 @@ impl Workspace {
         self.prefs.touch(target.clone());
         self.save_prefs();
         let warn = info.warnings.join("; ");
+        // 옛 판이 남긴 prod 접속 기록을 지운다(R75.5)
+        let prod_keys: Vec<String> = info
+            .conns
+            .iter()
+            .filter(|c| tone(&c.env) == Tone::Prod)
+            .flat_map(|c| [c.uuid.clone(), c.name.clone()])
+            .filter(|k| !k.is_empty())
+            .collect();
+        if crate::vm::history::purge_prod(&mut self.prefs.table_history, &prod_keys) {
+            self.save_prefs();
+        }
         self.tree = ConnTree::new(info.conns);
         self.target = Some(target.clone());
         self.refresh_queries();
@@ -611,6 +622,16 @@ impl Workspace {
 
     pub(super) fn engine(&self) -> Option<&Engine> {
         self.engine.as_ref()
+    }
+
+    /// 테이블 보기 기록 자리와 prod 여부다(R75.5: prod 기록은 남기지 않는다).
+    pub(super) fn history_key(&self, conn: &str, schema: &str, table: &str) -> (String, bool) {
+        let c = self.conn(conn);
+        let conn_key = c
+            .map(|c| if c.uuid.is_empty() { c.name.clone() } else { c.uuid.clone() })
+            .unwrap_or_else(|| conn.to_string());
+        let prod = c.is_none_or(|c| tone(&c.env) == Tone::Prod);
+        (crate::vm::history::table_key(&conn_key, schema, table), prod)
     }
 
     pub(super) fn is_switching(&self, conn: &str) -> bool {
@@ -3135,6 +3156,76 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "자동 저장하지 않는다");
     }
 
+    /// 리뷰: prod WHERE 가 gui.json 에 남았다(R75.5 는 prod 기록을 막는다).
+    #[gpui::test]
+    fn prod_테이블_WHERE_는_기록하지_않고_옛_prod_기록은_지운다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|_, cx| {
+            ws.update(cx, |w, _| {
+                // 옛 판이 남긴 app-prod 기록(접속을 열 때 지워져야 한다)
+                let stale = crate::vm::history::table_key("00000000-0000-0000-0000-000000000002", "public", "users");
+                w.prefs.table_history.insert(
+                    stale,
+                    crate::vm::history::TableHistory {
+                        where_: vec!["email = 'x'".into()],
+                        order: vec![],
+                    },
+                );
+                w.prefs.table_history.insert(
+                    "app-prod\tpublic.users".into(),
+                    crate::vm::history::TableHistory {
+                        where_: vec!["y".into()],
+                        order: vec![],
+                    },
+                );
+            })
+        });
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let rs: ResultSet =
+            serde_json::from_value(serde_json::json!({"cols": ["id"], "rows": [["1"]], "text": "", "truncated": false, "elapsed_ms": 1}))
+                .unwrap();
+        let src = Source::Table {
+            schema: "public".into(),
+            table: "users".into(),
+            filter: String::new(),
+            order: String::new(),
+        };
+        let r = cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                let (_, prod) = w.history_key("app-prod", "public", "users");
+                assert!(prod);
+                assert!(
+                    !w.prefs.table_history.keys().any(|k| k.contains("public.users")
+                        && (k.starts_with("app-prod") || k.starts_with("00000000-0000-0000-0000-000000000002"))),
+                    "옛 prod 기록이 남았다: {:?}",
+                    w.prefs.table_history.keys().collect::<Vec<_>>()
+                );
+                let id = w.tabs.tabs[0].id;
+                w.show_result(id, "app-prod".into(), src, rs, false, window, cx);
+                match w.bodies.get(&id) {
+                    Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                    _ => panic!("결과 없음"),
+                }
+            })
+        });
+        cx.update(|window, cx| {
+            let (wi, _) = r.read(cx).table_inputs.clone().unwrap();
+            wi.update(cx, |i, cx| i.set_value("email = 'secret'", window, cx));
+            r.update(cx, |v, cx| v.apply_table_query(window, cx));
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(
+                w.prefs
+                    .table_history
+                    .values()
+                    .all(|h| !h.where_.iter().any(|x| x.contains("secret")))
+            );
+        });
+    }
+
     #[gpui::test]
     fn 원격이면_쿼리_목록이_없다(cx: &mut TestAppContext) {
         let (ws, cx) = setup(cx);
@@ -3163,8 +3254,7 @@ mod tests {
         };
         let r = cx.update(|window, cx| {
             ws.update(cx, |w, cx| {
-                w.prefs.where_history.clear();
-                w.prefs.order_history.clear();
+                w.prefs.table_history.clear();
                 let id = w.tabs.tabs[0].id;
                 w.show_result(id, "app-stg".into(), src, rs, false, window, cx);
                 match w.bodies.get(&id) {
@@ -3182,8 +3272,10 @@ mod tests {
         draw(cx);
         cx.update(|_, cx| {
             let w = ws.read(cx);
-            assert_eq!(w.prefs.where_history, vec!["id > 1"]);
-            assert_eq!(w.prefs.order_history, vec!["id desc"]);
+            let (key, prod) = w.history_key("app-stg", "public", "users");
+            assert!(!prod);
+            assert_eq!(w.prefs.table_history[&key].where_, vec!["id > 1"]);
+            assert_eq!(w.prefs.table_history[&key].order, vec!["id desc"]);
         });
     }
 

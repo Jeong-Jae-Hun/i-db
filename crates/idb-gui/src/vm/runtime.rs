@@ -138,11 +138,10 @@ pub struct Prefs {
     pub sidebar_width: f32,
     #[serde(default = "default_editor_height")]
     pub editor_height: f32,
-    /// 테이블 보기 WHERE·ORDER BY 기록(최근이 앞)
+    /// 테이블 보기 WHERE·ORDER BY 기록. 테이블마다 두고 prod 접속 것은 남기지 않는다(R75.5).
+    /// 옛 판의 전역 `where_history`·`order_history` 는 어느 접속 것인지 몰라 읽지 않고 버린다
     #[serde(default)]
-    pub where_history: Vec<String>,
-    #[serde(default)]
-    pub order_history: Vec<String>,
+    pub table_history: std::collections::BTreeMap<String, super::history::TableHistory>,
 }
 
 fn default_zoom() -> f32 {
@@ -180,8 +179,7 @@ impl Default for Prefs {
             row_limit: default_row_limit(),
             sidebar_width: default_sidebar_width(),
             editor_height: default_editor_height(),
-            where_history: Vec::new(),
-            order_history: Vec::new(),
+            table_history: Default::default(),
         }
     }
 }
@@ -200,11 +198,13 @@ impl Prefs {
             .unwrap_or_default()
     }
 
+    /// 같은 폴더 임시 파일에 0600 으로 쓴 뒤 바꿔 끼운다(R75.1 과 같은 방식, 기록에 조건 글이 든다).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?)
+        let data = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        idb_core::atomicfile::write(path, ".gui-*.tmp", &data, 0o600)
     }
 
     /// 맨 앞으로 올리고 중복·넘침을 뗀다.
@@ -272,6 +272,21 @@ mod tests {
             (p.zoom, p.row_limit, p.theme),
             (1.0, 500, super::super::settings::ThemePref::System)
         );
+    }
+
+    #[test]
+    fn 설정_파일은_0600_으로_바꿔_끼우고_옛_전역_기록은_버린다() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui.json");
+        std::fs::write(&path, r#"{"where_history": ["secret = 'x'"], "order_history": ["id"]}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let p = Prefs::load(&path);
+        assert!(p.table_history.is_empty());
+        p.save(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("secret"), "{raw}");
     }
 
     #[test]

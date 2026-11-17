@@ -864,10 +864,13 @@ impl ResultsView {
             order: o.clone(),
         };
         let conn = self.conn.clone();
+        let (sc, tb) = (schema.clone(), table.clone());
         self.with_ws(window, cx, move |ws, window, cx| {
-            crate::vm::history::push(&mut ws.prefs.where_history, &w);
-            crate::vm::history::push(&mut ws.prefs.order_history, &o);
-            ws.save_prefs();
+            let (key, prod) = ws.history_key(&conn, &sc, &tb);
+            if !prod {
+                crate::vm::history::record(&mut ws.prefs.table_history, &key, prod, &w, &o);
+                ws.save_prefs();
+            }
             ws.load_source(conn, source, window, cx);
         });
     }
@@ -875,14 +878,15 @@ impl ResultsView {
     fn render_table_inputs(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (wi, oi) = self.table_inputs.clone()?;
         let theme = cx.theme().clone();
-        let (wh, oh) = self
-            .ws
-            .upgrade()
-            .map(|w| {
-                let p = &w.read(cx).prefs;
-                (p.where_history.clone(), p.order_history.clone())
-            })
-            .unwrap_or_default();
+        let (wh, oh) = match (&self.source, self.ws.upgrade()) {
+            (Source::Table { schema, table, .. }, Some(w)) => {
+                let w = w.read(cx);
+                let (key, prod) = w.history_key(&self.conn, schema, table);
+                let h = crate::vm::history::shown(&w.prefs.table_history, &key, prod);
+                (h.where_, h.order)
+            }
+            _ => Default::default(),
+        };
         let recent = |id: &'static str, input: Entity<InputState>, items: Vec<String>| {
             Button::new(id)
                 .xsmall()
