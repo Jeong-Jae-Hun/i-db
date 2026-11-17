@@ -10,6 +10,7 @@ mod files;
 mod finder;
 pub mod grid;
 pub mod help;
+mod history;
 pub mod input;
 pub mod keys;
 mod render;
@@ -138,6 +139,16 @@ pub fn run(opts: Options) -> i32 {
     let session = state::SessionCtx::load(std::path::Path::new(&info.dir));
     let kitty = keys::kitty_wanted() && std::io::IsTerminal::is_terminal(&std::io::stdin());
     let mut app = App::new(info, files, keys::mac_style(kitty), session);
+    match history::History::open() {
+        Ok(h) => app.history = Some(h),
+        Err(e) => {
+            app.status = if app.status.is_empty() {
+                e
+            } else {
+                format!("{} · {e}", app.status)
+            };
+        }
+    }
     let (tx, rx) = mpsc::channel();
     let mut runner = Runner {
         rt,
@@ -231,6 +242,9 @@ fn event_loop(app: &mut App, runner: &mut Runner) -> std::io::Result<()> {
         }
         if last_tick.elapsed() >= Duration::from_secs(1) {
             app.tick();
+            if app.history.as_ref().is_some_and(|h| h.take_off_note()) {
+                app.status = "결과 사본을 끔: 쓰지 못함".into();
+            }
             last_tick = Instant::now();
             dirty = true;
         }

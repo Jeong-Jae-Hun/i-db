@@ -155,6 +155,9 @@ impl App {
             },
             Pend::Tx { conn, op, then } => match res.and_then(decode::<TxState>) {
                 Ok(st) => {
+                    if op != "begin" {
+                        self.record(conn, &op.to_uppercase(), 0, None, "");
+                    }
                     self.note_tx(conn, st.in_tx);
                     if op == "commit" && st.text != "COMMIT" {
                         self.status = COMMIT_ROLLED_BACK.into();
@@ -715,8 +718,14 @@ impl App {
                 t.summary = summary_of(&p.result);
                 t.err.clear();
                 t.text.clear();
-                t.last_sql = p.sql;
+                t.snapshot = false;
+                t.last_sql = p.sql.clone();
+                if let Some(c) = conn {
+                    self.record(c, &p.sql, p.result.elapsed_ms, Some(&p.result), "");
+                }
+                let t = &mut self.tabs[ti];
                 t.grid = Some(g);
+                let v = t.view.as_ref().unwrap();
                 let (w, o, tbl, prod) = (v.where_.clone(), v.order_text(), v.table.clone(), false);
                 let s = t.summary.clone();
                 self.status = s;
@@ -1019,6 +1028,15 @@ impl App {
                 }
                 return;
             }
+        }
+        // 기록 사본 탭의 r 은 그 SQL 을 기록의 접속에서 다시 실행한다(R11.4)
+        if self.tabs[ti].snapshot && k == "r" && self.tabs[ti].shown().is_none_or(|g| g.screen == Screen::Table) {
+            if self.tabs[ti].conn.is_none() {
+                self.status = "기록의 접속이 없음".into();
+                return;
+            }
+            self.tabs[ti].editor.key("ctrl+a");
+            return self.run_current(None);
         }
         match k {
             "q" if self.tabs[ti].shown().is_none_or(|g| g.screen == Screen::Table) => return self.request_quit(),
@@ -1618,6 +1636,8 @@ impl App {
                 if let Some(open) = rs.in_tx {
                     self.note_tx(s.conn, open);
                 }
+                let sql = self.history_sql(&s);
+                self.record(s.conn, &sql, rs.elapsed_ms, Some(&rs), "");
                 s.results.push(rs);
                 s.idx += 1;
                 if s.idx < s.stmts.len() {
@@ -1662,6 +1682,8 @@ impl App {
                 if e.reason.as_deref() == Some("in_tx") {
                     self.note_tx(s.conn, true);
                 }
+                let sql = self.history_sql(&s);
+                self.record(s.conn, &sql, s.started.elapsed().as_millis() as u64, None, &e.error);
                 let t = &mut self.tabs[ti];
                 let mut msg = e.error.clone();
                 if s.stmts.len() > 1 {
@@ -1676,6 +1698,19 @@ impl App {
         }
     }
 
+    /// 기록에 남길 문장이다. 파라미터는 값 없이 이름만 붙인다(R21.3). EXPLAIN 은 감싼 꼴로 남긴다.
+    fn history_sql(&self, s: &Script) -> String {
+        let mut sql = s.stmts[s.idx].clone();
+        if let Some(analyze) = s.explain {
+            sql = format!("EXPLAIN {}{sql}", if analyze { "(ANALYZE, BUFFERS) " } else { "" });
+        }
+        if !s.params.is_empty() {
+            let names: Vec<&str> = s.params.keys().map(String::as_str).collect();
+            sql = format!("{sql}\n-- 파라미터: {}", names.join(", "));
+        }
+        sql
+    }
+
     fn show_script(&mut self, ti: usize, s: Script) {
         let multi = s.results.len() > 1;
         let elapsed = s.started.elapsed().as_millis() as u64;
@@ -1684,6 +1719,10 @@ impl App {
         let cur_id = self.cur().id;
         let t = &mut self.tabs[ti];
         t.err.clear();
+        if t.snapshot {
+            t.snapshot = false;
+            t.title = format!("Query {}", t.id);
+        }
         t.subs.retain(|p| p.pinned);
         t.sub = None;
         if multi {
@@ -1923,6 +1962,17 @@ impl App {
                 let Some(ti) = self.tab_index(tab) else { return };
                 let conn = self.tabs[ti].result_conn.unwrap_or(0);
                 let mut status = format!("제출함: {}", one_line(&r.result.text));
+                let count = |op| cs.changes.iter().filter(|c| c.op == op).count();
+                let note = format!(
+                    "-- 제출 {}건 {}.{} (UPDATE {} · INSERT {} · DELETE {})",
+                    cs.changes.len(),
+                    cs.table.schema,
+                    cs.table.table,
+                    count(idb_engine::ChangeOp::Update),
+                    count(idb_engine::ChangeOp::Insert),
+                    count(idb_engine::ChangeOp::Delete)
+                );
+                self.record(conn, &note, r.result.elapsed_ms, None, "");
                 if r.applied.no_returning {
                     status.push_str(" · 되돌리기 불가: RETURNING 권한이 없어 바꾼 행을 받지 못함");
                 } else {

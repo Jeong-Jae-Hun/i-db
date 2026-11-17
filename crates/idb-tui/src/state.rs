@@ -221,7 +221,8 @@ impl App {
         st.panes.editor = self.ed_h;
         st.tabs.clear();
         if self.session.restore {
-            for t in &self.tabs {
+            // 기록 사본 탭은 사용자가 글을 고쳤을 때만 남긴다(R11.4)
+            for t in self.tabs.iter().filter(|t| !t.snapshot || t.editor.typed) {
                 let text = t.editor.value().to_string();
                 let unchanged = t.file.is_some() && text == t.disk;
                 st.tabs.push(session::Tab {

@@ -97,6 +97,9 @@ impl App {
             buf.set_stringn(0, 0, msg, self.w as usize, Style::new());
             return;
         }
+        if self.history_view.is_some() && self.overlay.is_none() {
+            return self.draw_history(buf);
+        }
         match &self.overlay {
             Overlay::Help => return self.draw_help(buf, None),
             Overlay::Keys(secs) => {
@@ -611,7 +614,13 @@ impl App {
         }
         let Some(g) = t.shown() else {
             if !t.text.is_empty() {
-                return s(help::TEXT_HINTS);
+                let mut out = if t.snapshot {
+                    vec!["r 다시 실행".to_string()]
+                } else {
+                    Vec::new()
+                };
+                out.extend(s(help::TEXT_HINTS));
+                return out;
             }
             return s(help::NONE_HINTS);
         };
@@ -627,6 +636,9 @@ impl App {
             Screen::Table => {}
         }
         let mut out = Vec::new();
+        if t.snapshot {
+            out.push("r 다시 실행".into());
+        }
         if t.view.is_some() {
             out.extend(s(&["[ ] 페이지", "w WHERE", "O 정렬식"]));
         }
@@ -717,6 +729,44 @@ impl App {
             }
         }
         buf.set_stringn(2, self.h - 2, &foot, w, theme::dim());
+    }
+
+    /// 기록 창(R11.2). 둘째 줄이 키 안내다(R74.1).
+    fn draw_history(&self, buf: &mut Buffer) {
+        let Some(v) = &self.history_view else { return };
+        let w = self.w as usize;
+        let label = "실행 기록: ";
+        buf.set_stringn(0, 0, label, w, theme::help_key());
+        v.filter.render(
+            buf,
+            width(label) as u16,
+            0,
+            w.saturating_sub(width(label)),
+            Style::new().fg(theme::TEXT),
+            true,
+        );
+        let hint =
+            "↑↓ 고르기 · Enter 열기(◆ 사본은 새 탭) · Ctrl+E 편집기에 넣기 · Ctrl+D 사본 지우기 · 글 SQL·접속·오늘·어제 거르기 · esc 닫기";
+        buf.set_stringn(0, 1, self.label(hint), w, theme::dim());
+        let h = self.h.saturating_sub(3) as usize;
+        let top = v.sel.saturating_sub(h.saturating_sub(1));
+        let hist = self.history.as_ref();
+        for (i, e) in v.list.iter().enumerate().skip(top).take(h) {
+            let snap = hist.is_some_and(|x| x.has_snapshot(&e.id));
+            let text = crate::history::line(e, snap);
+            let mut st = if e.err.is_empty() {
+                Style::new().fg(theme::TEXT)
+            } else {
+                theme::err()
+            };
+            if i == v.sel {
+                st = Style::new().add_modifier(Modifier::REVERSED);
+            }
+            buf.set_stringn(0, 2 + (i - top) as u16, truncate(&text, w, "…"), w, st);
+        }
+        if v.list.is_empty() {
+            buf.set_stringn(0, 2, "기록 없음", w, theme::dim());
+        }
     }
 
     fn draw_picker(&self, buf: &mut Buffer) {

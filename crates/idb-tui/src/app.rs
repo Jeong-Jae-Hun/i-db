@@ -235,6 +235,8 @@ pub struct Tab {
     pub sub: Option<usize>,
     /// 결과 영역 글 스크롤
     pub text_top: usize,
+    /// 기록 사본 탭(R11.4): 읽기 전용, r 로 다시 실행
+    pub snapshot: bool,
 }
 
 impl Tab {
@@ -265,6 +267,7 @@ impl Tab {
             subs: Vec::new(),
             sub: None,
             text_top: 0,
+            snapshot: false,
         }
     }
 
@@ -368,6 +371,8 @@ pub struct App {
     /// 거절되면 확인 뒤 다시 보낼 요청(요청 id → 묶음)
     pub redis_retry: HashMap<u64, (u64, usize, idb_engine::RedisEdit, bool, bool)>,
     pub signal_retry: HashMap<u64, (u64, usize, i64, bool)>,
+    pub history: Option<crate::history::History>,
+    pub history_view: Option<crate::history::HistoryView>,
 }
 
 impl App {
@@ -413,6 +418,8 @@ impl App {
             help_top: 0,
             redis_retry: HashMap::new(),
             signal_retry: HashMap::new(),
+            history: None,
+            history_view: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -650,6 +657,9 @@ impl App {
         if !self.overlay.is_none() {
             return self.overlay_key(k);
         }
+        if self.history_view.is_some() {
+            return self.history_key(k);
+        }
         if let Some(input) = &mut self.tree_filtering {
             match k {
                 "enter" => {
@@ -760,7 +770,8 @@ impl App {
             "ctrl+up" | "ctrl+down" if self.focus != Focus::Editor => {
                 self.resize_editor(if k == "ctrl+up" { -EDITOR_STEP } else { EDITOR_STEP });
             }
-            "ctrl+g" | "alt+f" | "alt+b" | "alt+c" | "ctrl+h" | "ctrl+]" | "f7" => {
+            "ctrl+h" => self.open_history(),
+            "ctrl+g" | "alt+f" | "alt+b" | "alt+c" | "ctrl+]" | "f7" => {
                 self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", self.label(&key_label(k)));
             }
             _ => {
