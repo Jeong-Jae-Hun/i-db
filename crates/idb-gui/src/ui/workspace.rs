@@ -123,6 +123,9 @@ pub struct Workspace {
     autosave_tasks: HashMap<u64, gpui::Task<()>>,
     /// `DB_AUTO_SAVE=0` 이면 끈다(첫 실행 저장·1초 뒤·탭 옮김·닫기). ⌘S 는 그대로다
     pub(super) autosave_on: bool,
+    /// 엔진(프로젝트 접속) 세대. 열고 닫을 때마다 오른다. db_gen 은 다시 열면 비워져 0 이 겹치므로,
+    /// 트리·카탈로그 답은 이 값까지 맞아야 받는다(다시 연 엔진에 옛 답이 앉지 않게)
+    pub(super) session: u64,
     /// 데이터베이스 바꾸기 요청이 도는 접속. 원격이면 엔진은 이미 바꿨는데 답이 안 왔을 수 있어
     /// 그동안 그 접속 결과의 고치기·반영·되돌리기·다음 쪽을 막는다
     switching: std::collections::HashSet<String>,
@@ -234,6 +237,7 @@ impl Workspace {
             sessions: HashMap::new(),
             databases: HashMap::new(),
             db_gen: HashMap::new(),
+            session: 0,
             switching: Default::default(),
             queries: None,
             file_text: HashMap::new(),
@@ -459,6 +463,7 @@ impl Workspace {
     }
 
     fn connected(&mut self, target: Target, engine: Engine, info: ProjectInfo, window: &mut Window, cx: &mut Context<Self>) {
+        self.session += 1;
         self.prefs.touch(target.clone());
         self.save_prefs();
         let warn = info.warnings.join("; ");
@@ -474,7 +479,23 @@ impl Workspace {
             self.save_prefs();
         }
         self.tree = ConnTree::new(info.conns);
-        if let Some(m) = self.prefs.tree_memory.get(&target.label()) {
+        // prod 접속의 Redis 이름공간 펼침은 남기지 않는다. 옛 판이 남긴 것도 여기서 지운다
+        let prod: Vec<String> = self
+            .tree
+            .conns
+            .iter()
+            .filter(|c| tone(&c.env) == Tone::Prod)
+            .map(|c| c.name.clone())
+            .collect();
+        let key = target.label();
+        if let Some(m) = self.prefs.tree_memory.get_mut(&key) {
+            let kept = ConnTree::persistable(&m.expanded, &prod);
+            if kept.len() != m.expanded.len() {
+                m.expanded = kept;
+                self.save_prefs();
+            }
+        }
+        if let Some(m) = self.prefs.tree_memory.get(&key) {
             self.tree.restore(&m.collapsed, &m.expanded);
         }
         self.target = Some(target.clone());
@@ -494,6 +515,7 @@ impl Workspace {
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.session += 1;
         if let Some(e) = self.engine.take() {
             self.rt.spawn(async move { e.close().await });
         }
@@ -671,6 +693,11 @@ impl Workspace {
         for r in self.results_for(conn, cx) {
             r.update(cx, |v, cx| v.set_frozen(frozen, cx));
         }
+    }
+
+    /// 답이 지금 엔진·데이터베이스의 것인지(보낼 때 잡은 세대와 같은지)
+    pub(super) fn fresh(&self, conn: &str, session: u64, db_gen: u64) -> bool {
+        self.session == session && self.db_gen(conn) == db_gen
     }
 
     pub(super) fn db_gen(&self, conn: &str) -> u64 {
@@ -903,7 +930,7 @@ impl Workspace {
         let conn = match &req {
             LoadReq::Catalog { conn } | LoadReq::RedisScan { conn } | LoadReq::SourceChildren { conn, .. } => conn.clone(),
         };
-        let gen0 = self.db_gen(&conn);
+        let (gen0, s0) = (self.db_gen(&conn), self.session);
         let job = self.rt.spawn({
             let req = req.clone();
             async move {
@@ -917,7 +944,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let r = job.rx.await;
             let _ = this.update_in(cx, move |ws, window, cx| {
-                if ws.db_gen(&conn) != gen0 {
+                if !ws.fresh(&conn, s0, gen0) {
                     return;
                 }
                 let node = match &req {
@@ -932,7 +959,7 @@ impl Workspace {
                         ws.sync_catalog_cells();
                         more
                     }
-                    Ok(Ok(TreeData::Keys(s))) => ws.tree.set_redis_keys(&conn, s.keys),
+                    Ok(Ok(TreeData::Keys(s))) => ws.tree.set_redis_keys(&conn, s.keys, s.more),
                     Ok(Ok(TreeData::Nodes(n))) => ws.tree.set_source_children(&node, n),
                     Ok(Err(e)) => {
                         ws.tree.set_failed(&node, e.error);
@@ -991,6 +1018,14 @@ impl Workspace {
     fn save_tree_memory(&mut self) {
         let Some(t) = &self.target else { return };
         let (collapsed, expanded) = self.tree.memory();
+        let prod: Vec<String> = self
+            .tree
+            .conns
+            .iter()
+            .filter(|c| tone(&c.env) == Tone::Prod)
+            .map(|c| c.name.clone())
+            .collect();
+        let expanded = ConnTree::persistable(&expanded, &prod);
         self.prefs
             .tree_memory
             .insert(t.label(), crate::vm::runtime::TreeMemory { collapsed, expanded });
@@ -1115,7 +1150,7 @@ impl Workspace {
         }
         let n = conn.to_string();
         let name = n.clone();
-        let gen0 = self.db_gen(conn);
+        let (gen0, s0) = (self.db_gen(conn), self.session);
         self.guarded(
             "카탈로그",
             Rc::new(move |e: Engine, _| {
@@ -1123,8 +1158,8 @@ impl Workspace {
                 async move { e.catalog(&n).await }
             }),
             Rc::new(move |ws: &mut Workspace, cat: Catalog, _, cx| {
-                // 바꾸기 전 데이터베이스의 카탈로그면 버린다(바꾼 뒤 다시 읽는다)
-                if ws.db_gen(&name) != gen0 {
+                // 바꾸기 전 데이터베이스·다시 열기 전 엔진의 카탈로그면 버린다
+                if !ws.fresh(&name, s0, gen0) {
                     return;
                 }
                 ws.catalogs.insert(name.clone(), Rc::new(cat));
@@ -2070,6 +2105,10 @@ impl Workspace {
                                 .text_color(theme.muted_foreground)
                                 .into_any_element(),
                             ChildKind::More(_) => div().size(px(sc.icon())).into_any_element(),
+                            ChildKind::Partial => Icon::new(IconName::TriangleAlert)
+                                .size(px(sc.icon()))
+                                .text_color(theme.warning)
+                                .into_any_element(),
                         };
                         let expandable = child.expandable();
                         let (c_click, c_toggle) = (child.clone(), child.clone());
@@ -2109,6 +2148,7 @@ impl Workspace {
                                     .min_w_0()
                                     .truncate()
                                     .when(matches!(child.kind, ChildKind::More(_)), |d| d.text_color(theme.muted_foreground))
+                                    .when(child.kind == ChildKind::Partial, |d| d.text_color(theme.warning))
                                     .child(child.label.clone()),
                             )
                             .when(!child.info.is_empty(), |d| {
@@ -3133,6 +3173,60 @@ mod tests {
         wait(cx, &ws, |w| {
             !w.tree.rows().iter().any(|r| matches!(r.kind, RowKind::Loading { .. }))
         });
+    }
+
+    /// 다시 연 엔진에 옛 트리·카탈로그 답이 앉으면 안 된다(db_gen 은 다시 열면 0 으로 겹친다).
+    #[gpui::test]
+    fn 다시_연_엔진은_옛_답을_받지_않는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let (s0, g0) = cx.update(|_, cx| (ws.read(cx).session, ws.read(cx).db_gen("app-stg")));
+        assert!(cx.update(|_, cx| ws.read(cx).fresh("app-stg", s0, g0)));
+        cx.update(|_, cx| ws.update(cx, |w, cx| w.disconnect(cx)));
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert_eq!(w.db_gen("app-stg"), g0, "db_gen 만으로는 가를 수 없다");
+            assert!(!w.fresh("app-stg", s0, g0), "옛 엔진 답은 버린다");
+            assert!(w.fresh("app-stg", w.session, g0));
+        });
+    }
+
+    /// prod Redis 이름공간 경로엔 이메일 같은 개인정보가 들 수 있어 gui.json 에 두지 않는다. 옛 판이 남긴 것도 열 때 지운다.
+    #[gpui::test]
+    fn prod_Redis_펼침_기억은_열_때_지우고_나머지는_둔다(cx: &mut TestAppContext) {
+        let dir = redis_project();
+        std::fs::write(
+            dir.path().join(".dbtui/connections.json"),
+            r#"[{"uuid": "r1", "name": "cache-prod", "group": "c", "kind": "redis", "host": "127.0.0.1", "port": 1}]"#,
+        )
+        .unwrap();
+        let (ws, cx) = setup(cx);
+        let target = Target::Local(dir.path().to_path_buf());
+        let pii = "cache-prod\u{1f}r:user:a@b.com".to_string();
+        let keep = vec!["cache-prod".to_string(), "app-stg\u{1f}r:user".to_string()];
+        cx.update(|_, cx| {
+            ws.update(cx, |w, _| {
+                let expanded = [keep.clone(), vec![pii.clone()]].concat();
+                w.prefs.tree_memory.insert(
+                    target.label(),
+                    crate::vm::runtime::TreeMemory {
+                        collapsed: vec![],
+                        expanded,
+                    },
+                );
+            })
+        });
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(target.clone(), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert_eq!(w.prefs.tree_memory[&target.label()].expanded, keep);
+        });
+        cx.update(|_, cx| ws.update(cx, |w, _| w.save_tree_memory()));
+        cx.update(|_, cx| assert!(!ws.read(cx).prefs.tree_memory[&target.label()].expanded.contains(&pii)));
     }
 
     fn redis_project() -> tempfile::TempDir {

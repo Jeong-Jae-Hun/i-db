@@ -29,6 +29,8 @@ pub enum ChildKind {
     },
     /// 상한을 넘어 보이지 않은 수
     More(usize),
+    /// SCAN 이 상한(1,000개)에서 끊긴 부분 목록이라는 표시. 거르기도 받은 키 안에서만 찾는다
+    Partial,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +116,8 @@ pub struct ConnTree {
     loads: HashMap<String, Load>,
     /// Redis 접속마다 SCAN 으로 받은 키(정렬, 이름공간은 여기서 셈한다)
     redis_keys: HashMap<String, Vec<String>>,
+    /// SCAN 이 끊겨 부분 목록인 Redis 접속
+    redis_partial: BTreeSet<String>,
     /// 지난 실행에서 펼쳐 둔 자리(R75.6). 그 자리의 부모가 읽히면 다시 편다
     remembered: BTreeSet<String>,
 }
@@ -224,6 +228,7 @@ impl ConnTree {
         let pre = format!("{conn}\u{1f}");
         self.loads.retain(|k, _| k != conn && !k.starts_with(&pre));
         self.redis_keys.remove(conn);
+        self.redis_partial.remove(conn);
     }
 
     pub fn set_failed(&mut self, node: &str, msg: String) {
@@ -273,11 +278,28 @@ impl ConnTree {
         out
     }
 
-    pub fn set_redis_keys(&mut self, conn: &str, mut keys: Vec<String>) -> Vec<LoadReq> {
+    /// more 는 SCAN 이 상한에서 끊겼다는 뜻이다(R2). 그때 맨 위에 부분 목록 줄을 둔다.
+    pub fn set_redis_keys(&mut self, conn: &str, mut keys: Vec<String>, more: bool) -> Vec<LoadReq> {
         keys.sort();
         keys.dedup();
+        let n = keys.len();
         self.redis_keys.insert(conn.to_string(), keys);
-        let kids = self.redis_level(conn, conn, "");
+        let mut kids = self.redis_level(conn, conn, "");
+        if more {
+            self.redis_partial.insert(conn.to_string());
+            kids.insert(
+                0,
+                Child {
+                    id: child_id(conn, "p", ""),
+                    label: format!("부분 목록 ({n}개까지) — 패턴으로 좁힌다"),
+                    info: String::new(),
+                    kind: ChildKind::Partial,
+                    path: String::new(),
+                },
+            );
+        } else {
+            self.redis_partial.remove(conn);
+        }
         let out = self.reopen_remembered(&kids);
         self.loads.insert(conn.to_string(), Load::Loaded(kids));
         out
@@ -379,6 +401,16 @@ impl ConnTree {
         self.remembered.extend(expanded.iter().filter(|e| !e.contains('\u{1f}')).cloned());
     }
 
+    /// gui.json 에 남겨도 되는 펼침이다. prod 접속의 Redis 이름공간 길은 키 이름(이메일 등 개인정보)이 들 수 있어
+    /// 남기지 않는다(R75 의 prod 제외와 같은 규칙). prod 가 아닌 접속과 prod 의 스키마·저장소 길은 남긴다.
+    pub fn persistable(expanded: &[String], prod_conns: &[String]) -> Vec<String> {
+        expanded
+            .iter()
+            .filter(|id| !(prod_conns.iter().any(|c| c == conn_of(id)) && id.contains("\u{1f}r:")))
+            .cloned()
+            .collect()
+    }
+
     // ─── 거르기 ───
 
     fn conn_matches(&self, c: &ConnSummary) -> bool {
@@ -391,9 +423,10 @@ impl ConnTree {
     /// 읽은 자식 가운데 거르기 글이 든 것이 있나(접속 아래 전체)
     fn subtree_matches(&self, node: &str) -> bool {
         match self.loads.get(node) {
-            Some(Load::Loaded(kids)) => kids
-                .iter()
-                .any(|k| k.label.to_lowercase().contains(&self.filter) || (k.expandable() && self.subtree_matches(&k.id))),
+            Some(Load::Loaded(kids)) => kids.iter().any(|k| {
+                k.kind != ChildKind::Partial
+                    && (k.label.to_lowercase().contains(&self.filter) || (k.expandable() && self.subtree_matches(&k.id)))
+            }),
             _ => false,
         }
     }
@@ -472,7 +505,8 @@ impl ConnTree {
             }),
             Some(Load::Loaded(kids)) => {
                 for k in kids {
-                    let label_hit = k.label.to_lowercase().contains(&self.filter);
+                    // 부분 목록 표시는 거를 때도 보여 "받은 키 안에서만 찾았다"를 알린다
+                    let label_hit = k.label.to_lowercase().contains(&self.filter) || k.kind == ChildKind::Partial;
                     let sub_hit = k.expandable() && self.subtree_matches(&k.id);
                     if only_matches && !label_hit && !sub_hit {
                         continue;
@@ -633,6 +667,7 @@ mod tests {
                 "plain".into(),
                 "user:1:age".into(),
             ],
+            false,
         );
         let kids: Vec<(String, String)> = t.rows().into_iter().filter(|r| r.depth == 2).map(|r| (r.label, r.detail)).collect();
         assert_eq!(kids, vec![("plain".into(), String::new()), ("user:".into(), "4".into())]);
@@ -646,7 +681,7 @@ mod tests {
     fn Redis_한_단계가_넘치면_더_있음_줄로_자른다() {
         let mut t = sample();
         t.toggle_node("cache");
-        t.set_redis_keys("cache", (0..REDIS_LEVEL_CAP + 5).map(|i| format!("k{i:04}")).collect());
+        t.set_redis_keys("cache", (0..REDIS_LEVEL_CAP + 5).map(|i| format!("k{i:04}")).collect(), false);
         let kids: Vec<Row> = t.rows().into_iter().filter(|r| r.depth == 2).collect();
         assert_eq!(kids.len(), REDIS_LEVEL_CAP + 1);
         assert!(matches!(
@@ -659,6 +694,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn SCAN_이_끊기면_부분_목록_줄을_두고_거를_때도_보인다() {
+        let mut t = sample();
+        t.toggle_node("cache");
+        t.set_redis_keys("cache", vec!["user:1".into(), "plain".into()], true);
+        let kids: Vec<Row> = t.rows().into_iter().filter(|r| r.depth == 2).collect();
+        assert!(matches!(
+            kids[0].kind,
+            RowKind::Child {
+                child: Child {
+                    kind: ChildKind::Partial,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(kids[0].label.contains("부분 목록 (2개까지)"), "{}", kids[0].label);
+        t.set_filter("plain");
+        let l: Vec<String> = t.rows().into_iter().filter(|r| r.depth == 2).map(|r| r.label).collect();
+        assert_eq!(l.len(), 2, "{l:?}");
+        assert!(l[0].starts_with("부분 목록") && l[1] == "plain");
+        // 부분 목록 줄만으로는 접속이 맞은 것으로 치지 않는다
+        t.set_filter("zzz");
+        assert!(!t.rows().iter().any(|r| r.label == "cache"));
+        // 다시 읽어 끊기지 않았으면 줄이 사라진다
+        t.set_filter("");
+        t.set_redis_keys("cache", vec!["a".into()], false);
+        assert!(!t.rows().iter().any(|r| r.label.starts_with("부분 목록")));
+    }
+
+    #[test]
+    fn prod_Redis_이름공간_펼침은_남기지_않는다() {
+        let ex = vec![
+            "cache-prod".to_string(),
+            "cache-prod\u{1f}r:user:a@b.com:".to_string(),
+            "cache\u{1f}r:user:".to_string(),
+            "db-prod\u{1f}s:public".to_string(),
+        ];
+        let kept = ConnTree::persistable(&ex, &["cache-prod".to_string(), "db-prod".to_string()]);
+        assert_eq!(
+            kept,
+            vec![
+                "cache-prod".to_string(),
+                "cache\u{1f}r:user:".to_string(),
+                "db-prod\u{1f}s:public".to_string()
+            ]
+        );
     }
 
     #[test]
