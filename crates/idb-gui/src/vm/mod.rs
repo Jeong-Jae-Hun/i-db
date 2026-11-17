@@ -5,6 +5,7 @@ pub mod crashlog;
 pub mod edits;
 pub mod font;
 pub mod grid;
+pub mod history;
 pub mod keymap;
 pub mod palette;
 pub mod picker;

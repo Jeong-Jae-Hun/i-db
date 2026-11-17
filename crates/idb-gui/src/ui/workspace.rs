@@ -92,6 +92,8 @@ pub struct Workspace {
     pub(super) rt: Rc<Runtime>,
     focus: FocusHandle,
     pub(super) prefs: Prefs,
+    /// 설정 파일 자리. 시험은 None 으로 두어 사용자 gui.json 을 건드리지 않는다
+    prefs_path: Option<PathBuf>,
     /// 설정·설치 여부로 정한 글꼴(확대 전 크기)
     pub(super) font: FontChoice,
     pub(super) show_sidebar: bool,
@@ -210,6 +212,7 @@ impl Workspace {
             rt,
             focus,
             prefs,
+            prefs_path: Prefs::path(),
             font,
             show_sidebar: true,
             show_results: true,
@@ -244,8 +247,8 @@ impl Workspace {
     }
 
     pub(super) fn save_prefs(&self) {
-        if let Some(p) = Prefs::path() {
-            let _ = self.prefs.save(&p);
+        if let Some(p) = &self.prefs_path {
+            let _ = self.prefs.save(p);
         }
     }
 
@@ -438,9 +441,7 @@ impl Workspace {
 
     fn connected(&mut self, target: Target, engine: Engine, info: ProjectInfo, window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.touch(target.clone());
-        if let Some(p) = Prefs::path() {
-            let _ = self.prefs.save(&p);
-        }
+        self.save_prefs();
         let warn = info.warnings.join("; ");
         self.tree = ConnTree::new(info.conns);
         self.target = Some(target.clone());
@@ -2375,7 +2376,13 @@ mod tests {
         let rt = Rc::new(Runtime::new().unwrap());
         let mut ws = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| Workspace::new(rt, crate::vm::font::resolve("D2Coding", 13.0, &[]), window, cx));
+            let view = cx.new(|cx| {
+                let mut w = Workspace::new(rt, crate::vm::font::resolve("D2Coding", 13.0, &[]), window, cx);
+                // 시험은 사용자 설정 파일(~/.config/db/gui.json)을 읽지도 쓰지도 않는다
+                w.prefs_path = None;
+                w.prefs = Prefs::default();
+                w
+            });
             ws = Some(view.clone());
             Root::new(view, window, cx)
         });
@@ -2777,6 +2784,46 @@ mod tests {
                 w.refresh_queries();
                 assert!(w.queries.is_none());
             })
+        });
+    }
+
+    #[gpui::test]
+    fn 테이블_보기_WHERE_ORDER_를_적용하면_기록에_남긴다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let rs: ResultSet =
+            serde_json::from_value(serde_json::json!({"cols": ["id"], "rows": [["1"]], "text": "", "truncated": false, "elapsed_ms": 1}))
+                .unwrap();
+        let src = Source::Table {
+            schema: "public".into(),
+            table: "users".into(),
+            filter: String::new(),
+            order: String::new(),
+        };
+        let r = cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.prefs.where_history.clear();
+                w.prefs.order_history.clear();
+                let id = w.tabs.tabs[0].id;
+                w.show_result(id, "app-stg".into(), src, rs, false, window, cx);
+                match w.bodies.get(&id) {
+                    Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                    _ => panic!("결과 없음"),
+                }
+            })
+        });
+        cx.update(|window, cx| {
+            let (wi, oi) = r.read(cx).table_inputs.clone().expect("테이블 보기면 입력칸이 있다");
+            wi.update(cx, |i, cx| i.set_value("id > 1", window, cx));
+            oi.update(cx, |i, cx| i.set_value("id desc", window, cx));
+            r.update(cx, |v, cx| v.apply_table_query(window, cx));
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert_eq!(w.prefs.where_history, vec!["id > 1"]);
+            assert_eq!(w.prefs.order_history, vec!["id desc"]);
         });
     }
 

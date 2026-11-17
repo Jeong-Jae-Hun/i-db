@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use idb_engine::{Applied, ChangeSet, Engine, EngineError, ResultSet, TablePage, TablePageRequest};
@@ -244,6 +244,8 @@ pub struct ResultsView {
     truncated: bool,
     /// 마지막 반영. 되돌리기에 쓴다(R50)
     last_applied: Option<(ChangeSet, Applied)>,
+    /// 테이블 보기의 WHERE·ORDER BY 입력칸
+    pub(super) table_inputs: Option<(Entity<InputState>, Entity<InputState>)>,
     /// 데이터베이스를 바꾼 뒤의 옛 결과다. 고치기·되돌리기·다음 쪽을 막는다(R27.1·R50)
     pub stale: bool,
     /// 그 접속의 데이터베이스 바꾸기 요청이 도는 중이다(답이 오면 stale 이 되거나 풀린다)
@@ -329,7 +331,35 @@ impl ResultsView {
                 .row_header(true)
         });
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("결과 거르기"));
-        let subs = vec![
+        // 테이블 보기면 WHERE·ORDER BY 입력칸을 둔다(R16)
+        let table_inputs = match &source {
+            Source::Table { filter: w, order: o, .. } => {
+                let (w, o) = (w.clone(), o.clone());
+                let wi = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("WHERE 조건 (예: id > 100)")
+                        .default_value(w)
+                });
+                let oi = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("ORDER BY (예: created_at desc)")
+                        .default_value(o)
+                });
+                Some((wi, oi))
+            }
+            _ => None,
+        };
+        let mut subs = Vec::new();
+        if let Some((wi, oi)) = &table_inputs {
+            for i in [wi, oi] {
+                subs.push(cx.subscribe_in(i, window, |this, _, ev: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        this.apply_table_query(window, cx);
+                    }
+                }));
+            }
+        }
+        subs.extend([
             cx.subscribe_in(&filter, window, |this, input, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
                     let f = input.read(cx).value().to_string();
@@ -350,8 +380,9 @@ impl ResultsView {
                 }
                 _ => {}
             }),
-        ];
+        ]);
         ResultsView {
+            table_inputs,
             ws,
             rt,
             engine,
@@ -709,6 +740,81 @@ impl ResultsView {
         });
     }
 
+    /// WHERE·ORDER BY 로 테이블 보기를 다시 읽고 기록에 남긴다.
+    pub(super) fn apply_table_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((wi, oi)), Source::Table { schema, table, .. }) = (&self.table_inputs, &self.source) else {
+            return;
+        };
+        let (w, o) = (wi.read(cx).value().trim().to_string(), oi.read(cx).value().trim().to_string());
+        let source = Source::Table {
+            schema: schema.clone(),
+            table: table.clone(),
+            filter: w.clone(),
+            order: o.clone(),
+        };
+        let conn = self.conn.clone();
+        self.with_ws(window, cx, move |ws, window, cx| {
+            crate::vm::history::push(&mut ws.prefs.where_history, &w);
+            crate::vm::history::push(&mut ws.prefs.order_history, &o);
+            ws.save_prefs();
+            ws.load_source(conn, source, window, cx);
+        });
+    }
+
+    fn render_table_inputs(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (wi, oi) = self.table_inputs.clone()?;
+        let theme = cx.theme().clone();
+        let (wh, oh) = self
+            .ws
+            .upgrade()
+            .map(|w| {
+                let p = &w.read(cx).prefs;
+                (p.where_history.clone(), p.order_history.clone())
+            })
+            .unwrap_or_default();
+        let recent = |id: &'static str, input: Entity<InputState>, items: Vec<String>| {
+            Button::new(id)
+                .xsmall()
+                .ghost()
+                .icon(gpui_component::IconName::ChevronDown)
+                .tooltip("최근 기록")
+                .dropdown_menu(move |mut menu, _, _| {
+                    if items.is_empty() {
+                        return menu.item(PopupMenuItem::new("기록 없음").disabled(true));
+                    }
+                    for it in &items {
+                        let (input, it2) = (input.clone(), it.clone());
+                        menu = menu.item(PopupMenuItem::new(it.clone()).on_click(move |_, window, cx| {
+                            input.update(cx, |i, cx| i.set_value(it2.clone(), window, cx));
+                        }));
+                    }
+                    menu
+                })
+        };
+        Some(
+            h_flex()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(div().text_xs().text_color(theme.muted_foreground).child("WHERE"))
+                .child(div().flex_1().child(Input::new(&wi).small()))
+                .child(recent("where-recent", wi.clone(), wh))
+                .child(div().text_xs().text_color(theme.muted_foreground).child("ORDER BY"))
+                .child(div().w(px(220.)).child(Input::new(&oi).small()))
+                .child(recent("order-recent", oi.clone(), oh))
+                .child(
+                    Button::new("table-apply")
+                        .xsmall()
+                        .primary()
+                        .label("적용 ↵")
+                        .on_click(cx.listener(|v, _, w, cx| v.apply_table_query(w, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 같은 출처를 다시 읽어 표를 갈아 끼운다.
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.source, Source::Static) {
@@ -773,6 +879,7 @@ impl Render for ResultsView {
         if inserts > 0 {
             info.push_str(&format!(" · 추가 {inserts}"));
         }
+        let table_inputs_el = self.render_table_inputs(cx);
         let toolbar = h_flex()
             .gap_1()
             .px_2()
@@ -857,6 +964,7 @@ impl Render for ResultsView {
             // 메뉴 편집 > 복사(⌘C)가 표에 초점이 있을 때 여기로 온다
             .on_action(cx.listener(|v, _: &gpui_component::input::Copy, _, cx| v.copy(cx)))
             .child(toolbar)
+            .children(table_inputs_el)
             .when(!self.note.is_empty(), |d| {
                 d.child(div().px_2().py_1().text_xs().text_color(theme.warning).child(self.note.clone()))
             })

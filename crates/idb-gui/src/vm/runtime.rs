@@ -138,6 +138,11 @@ pub struct Prefs {
     pub sidebar_width: f32,
     #[serde(default = "default_editor_height")]
     pub editor_height: f32,
+    /// 테이블 보기 WHERE·ORDER BY 기록(최근이 앞)
+    #[serde(default)]
+    pub where_history: Vec<String>,
+    #[serde(default)]
+    pub order_history: Vec<String>,
 }
 
 fn default_zoom() -> f32 {
@@ -175,6 +180,8 @@ impl Default for Prefs {
             row_limit: default_row_limit(),
             sidebar_width: default_sidebar_width(),
             editor_height: default_editor_height(),
+            where_history: Vec::new(),
+            order_history: Vec::new(),
         }
     }
 }
