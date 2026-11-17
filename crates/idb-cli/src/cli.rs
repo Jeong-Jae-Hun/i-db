@@ -172,8 +172,6 @@ pub(crate) fn default_project_dir() -> String {
         .unwrap_or_else(|| ".".into())
 }
 
-// since·until·conns 는 저장소·status·flows 명령을 옮기는 다음 PR 에서 읽는다
-#[allow(dead_code)]
 #[derive(Default)]
 pub struct Opts {
     pub cmd: String,

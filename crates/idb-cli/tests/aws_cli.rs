@@ -478,3 +478,26 @@ fn 통합_DynamoDB_Local_은_요금_막음_없이_트리와_PartiQL_을_본다()
     let (code, out, _) = run_aws(&["conn", "test", "ddb-local"]);
     assert!(code == 0 && out.starts_with("접속됨 (DynamoDB · "), "{out}");
 }
+
+#[test]
+fn 통합_conn_은_로컬_컨테이너에_추가하고_시험한다() {
+    let (Ok(raw), Ok(addr)) = (std::env::var("DBTUI_TEST_PG_URL"), std::env::var("DBTUI_TEST_REDIS_ADDR")) else {
+        return;
+    };
+    let d = project();
+    let pw = url::Url::parse(&raw).unwrap().password().unwrap_or("").to_string();
+    let (code, out, err) = run("", &with_p(&["conn", "add", "local-pg", "--url", &raw], d.path()));
+    assert!(code == 0 && out.contains("접속됨 (PostgreSQL "), "{code} {out} {err}");
+    assert!(!out.contains(&pw) && !err.contains(&pw));
+    let redis = format!("redis://{addr}/0");
+    let (code, out, err) = run("", &with_p(&["conn", "add", "local-redis", "--url", &redis], d.path()));
+    assert!(code == 0 && out.contains("접속됨 ("), "{code} {out} {err}");
+    let (code, out, _) = run("", &with_p(&["conn", "test", "local-pg"], d.path()));
+    assert!(code == 0 && out.starts_with("접속됨 (PostgreSQL "), "{out}");
+    let (code, out, _) = run("", &with_p(&["query", "-c", "local-pg", "select 1 as one"], d.path()));
+    assert!(code == 0 && out.contains("one"), "저장한 접속으로 query 가 돈다: {out}");
+    // 틀린 비밀번호로 바꾸면 시험이 실패해 저장하지 않는다
+    let (code, _, err) = run("wrong-pw\n", &with_p(&["conn", "edit", "local-pg", "--password-stdin"], d.path()));
+    assert!(code == 1 && !err.contains("wrong-pw"), "{err}");
+    assert!(env_file(d.path()).contains(&format!("PG_LOCAL_PG_PASSWORD={pw}")), "그대로");
+}
