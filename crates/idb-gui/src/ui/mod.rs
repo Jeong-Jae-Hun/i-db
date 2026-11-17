@@ -249,7 +249,7 @@ pub fn run() {
         let prefs = Prefs::path().map(|p| Prefs::load(&p)).unwrap_or_default();
         let font = load_font(&prefs, cx);
         cx.bind_keys(key_bindings());
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| workspace::quit_after_saves(cx));
         cx.set_menus(menus());
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
