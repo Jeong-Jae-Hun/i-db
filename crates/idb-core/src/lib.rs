@@ -6,6 +6,7 @@ pub mod favorites;
 pub mod gojson;
 pub mod gostrconv;
 pub mod history;
+pub mod mapping;
 pub mod params;
 pub mod paramstore;
 pub mod project;

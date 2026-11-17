@@ -37,6 +37,20 @@ fn grapheme_width(g: &str) -> usize {
     UnicodeWidthStr::width(first.encode_utf8(&mut [0; 4]) as &str).min(2)
 }
 
+/// 세 자리마다 쉼표를 넣는다(Go textutil.GroupDigits).
+pub fn group_digits(n: i64) -> String {
+    let s = n.to_string();
+    let (neg, digits) = s.strip_prefix('-').map_or((false, s.as_str()), |d| (true, d));
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if neg { format!("-{out}") } else { out }
+}
+
 /// 터미널에 찍힐 폭이다. 입력은 printable 을 거친 글이라 ANSI 제어열이 없다.
 pub fn string_width(s: &str) -> usize {
     s.graphemes(true).map(grapheme_width).sum()
