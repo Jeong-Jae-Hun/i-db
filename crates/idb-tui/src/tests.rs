@@ -1964,6 +1964,63 @@ fn 닫은_탭의_글을_저장하지_못하면_탭을_되살린다() {
     assert!(a.status.starts_with("닫은 탭의 글을 저장하지 못해 되살림"), "{}", a.status);
 }
 
+/// 리뷰: 닫은 탭의 남기기 답을 받기 전에 끝내면 그 글과 충돌 사본을 잃었다.
+#[test]
+fn 끝낼_때_답을_못_받은_닫은_탭의_글도_충돌_사본에_남긴다() {
+    let (mut a, dir, run) = file_app();
+    let path = dir.path().join("queries/app/a.sql");
+    a.open_query_file("queries/app/a.sql");
+    drain(&mut a, &run);
+    std::fs::write(&path, "select 9;\n").unwrap();
+    a.cur_mut().editor.set_value("mine;\n");
+    let ti = a.tab;
+    a.close_tab(ti);
+    // 답을 받기 전에 끝낸다
+    a.save_all_on_quit();
+    assert!(a.pending.is_empty() && a.take_jobs().is_empty(), "남은 일감이 없다");
+    let copy = a
+        .files
+        .as_ref()
+        .unwrap()
+        .paths()
+        .into_iter()
+        .find(|p| p.contains("a-conflict-"))
+        .expect("사본");
+    assert_eq!(std::fs::read_to_string(dir.path().join(&copy)).unwrap(), "mine;\n");
+    assert!(a.quit_notes.iter().any(|n| n.contains(&copy)), "{:?}", a.quit_notes);
+}
+
+#[test]
+fn 끝낼_때_닫은_탭의_글을_남기지_못하면_세션에_남길_탭으로_되살린다() {
+    let fail = std::rc::Rc::new(std::cell::Cell::new(false));
+    let f2 = fail.clone();
+    let files = crate::files::Files::new(Box::new(move |req, _| {
+        if f2.get() {
+            return Err(EngineError::run("멈춤"));
+        }
+        match req {
+            idb_engine::Request::QueryList => Ok(json!([])),
+            _ => Ok(json!({"content": "select 1;\n", "hash": "h"})),
+        }
+    }));
+    let info = ProjectInfo {
+        dir: "/tmp/proj".into(),
+        conns: vec![conn("app-stg", "postgresql", "stg", "app")],
+        warnings: vec![],
+    };
+    let mut a = App::new(info, Some(files), false, SessionCtx::disabled());
+    a.new_tab();
+    let i = a.tab;
+    a.tabs[i].file = Some("queries/x.sql".into());
+    a.tabs[i].disk = "select 1;\n".into();
+    a.tabs[i].editor.set_value("mine;\n");
+    a.close_tab(i);
+    fail.set(true);
+    a.save_all_on_quit();
+    assert!(a.tabs.iter().any(|t| t.editor.value() == "mine;\n"), "세션에 남을 탭으로 되살린다");
+    assert!(a.quit_notes.iter().any(|n| n.starts_with("could not save")), "{:?}", a.quit_notes);
+}
+
 #[test]
 fn 끝낼_때_저장은_모두_합쳐_20초_안에서_기다린다() {
     let waits = std::rc::Rc::new(std::cell::RefCell::new(Vec::<std::time::Duration>::new()));

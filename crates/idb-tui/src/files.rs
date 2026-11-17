@@ -79,6 +79,8 @@ pub enum FileJob {
 pub struct Kept {
     rel: Option<String>,
     text: String,
+    /// 그 탭이 마지막으로 읽거나 쓴 내용(덮기의 base_hash)
+    disk: String,
     name: String,
     conn: Option<usize>,
     /// 덮기가 충돌해 사본을 쓰는 중이다
@@ -570,6 +572,7 @@ impl App {
         let kept = Kept {
             rel: t.file.clone(),
             text: text.clone(),
+            disk: t.disk.clone(),
             name: t.display_name(),
             conn: t.conn,
             copying: false,
@@ -615,15 +618,50 @@ impl App {
                 }
             }
             (Err(e), _) => {
-                // 글을 잃지 않게 탭을 되살린다
-                let i = self.new_tab();
-                self.set_conn(i, k.conn);
-                let t = &mut self.tabs[i];
-                t.name = format!("{} (저장 못 함)", k.name);
-                t.editor.set_value(&k.text);
-                t.editor.typed = true;
-                t.close_ok = false;
+                self.restore_kept(&k);
                 self.status = format!("닫은 탭의 글을 저장하지 못해 되살림: {e}");
+            }
+        }
+    }
+
+    /// 남기지 못한 닫은 탭의 글을 탭으로 되살린다. 끝낼 때면 세션에 남아 다음에 다시 열린다.
+    fn restore_kept(&mut self, k: &Kept) {
+        let i = self.new_tab();
+        self.set_conn(i, k.conn);
+        let t = &mut self.tabs[i];
+        t.name = format!("{} (저장 못 함)", k.name);
+        t.editor.set_value(&k.text);
+        t.editor.typed = true;
+        t.close_ok = false;
+    }
+
+    /// 끝낼 때 답을 못 받은 닫은 탭의 남기기를 여기서 다시 한다. 같은 글을 쓰는 덮기는 두 번 해도 같고,
+    /// 이미 끝난 사본·새 쿼리를 다시 하면 같은 글의 파일이 하나 더 생길 수 있다(잃는 것보다 낫다).
+    fn keep_closed_sync(&mut self, k: Kept) {
+        let conn = k.conn.map(|c| self.conns[c].name.clone()).unwrap_or_default();
+        let Some(f) = self.files.as_mut() else { return };
+        let res = match &k.rel {
+            Some(rel) if k.copying => f.conflict_copy(rel, &k.text, &conn).map(|w| Some(w.path)),
+            Some(rel) => match f.write(rel, &k.text, &k.disk, false) {
+                Ok(w) if !w.conflict => Ok(None),
+                Ok(_) => f.conflict_copy(rel, &k.text, &conn).map(|w| Some(w.path)),
+                Err(e) => Err(e),
+            },
+            None => f.create(&conn, &k.text).map(|_| None),
+        };
+        match res {
+            Ok(Some(copy)) => {
+                let rel = k.rel.clone().unwrap_or_default();
+                self.quit_notes.push(format!("saved unsaved text of {rel} to {copy}"));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.quit_notes
+                    .push(format!("could not save {}: {e} (kept in the session)", k.name));
+                self.restore_kept(&k);
+                // 세션에만 남긴다. 아래 keep_sync 가 같은 글을 새 쿼리로 다시 쓰려다 또 실패하지 않게 한다
+                let last = self.tabs.len() - 1;
+                self.tabs[last].editor.typed = false;
             }
         }
     }
@@ -635,6 +673,21 @@ impl App {
         }
         let Some(f) = &mut self.files else { return };
         f.start_deadline();
+        // 닫은 탭의 남기기와 그 충돌 사본은 답이 오지 않으니 같은 마감 안에서 여기서 다시 한다
+        let keeps: Vec<u64> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| matches!(p, Pend::File(j) if matches!(**j, FileJob::Keep(_))))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in keeps {
+            if let Some(Pend::File(j)) = self.pending.remove(&id) {
+                self.drop_job(id);
+                if let FileJob::Keep(k) = *j {
+                    self.keep_closed_sync(k);
+                }
+            }
+        }
         for i in 0..self.tabs.len() {
             self.keep_sync(i);
         }

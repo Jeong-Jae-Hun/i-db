@@ -607,6 +607,16 @@ impl App {
         self.cancels.push(id);
     }
 
+    /// 아직 보내지 않았으면 빼고, 보냈으면 취소한다. 답은 받지 않는다.
+    pub fn drop_job(&mut self, id: u64) {
+        self.pending.remove(&id);
+        let before = self.outbox.len();
+        self.outbox.retain(|j| j.id != id);
+        if self.outbox.len() == before {
+            self.cancels.push(id);
+        }
+    }
+
     pub fn on_done(&mut self, id: u64, res: Result<Value, EngineError>) {
         let Some(p) = self.pending.remove(&id) else { return };
         self.handle(id, p, res);
