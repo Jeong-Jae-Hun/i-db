@@ -35,6 +35,8 @@ pub const REASON_CONFIRM: &str = "confirm";
 pub const REASON_CONFIRM_ANALYZE: &str = "confirm_analyze";
 /// 읽기 전용 저장소에 쓰기로 보이는 질의다(R60). 다시 보낼 길이 없다
 pub const REASON_READ_ONLY: &str = "read_only";
+/// Redis KEYS 다. 서버를 멈춰 확인으로도 보내지 않는다(SCAN 을 쓴다)
+pub const REASON_KEYS: &str = "keys";
 /// 전체 스캔·큰 범위 같은 비싼 저장소 질의다(R60.2). 확인 후 `force:true` 로 다시 보낸다
 pub const REASON_CONFIRM_EXPENSIVE: &str = "confirm_expensive";
 /// 요청마다 요금이 붙는 AWS 조회라 serve 쪽 DB_ALLOW_BILLED=1 없이는 막는다(R72). 확인으로 풀리지 않는다

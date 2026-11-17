@@ -12,8 +12,8 @@ use idb_core::project::{Conn, Kind, Project, SOURCE_DB, folder_of};
 use idb_core::redact::redact;
 use idb_core::result::MAX_ROWS;
 use idb_core::sqlsafe::{
-    ExplainOpt, danger_of, danger_of_redis, explain_sql, first_sql_word, is_read_only_redis, is_read_only_sql, mask_sql, quote_ident,
-    quote_literal, split_statements,
+    ExplainOpt, danger_of, danger_of_redis, explain_sql, first_sql_word, is_read_only_redis, is_read_only_sql, keys_refusal, mask_sql,
+    quote_ident, quote_literal, split_statements,
 };
 use idb_core::textutil::printable;
 use idb_sources::redis::RedisConn;
@@ -1080,6 +1080,9 @@ impl LocalEngine {
 
     /// Redis 쓰기의 문이다. prod 는 잠금·확인(R54·R6), 위험 명령(R25)은 환경과 상관없이 확인이다.
     fn redis_guard(&self, c: &Conn, cmds: &[Vec<String>], confirm_prod: bool, confirm_danger: bool) -> Result<(), EngineError> {
+        if let Some(msg) = cmds.iter().find_map(|a| keys_refusal(a)) {
+            return Err(EngineError::refused(REASON_KEYS, msg));
+        }
         if !cmds.iter().all(|a| is_read_only_redis(a)) {
             self.write_guard(c, confirm_prod, &format!("prod({})에 쓰기 실행: y/N", c.name), false)?;
         }

@@ -12,7 +12,7 @@ use idb_core::redact::redact;
 use idb_core::result::QueryResult;
 use idb_core::sqlsafe::{
     ExplainOpt, check_read_only_sql, danger_of, danger_of_redis, explain_sql, first_sql_word, hidden_write_of, is_read_only_redis,
-    split_args, split_statements,
+    keys_refusal, split_args, split_statements,
 };
 use idb_core::statcrypt;
 use idb_core::textutil::{go_upper, printable};
@@ -345,12 +345,8 @@ async fn redis(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<Vec
     if args.len() <= 1 {
         args = split_args(read_input(env, stdin).await?.trim());
     }
-    if args.first().is_some_and(|a| a.eq_ignore_ascii_case("KEYS")) {
-        // KEYS 는 키 전체를 한 번에 훑어 그동안 서버가 다른 요청을 받지 못한다
-        let pat = args.get(1).map_or("…", String::as_str);
-        return Err(refused(format!(
-            "KEYS 는 CLI 에서 하지 않음 (서버를 멈춤): SCAN 0 MATCH {pat} COUNT 1000 을 쓰세요"
-        )));
+    if let Some(msg) = keys_refusal(&args) {
+        return Err(refused(msg));
     }
     if !o.write && !is_read_only_redis(&args) {
         return Err(refused("읽기 명령이 아님 (쓰기는 --write)"));

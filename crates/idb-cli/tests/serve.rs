@@ -667,3 +667,20 @@ fn EXPLAIN_ANALYZE_는_속_문장으로_쓰기와_위험을_가른다() {
     assert_eq!((err(&r).0, err(&r).2), (1, ""), "{r}");
     s.finish(&secrets(tmp.path()));
 }
+
+#[test]
+fn Redis_KEYS_는_접속하기_전에_CLI_와_같은_글로_거절한다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let want = (
+        3,
+        "KEYS 는 CLI 에서 하지 않음 (서버를 멈춤): SCAN 0 MATCH * COUNT 1000 을 쓰세요",
+        "keys",
+    );
+    for conn in ["app-prod-redis", "app-stg-redis"] {
+        let r = s.call(json!({"op": "redis_run", "conn": conn, "args": ["keys", "*"], "confirm_prod": true}));
+        assert_eq!(err(&r), want, "{conn}");
+    }
+    s.finish(&secrets(tmp.path()));
+}
