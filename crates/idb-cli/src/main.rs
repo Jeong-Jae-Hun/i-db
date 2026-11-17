@@ -61,25 +61,14 @@ fn lead_flags_after_command(args: Vec<String>) -> Vec<String> {
     let is_command = |a: &str| a == "serve" || a == "mcp" || cli::is_cli_command(a);
     match args.get(i) {
         Some(cmd) if i > 0 && is_command(cmd) => {
-            // 끝(`--` 가 있으면 그 앞)에 붙인다. 바로 뒤에 넣으면 `conn test` 같은 하위 명령 자리를 밀어낸다
+            // 명령 바로 뒤에 넣어 뒤에서 다시 준 같은 플래그가 이기게 한다(Go flag 는 마지막 값을 쓴다).
+            // 단, `conn` 은 첫 자리가 하위 명령(add·test…)이라 그 뒤에 넣는다
             let rest = &args[i + 1..];
-            let at = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
-            // 뒤에서 같은 플래그를 다시 주면(`dbw conns --remote other`) 그 값이 이기게 앞 것은 버린다
-            let flag_name = |a: &str| a.trim_start_matches('-').split('=').next().unwrap_or("").to_string();
-            let later: Vec<String> = rest[..at].iter().filter(|a| a.starts_with('-')).map(|a| flag_name(a)).collect();
-            let mut lead = Vec::new();
-            let mut j = 0;
-            while j < i {
-                let step = if args[j].contains('=') { 1 } else { 2 };
-                if !later.contains(&flag_name(&args[j])) {
-                    lead.extend_from_slice(&args[j..(j + step).min(i)]);
-                }
-                j += step;
-            }
+            let sub = usize::from(cmd == "conn" && rest.first().is_some_and(|a| !a.starts_with('-')));
             let mut out = vec![cmd.clone()];
-            out.extend_from_slice(&rest[..at]);
-            out.extend(lead);
-            out.extend_from_slice(&rest[at..]);
+            out.extend_from_slice(&rest[..sub]);
+            out.extend_from_slice(&args[..i]);
+            out.extend_from_slice(&rest[sub..]);
             out
         }
         _ => args,
@@ -150,7 +139,7 @@ mod lead_flag_tests {
         );
         assert_eq!(
             lead_flags_after_command(v(&["--remote=devbox", "-p", "x", "query", "-c", "a"])),
-            v(&["query", "-c", "a", "--remote=devbox", "-p", "x"])
+            v(&["query", "--remote=devbox", "-p", "x", "-c", "a"])
         );
         assert_eq!(
             lead_flags_after_command(v(&["-p", "x", "conn", "test", "-h"])),
@@ -158,7 +147,7 @@ mod lead_flag_tests {
         );
         assert_eq!(
             lead_flags_after_command(v(&["--remote", "w", "redis", "-c", "r", "--", "LRANGE", "k", "0", "-1"])),
-            v(&["redis", "-c", "r", "--remote", "w", "--", "LRANGE", "k", "0", "-1"])
+            v(&["redis", "--remote", "w", "-c", "r", "--", "LRANGE", "k", "0", "-1"])
         );
         assert_eq!(
             lead_flags_after_command(v(&["--remote", "devbox", "mcp"])),
