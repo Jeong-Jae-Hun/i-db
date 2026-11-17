@@ -4,7 +4,7 @@
 use std::io::{BufRead, Read, Write};
 use std::time::Duration;
 
-use idb_core::connstore::{self, StoreError};
+use idb_core::connstore::{self, DATAGRIP_REFUSAL, StoreError, conn_warning};
 use idb_core::project::{Conn, Kind, Project, SOURCE_DB, folder_of, go_atoi, group_of};
 use idb_core::textutil::printable;
 use idb_sources::source::{kind_label, test_conn};
@@ -15,10 +15,6 @@ use crate::usage_text::CONN_USAGE;
 
 /// --password-stdin 으로 받는 비밀번호 상한이다.
 const CONN_MAX_PASSWORD: usize = 64 << 10;
-const MSG_PLAIN_HTTP: &str = "비밀번호가 평문 http 로 감";
-const MSG_PLAIN_PG: &str = "TLS 없이 붙으면 비밀번호가 평문으로 감";
-const MSG_FOREIGN_SIGV4: &str = "AWS 서명을 AWS 밖 주소로 보냄";
-const DATAGRIP_REFUSAL: &str = "DataGrip 접속은 DataGrip 에서 고침";
 
 /// 종료 코드를 정한 오류다.
 enum ConnErr {
@@ -453,31 +449,6 @@ fn conn_test(cx: &Cx, c: &Conn, stdout: &mut String, stderr: &mut String) -> Res
     Ok(())
 }
 
-/// 저장·시험할 때 알릴 저장소 접속 위험이다(R60.1). 비면 없다(Go sources.go connWarning).
-/// basic·토큰은 http 면 비밀값이 평문으로 가고, DynamoDB 사용자 주소는 SigV4 서명을 그 주소로 보낸다.
-fn conn_warning(c: &Conn) -> &'static str {
-    // TLS 를 끄거나 실패 시 평문으로 떨어지게 한 원격 PostgreSQL 은 비밀번호가 평문으로 갈 수 있다(R59.1)
-    if c.kind == Some(Kind::Pg) && (c.sslmode == "disable" || c.sslmode == "prefer") && c.host != "localhost" && c.host != "127.0.0.1" {
-        return MSG_PLAIN_PG;
-    }
-    let Some(k) = c.kind.filter(|k| k.is_source()) else { return "" };
-    if c.url.is_empty() {
-        return "";
-    }
-    let Ok(u) = url::Url::parse(&c.url) else { return "" };
-    let host = u.host_str().unwrap_or("").trim_matches(['[', ']']).to_lowercase();
-    if u.scheme() == "http" && (c.auth == "basic" || c.auth == "token" || k == Kind::Grafana) {
-        return MSG_PLAIN_HTTP;
-    }
-    if k == Kind::DynamoDb
-        && !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "amazonaws.com")
-        && !host.ends_with(".amazonaws.com")
-    {
-        return MSG_FOREIGN_SIGV4;
-    }
-    ""
-}
-
 /// 비밀번호 없는 접속 요약이다(PostgreSQL ro@host:5432/app, OpenSearch https://h sigv4 ap-northeast-2).
 fn conn_summary(c: &Conn) -> String {
     if c.kind.is_some_and(Kind::is_source) {
@@ -592,29 +563,6 @@ mod tests {
             auth: auth.into(),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn 저장소_위험은_평문_비밀값과_AWS_밖_서명이다() {
-        assert_eq!(conn_warning(&conn(Kind::Loki, "http://l:3100", "basic")), MSG_PLAIN_HTTP);
-        assert_eq!(conn_warning(&conn(Kind::Grafana, "http://g", "token")), MSG_PLAIN_HTTP);
-        assert_eq!(conn_warning(&conn(Kind::Loki, "https://l", "basic")), "");
-        assert_eq!(
-            conn_warning(&conn(Kind::DynamoDb, "https://ddb.evil.example", "")),
-            MSG_FOREIGN_SIGV4
-        );
-        assert_eq!(conn_warning(&conn(Kind::DynamoDb, "http://localhost:8000", "")), "");
-        assert_eq!(
-            conn_warning(&conn(Kind::DynamoDb, "https://dynamodb.ap-northeast-2.amazonaws.com", "")),
-            ""
-        );
-        let pg = Conn {
-            kind: Some(Kind::Pg),
-            host: "db.internal".into(),
-            sslmode: "prefer".into(),
-            ..Default::default()
-        };
-        assert_eq!(conn_warning(&pg), MSG_PLAIN_PG);
     }
 
     #[test]
