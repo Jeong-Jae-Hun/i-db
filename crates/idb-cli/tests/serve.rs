@@ -736,3 +736,76 @@ fn 잘못된_퍼센트_뒤_한글이_있는_저장소_질의도_오류로_답한
     assert_eq!(r["ok"], true, "{r}");
     s.finish(&secrets(tmp.path()));
 }
+
+#[test]
+fn 복호화_내보내기_접속_편집은_serve_에서도_같은_모양이고_키와_비밀번호를_내지_않는다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let key = "0123456789abcdef0123456789abcdef";
+    let enc = idb_core::statcrypt::encrypt("홍길동", key, "00112233445566778899aabbccddeeff").unwrap();
+    let r = s.call(json!({"op": "decrypt", "conn": "app-stg", "cells": [enc, "plain"]}));
+    assert_eq!(r["result"], json!({"values": ["홍길동", null], "failed": 0}), "{r}");
+    let r = s.call(json!({"op": "decrypt", "conn": "nogroup-stg", "cells": []}));
+    assert_eq!(err(&r), (2, "접속 그룹을 몰라 복호화 키를 고를 수 없음", ""));
+    // 내보내기: 거절은 접속 전, 닿지 않는 접속은 시작에서 실행 오류
+    let r = s.call(json!({"op": "export_start", "conn": "app-prod", "sql": "delete from t"}));
+    assert_eq!(err(&r), (2, "읽기 문장만 전체 내보내기", ""));
+    let r = s.call(json!({"op": "export_start", "conn": "app-stg", "sql": "select 1"}));
+    assert_eq!(err(&r).0, 1);
+    let r = s.call(json!({"op": "export_read", "export": 99}));
+    assert_eq!(err(&r), (2, "전체 내보내기 없음: 99", ""));
+    let r = s.call(json!({"op": "export_cancel", "export": 99}));
+    assert_eq!(r["result"], json!({"canceled": false}), "{r}");
+    // 접속 파일 쓰기와 비밀번호는 원격에서 받지 않는다
+    let conn = json!({"name": "db-x", "kind": "postgresql", "host": "127.0.0.1", "port": 1, "db": "d", "password": "golden-secret-new"});
+    for req in [
+        json!({"op": "conn_save", "conn": conn}),
+        json!({"op": "conn_delete", "name": "logs-stg"}),
+        json!({"op": "conn_get", "name": "logs-stg"}),
+        json!({"op": "conn_test", "conn": conn}),
+    ] {
+        let r = s.call(req);
+        assert_eq!(err(&r).2, "remote_conn_edit", "{r}");
+    }
+    let r = s.call(json!({"op": "conn_test", "name": "app-stg"}));
+    assert!(err(&r).1.starts_with("접속 실패: "), "{r}");
+    let r = s.call(json!({"op": "conn_folder", "names": ["app-stg"], "folder": "ops"}));
+    assert_eq!(r["result"], json!({}), "{r}");
+    let r = s.call(json!({"op": "project"}));
+    let conns = r["result"]["conns"].as_array().unwrap();
+    assert!(conns.iter().any(|c| c["name"] == "app-stg" && c["folder"] == "ops"), "{r}");
+    assert!(!fs::read_to_string(tmp.path().join(".env")).unwrap().contains("golden-secret-new"));
+    let mut sec = secrets(tmp.path());
+    sec.push("golden-secret-new".into());
+    s.finish(&sec);
+}
+
+#[tokio::test]
+async fn 원격_엔진으로_복호화와_접속_시험이_로컬과_같은_답을_낸다() {
+    use idb_engine::{Engine, LocalEngine, RemoteEngine, RemoteSpec};
+    use std::sync::Arc;
+    let tmp = offline_project(1);
+    let spec = RemoteSpec {
+        name: "loop".into(),
+        program: env!("CARGO_BIN_EXE_db-rs").into(),
+        args: vec!["serve".into(), "-p".into(), tmp.path().to_string_lossy().into_owned()],
+    };
+    let remote = Engine::Remote(Arc::new(RemoteEngine::connect(&spec).await.unwrap()));
+    let proj = idb_core::project::load_project(tmp.path()).unwrap();
+    let local = Engine::Local(Arc::new(LocalEngine::new(proj, None)));
+    let enc = idb_core::statcrypt::encrypt("a@b.c", "0123456789abcdef0123456789abcdef", "00112233445566778899aabbccddeeff").unwrap();
+    for e in [&remote, &local] {
+        let d = e.decrypt("app-prod", vec![enc.clone(), "1".into()]).await.unwrap();
+        assert_eq!((d.values, d.failed), (vec![Some("a@b.c".to_string()), None], 0));
+        let r = e.export_start("app-stg", "show all").await.unwrap_err();
+        assert_eq!(r.error, "SELECT 문만 전체 내보내기");
+        assert!(!e.export_cancel(7).await.unwrap());
+        assert!(e.conn_test_saved("app-stg").await.unwrap_err().error.starts_with("접속 실패: "));
+    }
+    // 원격만 접속 편집을 거절한다
+    let r = remote.conn_get("logs-stg").await.unwrap_err();
+    assert_eq!((r.code, r.reason.as_deref()), (3, Some("remote_conn_edit")));
+    assert_eq!(local.conn_get("logs-stg").await.unwrap().user, "loki_user");
+    remote.close().await;
+}

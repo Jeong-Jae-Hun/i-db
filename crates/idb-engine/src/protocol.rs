@@ -41,6 +41,8 @@ pub const REASON_KEYS: &str = "keys";
 pub const REASON_CONFIRM_EXPENSIVE: &str = "confirm_expensive";
 /// 요청마다 요금이 붙는 AWS 조회라 serve 쪽 DB_ALLOW_BILLED=1 없이는 막는다(R72). 확인으로 풀리지 않는다
 pub const REASON_BILLED: &str = "billed";
+/// serve(원격)에서는 접속 파일을 고치지 않고 비밀번호를 받지 않는다(R59). 확인으로 풀리지 않는다
+pub const REASON_REMOTE_CONN_EDIT: &str = "remote_conn_edit";
 
 /// 요청 하나다. op 이름은 snake_case 다. 모르는 필드는 무시해 새 필드를 더해도 옛 서버가 받는다.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -335,6 +337,103 @@ pub enum Request {
         #[serde(default)]
         prod: bool,
     },
+
+    // ─── 복호화·전체 내보내기·접속 편집 ───
+    /// staticEncrypt 꼴(`<hex>^|^<hex>`) 칸을 그 접속 그룹 키로 serve 안에서 푼다(R37). 키는 serve 밖으로 나가지 않는다
+    Decrypt {
+        conn: String,
+        cells: Vec<String>,
+    },
+    /// 읽기 문장 하나를 COPY 로 전체 내보내기 시작(R33.1). 조각은 export_read 로 받는다
+    ExportStart {
+        conn: String,
+        sql: String,
+    },
+    /// 다음 조각. 조각이 올 때까지 기다리고, 끝이면 done 이다. 끝·오류 뒤 그 id 는 사라진다
+    ExportRead {
+        export: u64,
+    },
+    ExportCancel {
+        export: u64,
+    },
+    /// db 전용 접속의 고칠 값(비밀번호 없음, R59.3)
+    ConnGet {
+        name: String,
+    },
+    /// 저장하지 않고 접속을 시험한다(R59.2 Ctrl+T). conn 이 없으면 name 의 접속을 그대로,
+    /// conn 의 비밀번호가 비면 old_name(없으면 conn.name)의 저장된 비밀번호로 시험한다
+    ConnTest {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        conn: Option<ConnFields>,
+        #[serde(default)]
+        old_name: String,
+    },
+    /// old_name 이 비면 더하고 아니면 그 db 전용 접속을 고친다. 비밀번호가 비면 그대로 둔다
+    ConnSave {
+        #[serde(default)]
+        old_name: String,
+        conn: ConnFields,
+    },
+    ConnDelete {
+        name: String,
+    },
+    /// 접속들을 트리 폴더로 옮긴다(R66.2). 빈 folder 는 원래 그룹으로 되돌린다
+    ConnFolder {
+        names: Vec<String>,
+        #[serde(default)]
+        folder: String,
+    },
+}
+
+/// 접속 창의 칸이다(R59.2·R60.1). 비밀번호는 요청에만 싣고 답에는 싣지 않는다(conn_get 은 has_password 만).
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnFields {
+    pub name: String,
+    #[serde(default)]
+    pub group: String,
+    /// postgresql·redis·opensearch·loki·prometheus·grafana·dynamodb·athena·aws
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub db: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub password: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub auth: String,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub profile: String,
+    #[serde(default)]
+    pub workgroup: String,
+    #[serde(default)]
+    pub output: String,
+    #[serde(default)]
+    pub sslmode: String,
+    /// conn_get 의 답만: `.env` 에 비밀번호(토큰)가 있다
+    #[serde(default)]
+    pub has_password: bool,
+}
+
+// 디버그 출력에도 비밀번호가 나오지 않게 한다
+impl fmt::Debug for ConnFields {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}({} {}:{}/{} {})",
+            self.name, self.kind, self.host, self.port, self.db, self.url
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -642,6 +741,75 @@ pub struct PanelOut {
     pub note: String,
 }
 
+/// decrypt 의 답이다. values[i] 는 cells[i] 를 푼 값이고, 암호문 꼴이 아니거나 풀지 못한 칸은 null(원래 값 그대로)이다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Decrypted {
+    pub values: Vec<Option<String>>,
+    /// 암호문 꼴인데 풀지 못한 칸 수(`N칸 풀지 못함`)
+    pub failed: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportStarted {
+    pub export: u64,
+    /// enc() 확장 알림(R52)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// export_read 의 답이다. data 는 줄에서 base64 이고 CSV 바이트 그대로다(글자 경계와 상관없이 자른다).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportChunk {
+    #[serde(with = "base64_bytes")]
+    pub data: Vec<u8>,
+    /// 끝났다. 이때 data 는 비어 있다
+    pub done: bool,
+    /// 지금까지 받은 바이트(이 조각 포함)
+    pub bytes: u64,
+    /// done 일 때 COPY 가 보낸 행 수
+    #[serde(default)]
+    pub rows: i64,
+}
+
+mod base64_bytes {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Canceled {
+    pub canceled: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnTested {
+    /// `PostgreSQL 16.4`·`OpenSearch · 12개` 꼴. 화면은 `접속됨 (…)` 으로 보인다
+    pub version: String,
+    /// 평문·AWS 밖 서명 경고(R59.1·R60.1). 비면 없다
+    #[serde(default)]
+    pub warning: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnSaved {
+    pub conn: ConnSummary,
+    #[serde(default)]
+    pub warning: String,
+    /// 접속은 저장됐지만 .env 비밀번호 줄을 옮기지 못했다(`connection saved but .env was not updated: …`)
+    #[serde(default)]
+    pub env_error: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScanResult {
     pub keys: Vec<String>,
@@ -830,5 +998,26 @@ mod tests {
         });
         let line = request_line(2, &req);
         assert!(line.contains(r#""input":{"text":"select 1"}"#), "{line}");
+    }
+
+    #[test]
+    fn 내보내기_조각은_base64_로_오가고_접속_칸의_비밀번호는_디버그에_없다() {
+        let c = ExportChunk {
+            data: vec![0xff, b'a', b'\n'],
+            done: false,
+            bytes: 3,
+            rows: 0,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["data"], "/2EK");
+        assert_eq!(serde_json::from_value::<ExportChunk>(v).unwrap(), c);
+        let (_, r) = parse_request(r#"{"id":1,"op":"conn_save","conn":{"name":"a","password":"pw-x"}}"#);
+        let Ok(Request::ConnSave { old_name, conn }) = r else {
+            panic!("{r:?}")
+        };
+        assert!(old_name.is_empty() && conn.password == "pw-x");
+        assert!(!format!("{conn:?}").contains("pw-x"));
+        let (_, r) = parse_request(r#"{"id":2,"op":"decrypt","conn":"a","cells":["x"]}"#);
+        assert!(matches!(r, Ok(Request::Decrypt { cells, .. }) if cells == ["x"]));
     }
 }

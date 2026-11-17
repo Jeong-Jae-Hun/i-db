@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ use idb_core::sqlsafe::{
     quote_ident, quote_literal, split_statements,
 };
 use idb_core::textutil::printable;
+use idb_core::{connstore, statcrypt};
 use idb_sources::redis::RedisConn;
 use idb_sources::source::{self, Backend, LOKI_OPEN_LIMIT, OPEN_LIMIT, Query};
 use idb_sources::{Clients, Error, Ran, Session, TableRef, changes_sql, undo_changes};
@@ -43,6 +45,8 @@ pub const REDIS_SESSION_LOST: &str = "이전 Redis 세션 연결이 끊겨 SELEC
 /// serve 가 CLI 하위 명령을 돌리는 함수다. idb-cli 가 넘긴다(엔진이 CLI 에 기대지 않게).
 /// 흐름·보드 한 번의 상한이다. 패널·흐름마다 15초 상한이 따로 있다
 const DASH_TIMEOUT: Duration = Duration::from_secs(60);
+/// 전체 내보내기가 serve 에 쌓아 두는 조각 수(조각마다 1MiB). 클라이언트가 읽지 않으면 COPY 가 멈춘다
+const EXPORT_BUFFER: usize = 4;
 
 pub type CliHandler = Arc<dyn Fn(CliRequest) -> CliResponse + Send + Sync>;
 
@@ -66,7 +70,8 @@ enum RedisUse {
 }
 
 pub struct LocalEngine {
-    proj: Project,
+    /// 접속을 고치면(R59) 다시 읽어 바꾼다. 요청은 시작할 때의 사본을 끝까지 쓴다
+    proj: std::sync::RwLock<Arc<Project>>,
     clients: Arc<Clients>,
     sessions: tokio::sync::Mutex<HashMap<String, Arc<Session>>>,
     redis_session: Mutex<HashMap<String, RedisSlot>>,
@@ -78,12 +83,31 @@ pub struct LocalEngine {
     cli: Option<CliHandler>,
     /// 연 저장소 접속(uuid). AWS 설정 읽기·서명 준비를 트리 펼칠 때마다 하지 않게 둔다
     sources: tokio::sync::Mutex<HashMap<String, Arc<dyn Backend>>>,
+    /// serve 로 원격 클라이언트에 답하는 중이다. 접속 파일 쓰기와 비밀번호 받기를 막는다(R59)
+    serving: AtomicBool,
+    /// 진행 중인 전체 내보내기(R33.1)
+    exports: Mutex<HashMap<u64, Arc<ExportJob>>>,
+    next_export: AtomicU64,
+}
+
+/// 전체 내보내기 하나다. COPY 는 따로 도는 작업이고 조각을 data 채널(EXPORT_BUFFER 개까지)에 넣는다.
+struct ExportJob {
+    conn: Conn,
+    rx: tokio::sync::Mutex<ExportRx>,
+    task: tokio::task::AbortHandle,
+}
+
+struct ExportRx {
+    data: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    /// COPY 가 끝나면 행 수나 오류다
+    end: Option<tokio::sync::oneshot::Receiver<Result<i64, Error>>>,
+    bytes: u64,
 }
 
 impl LocalEngine {
     pub fn new(proj: Project, cli: Option<CliHandler>) -> LocalEngine {
         LocalEngine {
-            proj,
+            proj: std::sync::RwLock::new(Arc::new(proj)),
             clients: Arc::new(Clients::new()),
             sessions: Default::default(),
             redis_session: Default::default(),
@@ -92,11 +116,27 @@ impl LocalEngine {
             db_override: Default::default(),
             cli,
             sources: Default::default(),
+            serving: AtomicBool::new(false),
+            exports: Default::default(),
+            next_export: AtomicU64::new(1),
         }
+    }
+
+    /// serve 가 부른다. 그 뒤로 접속 파일 쓰기(conn_save·conn_delete·conn_get)와 비밀번호가 실린 conn_test 를 거절한다.
+    pub fn set_serving(&self) {
+        self.serving.store(true, Ordering::Relaxed);
+    }
+
+    /// 지금 프로젝트다. 잠금은 사본을 꺼내는 동안만 쥔다.
+    fn proj(&self) -> Arc<Project> {
+        self.proj.read().unwrap().clone()
     }
 
     /// 세션(열린 트랜잭션은 서버가 되돌린다)과 풀을 닫는다.
     pub async fn close(&self) {
+        for (_, job) in self.exports.lock().unwrap().drain() {
+            job.task.abort();
+        }
         let sessions: Vec<Arc<Session>> = self.sessions.lock().await.drain().map(|(_, s)| s).collect();
         for s in sessions {
             s.close().await;
@@ -269,7 +309,7 @@ impl LocalEngine {
             }
             Request::EstimateRows { conn, sql, params } => {
                 let c = self.conn(&conn, Kind::Pg)?;
-                let (sent, _) = self.proj.expand_enc(&c, &sql).map_err(EngineError::usage)?;
+                let (sent, _) = self.proj().expand_enc(&c, &sql).map_err(EngineError::usage)?;
                 let (bound, args) = bind_params(&sent, &params)?;
                 let sql = inline_args(&bound, &args);
                 let sp = self.search_path(&c).await;
@@ -328,7 +368,7 @@ impl LocalEngine {
                 let c = self.conn(&conn, Kind::Pg)?;
                 let err_text = |c: &Conn, e: &Error| self.clean(c, &e.to_string());
                 let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
-                let (res, failed) = lookup::linked(&self.proj, self.clients.clone(), &c, &column, &table, &value, deadline, &err_text)
+                let (res, failed) = lookup::linked(&self.proj(), self.clients.clone(), &c, &column, &table, &value, deadline, &err_text)
                     .await
                     .map_err(EngineError::usage)?;
                 json(LinkedResult {
@@ -355,13 +395,13 @@ impl LocalEngine {
                 if query.trim().is_empty() {
                     return Err(EngineError::usage("찾을 이메일·uid·id·닉네임이 필요함"));
                 }
-                let qs = lookup::user360_plan(&self.proj, &query).map_err(|e| EngineError::run(self.clean_all(&e.to_string())))?;
+                let qs = lookup::user360_plan(&self.proj(), &query).map_err(|e| EngineError::run(self.clean_all(&e.to_string())))?;
                 let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
-                let rows = lookup::user360_run(&self.proj, self.clients.clone(), &qs, deadline).await;
+                let rows = lookup::user360_run(&self.proj(), self.clients.clone(), &qs, deadline).await;
                 let items: Vec<User360Item> = rows
                     .into_iter()
                     .map(|r| User360Item {
-                        error: r.err.map(|e| match self.proj.conn_by_name(&r.conn) {
+                        error: r.err.map(|e| match self.proj().conn_by_name(&r.conn) {
                             Some(c) => self.clean(c, &e),
                             None => self.clean_all(&e),
                         }),
@@ -474,7 +514,7 @@ impl LocalEngine {
                 })
             }
             Request::Flows { names, prod } => {
-                let all = idb_core::flows::load(&self.proj.dir, &self.proj.conns).map_err(|e| EngineError::run(self.clean_all(&e)))?;
+                let all = idb_core::flows::load(&self.proj().dir, &self.proj().conns).map_err(|e| EngineError::run(self.clean_all(&e)))?;
                 let list = if names.is_empty() {
                     all
                 } else {
@@ -489,7 +529,7 @@ impl LocalEngine {
                     list
                 };
                 let deadline = tokio::time::Instant::now() + DASH_TIMEOUT;
-                let boxes = crate::flows::resolve_flows(&self.clients, &self.proj.conns, &list, prod, deadline).await;
+                let boxes = crate::flows::resolve_flows(&self.clients, &self.proj().conns, &list, prod, deadline).await;
                 json(
                     list.iter()
                         .zip(boxes)
@@ -502,9 +542,9 @@ impl LocalEngine {
             }
             Request::BoardList => {
                 use crate::board::{BOARD_DIR, LoadErr, list_boards, load_board};
-                let items: Vec<BoardSummary> = list_boards(&self.proj.dir)
+                let items: Vec<BoardSummary> = list_boards(&self.proj().dir)
                     .into_iter()
-                    .map(|n| match load_board(&self.proj, &n) {
+                    .map(|n| match load_board(&self.proj(), &n) {
                         Ok(b) => BoardSummary {
                             title: b.title,
                             panels: b.panels.len(),
@@ -526,7 +566,314 @@ impl LocalEngine {
                 json(items)
             }
             Request::BoardRun { name, prod } => json(self.board_run(&name, prod).await?),
+            Request::Decrypt { conn, cells } => json(self.decrypt(&conn, cells)?),
+            Request::ExportStart { conn, sql } => json(self.export_start(&conn, &sql).await?),
+            Request::ExportRead { export } => json(self.export_read(export).await?),
+            Request::ExportCancel { export } => {
+                let job = self.exports.lock().unwrap().remove(&export);
+                if let Some(j) = &job {
+                    j.task.abort();
+                }
+                json(Canceled { canceled: job.is_some() })
+            }
+            Request::ConnGet { name } => json(self.conn_get(&name)?),
+            Request::ConnTest { name, conn, old_name } => json(self.conn_test(&name, conn, &old_name).await?),
+            Request::ConnSave { old_name, conn } => json(self.conn_save(&old_name, conn).await?),
+            Request::ConnDelete { name } => {
+                self.conn_delete(&name).await?;
+                json(serde_json::json!({}))
+            }
+            Request::ConnFolder { names, folder } => {
+                self.conn_folder(&names, &folder).await?;
+                json(serde_json::json!({}))
+            }
         }
+    }
+
+    // ─── 복호화 보기 (R37) ───
+
+    /// 암호문 꼴 칸만 그 접속 그룹 키로 푼다. 풀지 못한 칸은 null 로 두고 센다. 키는 답·오류 어디에도 싣지 않는다.
+    fn decrypt(&self, name: &str, cells: Vec<String>) -> Result<Decrypted, EngineError> {
+        let c = self.conn_any(name)?;
+        if c.group.is_empty() {
+            return Err(EngineError::usage("접속 그룹을 몰라 복호화 키를 고를 수 없음"));
+        }
+        let (key, _) = self.proj().aes_key_iv(&c);
+        if key.is_empty() {
+            return Err(EngineError::usage(format!(
+                "{}_AES_KEY 가 .env 에 없음",
+                idb_core::project::env_name(&c.group)
+            )));
+        }
+        let mut failed = 0;
+        let values = cells
+            .iter()
+            .map(|v| {
+                if !statcrypt::looks_encrypted(v) {
+                    return None;
+                }
+                let p = statcrypt::decrypt(v, &key).ok();
+                failed += usize::from(p.is_none());
+                p
+            })
+            .collect();
+        Ok(Decrypted { values, failed })
+    }
+
+    // ─── 전체 내보내기 (R33.1) ───
+
+    /// 문장을 거른 뒤 COPY 를 따로 띄운다. 거절 글은 화면 글과 같다. 편집기 세션이 아니라 풀 연결의 READ ONLY 트랜잭션에서
+    /// 돌아(Go CopyOut) prod 잠금과 상관없이 읽기만 하고, 편집기에서 고른 데이터베이스(R27.1)·search_path(R27.2)를 따른다.
+    async fn export_start(&self, name: &str, sql: &str) -> Result<ExportStarted, EngineError> {
+        let c = self.conn(name, Kind::Pg)?;
+        let stmts = split_statements(sql);
+        match stmts.len() {
+            0 => return Err(EngineError::usage("전체 내보낼 문장이 없음")),
+            1 => {}
+            _ => return Err(EngineError::usage("문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)")),
+        }
+        if !is_read_only_sql(stmts[0]) {
+            return Err(EngineError::usage("읽기 문장만 전체 내보내기"));
+        }
+        if !matches!(first_sql_word(stmts[0]).as_str(), "select" | "with" | "values" | "table") {
+            return Err(EngineError::usage("SELECT 문만 전체 내보내기"));
+        }
+        if !idb_core::params::bind(stmts[0]).1.is_empty() {
+            return Err(EngineError::usage("파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음"));
+        }
+        let (stmt, note) = self.proj().expand_enc(&c, stmts[0]).map_err(EngineError::usage)?;
+        let pg = self.clients.pg(&c).await.map_err(|e| self.run_err(&c, &e))?;
+        let sp = self.search_path(&c).await;
+        let (data_tx, data) = tokio::sync::mpsc::channel(EXPORT_BUFFER);
+        let (end_tx, end) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = end_tx.send(pg.copy_out(&stmt, &sp, &data_tx).await);
+        });
+        let id = self.next_export.fetch_add(1, Ordering::Relaxed);
+        let job = ExportJob {
+            conn: c,
+            rx: tokio::sync::Mutex::new(ExportRx {
+                data,
+                end: Some(end),
+                bytes: 0,
+            }),
+            task: task.abort_handle(),
+        };
+        self.exports.lock().unwrap().insert(id, Arc::new(job));
+        Ok(ExportStarted { export: id, note })
+    }
+
+    /// 다음 조각을 기다려 돌려준다. 채널이 비고 COPY 가 끝났으면 done 이고 그 id 는 지운다. 기다리다 버려도 조각은 잃지 않는다.
+    async fn export_read(&self, id: u64) -> Result<ExportChunk, EngineError> {
+        let job = self
+            .exports
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| EngineError::usage(format!("전체 내보내기 없음: {id}")))?;
+        let mut rx = job.rx.lock().await;
+        if let Some(data) = rx.data.recv().await {
+            rx.bytes += data.len() as u64;
+            return Ok(ExportChunk {
+                data,
+                done: false,
+                bytes: rx.bytes,
+                rows: 0,
+            });
+        }
+        let end = match rx.end.take() {
+            Some(end) => end.await,
+            None => return Err(EngineError::usage(format!("전체 내보내기 없음: {id}"))),
+        };
+        self.exports.lock().unwrap().remove(&id);
+        match end {
+            Ok(Ok(rows)) => Ok(ExportChunk {
+                data: Vec::new(),
+                done: true,
+                bytes: rx.bytes,
+                rows,
+            }),
+            Ok(Err(e)) => Err(self.run_err(&job.conn, &e)),
+            Err(_) => Err(EngineError::run("canceled")),
+        }
+    }
+
+    /// 접속 uuid 를 쓰는 연결·세션·저장소·내보내기를 닫는다(R59.3 고치기 전 Forget). 다음 요청은 새 설정으로 연다.
+    async fn forget_conn(&self, uuid: &str) {
+        let jobs: Vec<u64> = self
+            .exports
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, j)| j.conn.uuid == uuid)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in jobs {
+            if let Some(j) = self.exports.lock().unwrap().remove(&id) {
+                j.task.abort();
+            }
+        }
+        let old = self.sessions.lock().await.remove(uuid);
+        if let Some(s) = old {
+            s.close().await;
+        }
+        self.clients.forget(uuid).await;
+        self.redis_session.lock().unwrap().remove(uuid);
+        self.redis_pool.lock().unwrap().remove(uuid);
+        self.sources.lock().await.remove(uuid);
+    }
+
+    // ─── 접속 편집 (R59·R66.2) ───
+
+    /// 원격 serve 는 접속 파일을 고치지 않는다. 비밀번호가 ssh 너머로 오가고, 그 기계의 프로젝트를 다른 클라이언트도 같이 쓴다.
+    fn local_only(&self) -> Result<(), EngineError> {
+        if self.serving.load(Ordering::Relaxed) {
+            return Err(EngineError::refused(
+                REASON_REMOTE_CONN_EDIT,
+                "원격 serve 에서는 접속을 고치지 않음 (그 기계에서 db conn 으로 고침)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// 고칠 수 있는 db 전용 접속이다. DataGrip 접속은 DataGrip 에서 고친다.
+    fn db_only_conn(&self, name: &str) -> Result<Conn, EngineError> {
+        let c = self
+            .proj()
+            .conn_by_name(name)
+            .cloned()
+            .ok_or_else(|| EngineError::usage(format!("접속 없음: {name}")))?;
+        if c.source != SOURCE_DB {
+            return Err(EngineError::usage(connstore::DATAGRIP_REFUSAL));
+        }
+        Ok(c)
+    }
+
+    fn conn_get(&self, name: &str) -> Result<ConnFields, EngineError> {
+        self.local_only()?;
+        let c = self.db_only_conn(name)?;
+        Ok(ConnFields {
+            name: c.name,
+            group: c.group,
+            kind: c.kind.map(Kind::as_str).unwrap_or("").into(),
+            host: c.host,
+            port: c.port,
+            db: c.db,
+            user: c.user,
+            password: String::new(),
+            url: c.url,
+            auth: c.auth,
+            region: c.region,
+            profile: c.profile,
+            workgroup: c.workgroup,
+            output: c.output,
+            sslmode: c.sslmode,
+            has_password: !c.password.is_empty(),
+        })
+    }
+
+    async fn conn_test(&self, name: &str, fields: Option<ConnFields>, old_name: &str) -> Result<ConnTested, EngineError> {
+        let c = match fields {
+            None => self.conn_any(name)?,
+            Some(f) => {
+                if !f.password.is_empty() {
+                    self.local_only()?;
+                }
+                let stored = if old_name.is_empty() {
+                    f.name.clone()
+                } else {
+                    old_name.to_string()
+                };
+                let mut c = conn_of_fields(f);
+                if c.password.is_empty()
+                    && let Some(old) = self.proj().conn_by_name(&stored)
+                {
+                    c.password = old.password.clone();
+                }
+                connstore::validate_conn(&c).map_err(|e| EngineError::usage(self.clean_with(&c, &e)))?;
+                c
+            }
+        };
+        let warning = connstore::conn_warning(&c).to_string();
+        let version = match tokio::time::timeout(LOOKUP_TIMEOUT, source::test_conn(&c)).await {
+            Ok(r) => r,
+            Err(_) => Err("context deadline exceeded".into()),
+        }
+        .map_err(|e| EngineError::run(format!("접속 실패: {}", self.clean_with(&c, &e))))?;
+        Ok(ConnTested { version, warning })
+    }
+
+    async fn conn_save(&self, old_name: &str, f: ConnFields) -> Result<ConnSaved, EngineError> {
+        self.local_only()?;
+        if !connstore::valid_conn_name(&f.name) {
+            return Err(EngineError::usage("접속 이름은 영숫자·-·_ 만 받음"));
+        }
+        let old = if old_name.is_empty() {
+            None
+        } else {
+            Some(self.db_only_conn(old_name)?)
+        };
+        let c = conn_of_fields(f);
+        connstore::validate_conn(&c).map_err(|e| EngineError::usage(self.clean_with(&c, &e)))?;
+        let warning = connstore::conn_warning(&c).to_string();
+        let dir = self.proj().dir.clone();
+        let r = match &old {
+            Some(o) => connstore::update_conn(&dir, &o.name, c.clone()),
+            None => connstore::add_conn(&dir, c.clone()),
+        };
+        let (saved, env_error) = match r {
+            Ok(saved) => (saved, String::new()),
+            Err(e) if e.env_not_updated => (c.clone(), self.clean_with(&c, &e.msg)),
+            Err(e) => return Err(EngineError::run(self.clean_with(&c, &e.msg))),
+        };
+        if let Some(o) = &old {
+            self.forget_conn(&o.uuid).await;
+            // 파일의 DB 를 고쳤으면 B 로 고른 데이터베이스를 풀고, 그대로면 지킨다(R59.3)
+            if o.db != saved.db {
+                self.db_override.lock().unwrap().remove(&o.uuid);
+            }
+        }
+        self.reload()?;
+        let summary = match self.proj().conn_by_name(&saved.name) {
+            Some(now) => self.summary(now),
+            None => self.summary(&saved),
+        };
+        Ok(ConnSaved {
+            conn: summary,
+            warning,
+            env_error,
+        })
+    }
+
+    async fn conn_delete(&self, name: &str) -> Result<(), EngineError> {
+        self.local_only()?;
+        let c = self.db_only_conn(name)?;
+        connstore::remove_conn(&self.proj().dir, name).map_err(|e| EngineError::run(self.clean_all(&e.msg)))?;
+        self.forget_conn(&c.uuid).await;
+        self.db_override.lock().unwrap().remove(&c.uuid);
+        self.unlocked.lock().unwrap().remove(&c.uuid);
+        self.reload()
+    }
+
+    /// 폴더는 보이는 묶음이라(R66.2) 비밀값이 없어 원격에서도 옮긴다. 연결은 닫지 않는다(R66.3).
+    async fn conn_folder(&self, names: &[String], folder: &str) -> Result<(), EngineError> {
+        let p = self.proj();
+        let mut conns = Vec::with_capacity(names.len());
+        for n in names {
+            conns.push(p.conn_by_name(n).ok_or_else(|| EngineError::usage(format!("접속 없음: {n}")))?);
+        }
+        connstore::set_folder(&p.dir, &conns, folder).map_err(|e| EngineError::usage(self.clean_all(&e)))?;
+        self.reload()
+    }
+
+    /// 접속 파일을 다시 읽어 바꾼다. 진행 중인 요청은 옛 사본으로 끝난다.
+    fn reload(&self) -> Result<(), EngineError> {
+        let dir = self.proj().dir.clone();
+        let p = idb_core::project::load_project(&dir)
+            .map_err(|e| EngineError::run(format!("접속을 저장했지만 다시 읽지 못함: {}", self.clean_all(&e.to_string()))))?;
+        *self.proj.write().unwrap() = Arc::new(p);
+        Ok(())
     }
 
     // ─── 저장소 ───
@@ -545,7 +892,7 @@ impl LocalEngine {
         if name.is_empty() {
             return Err(EngineError::usage("접속 이름이 필요함"));
         }
-        self.proj
+        self.proj()
             .conn_by_name(name)
             .filter(|c| c.kind.is_some())
             .cloned()
@@ -579,13 +926,13 @@ impl LocalEngine {
 
     async fn board_run(&self, name: &str, prod: bool) -> Result<BoardResult, EngineError> {
         use crate::board::{BOARD_DIR, LoadErr, load_board, panel_prod, panel_value, run_panels};
-        let b = match load_board(&self.proj, name) {
+        let b = match load_board(&self.proj(), name) {
             Ok(b) => b,
             Err(LoadErr::NotFound) => return Err(EngineError::usage(format!("보드 없음: {name} ({BOARD_DIR})"))),
             Err(LoadErr::Other(e)) => return Err(EngineError::usage(self.clean_all(&e))),
         };
         let deadline = tokio::time::Instant::now() + DASH_TIMEOUT;
-        let results = run_panels(&self.clients, &self.proj, &b, prod, deadline).await;
+        let results = run_panels(&self.clients, &self.proj(), &b, prod, deadline).await;
         let panels = b
             .panels
             .iter()
@@ -596,7 +943,7 @@ impl LocalEngine {
                     conn: p.conn.clone(),
                     flow: p.flow.clone(),
                     view: p.view.clone(),
-                    prod: panel_prod(&self.proj, p),
+                    prod: panel_prod(&self.proj(), p),
                     note: r.note,
                     ..Default::default()
                 };
@@ -624,31 +971,31 @@ impl LocalEngine {
     }
 
     fn project(&self) -> ProjectInfo {
+        let p = self.proj();
         ProjectInfo {
-            dir: self.proj.dir.to_string_lossy().into_owned(),
-            conns: self
-                .proj
-                .conns
-                .iter()
-                .map(|c| ConnSummary {
-                    name: c.name.clone(),
-                    group: c.group.clone(),
-                    folder: folder_of(c).into(),
-                    kind: c.kind_str().into(),
-                    env: c.env().into(),
-                    host: if c.host.is_empty() { c.url.clone() } else { c.host.clone() },
-                    db: self
-                        .db_override
-                        .lock()
-                        .unwrap()
-                        .get(&c.uuid)
-                        .cloned()
-                        .unwrap_or_else(|| c.db.clone()),
-                    source: if c.source == SOURCE_DB { SOURCE_DB } else { "datagrip" }.into(),
-                    uuid: c.uuid.clone(),
-                })
-                .collect(),
-            warnings: self.proj.warnings.iter().map(|w| self.clean_all(w)).collect(),
+            dir: p.dir.to_string_lossy().into_owned(),
+            conns: p.conns.iter().map(|c| self.summary(c)).collect(),
+            warnings: p.warnings.iter().map(|w| self.clean_all(w)).collect(),
+        }
+    }
+
+    fn summary(&self, c: &Conn) -> ConnSummary {
+        ConnSummary {
+            name: c.name.clone(),
+            group: c.group.clone(),
+            folder: folder_of(c).into(),
+            kind: c.kind_str().into(),
+            env: c.env().into(),
+            host: if c.host.is_empty() { c.url.clone() } else { c.host.clone() },
+            db: self
+                .db_override
+                .lock()
+                .unwrap()
+                .get(&c.uuid)
+                .cloned()
+                .unwrap_or_else(|| c.db.clone()),
+            source: if c.source == SOURCE_DB { SOURCE_DB } else { "datagrip" }.into(),
+            uuid: c.uuid.clone(),
         }
     }
 
@@ -659,14 +1006,14 @@ impl LocalEngine {
         if name.is_empty() {
             return Err(EngineError::usage("접속 이름이 필요함"));
         }
-        let c = self
-            .proj
+        let mut c = self
+            .proj()
             .conn_by_name(name)
+            .cloned()
             .ok_or_else(|| EngineError::usage(format!("접속 없음: {name}")))?;
         if c.kind != Some(kind) {
             return Err(EngineError::usage(format!("{name} 는 {kind} 접속이 아님")));
         }
-        let mut c = c.clone();
         if let Some(db) = self.db_override.lock().unwrap().get(&c.uuid) {
             c.db = db.clone();
         }
@@ -676,7 +1023,7 @@ impl LocalEngine {
     /// 내보낼 글로 만든다. 서버가 비밀번호·키를 되돌려줘도 나오지 않게 그 접속의 비밀번호와 모든 AES 키·IV 를 지운다(CLI err_text 와 같다).
     fn clean(&self, c: &Conn, msg: &str) -> String {
         let mut msg = redact(msg, &c.password);
-        for v in self.proj.aes_env.values() {
+        for v in self.proj().aes_env.values() {
             msg = redact(&msg, v);
         }
         printable(&msg, true)
@@ -685,13 +1032,18 @@ impl LocalEngine {
     /// 접속을 모를 때(프로젝트 경고·여러 접속 조회)는 모든 비밀번호를 지운다.
     fn clean_all(&self, msg: &str) -> String {
         let mut msg = msg.to_string();
-        for c in &self.proj.conns {
+        for c in &self.proj().conns {
             msg = redact(&msg, &c.password);
         }
-        for v in self.proj.aes_env.values() {
+        for v in self.proj().aes_env.values() {
             msg = redact(&msg, v);
         }
         printable(&msg, true)
+    }
+
+    /// 저장 전 접속(프로젝트에 아직 없음)의 오류 글이다. 받은 비밀번호와 프로젝트의 비밀번호·키를 모두 지운다.
+    fn clean_with(&self, c: &Conn, msg: &str) -> String {
+        self.clean_all(&redact(msg, &c.password))
     }
 
     fn run_err(&self, c: &Conn, e: &Error) -> EngineError {
@@ -758,7 +1110,7 @@ impl LocalEngine {
             s.close().await;
         }
         self.clients.forget(&c.uuid).await;
-        let base = self.proj.conn_by_name(name).map(|c| c.db.clone()).unwrap_or_default();
+        let base = self.proj().conn_by_name(name).map(|c| c.db.clone()).unwrap_or_default();
         {
             let mut m = self.db_override.lock().unwrap();
             if db.is_empty() || db == base {
@@ -802,8 +1154,9 @@ impl LocalEngine {
 
     fn prod_lock(&self, name: &str, unlock: Option<bool>) -> Result<LockState, EngineError> {
         let c = self
-            .proj
+            .proj()
             .conn_by_name(name)
+            .cloned()
             .ok_or_else(|| EngineError::usage(format!("접속 없음: {name}")))?;
         if let Some(open) = unlock {
             if c.env() != "prod" {
@@ -816,7 +1169,7 @@ impl LocalEngine {
                 m.remove(&c.uuid);
             }
         }
-        Ok(self.lock_state(c))
+        Ok(self.lock_state(&c))
     }
 
     fn lock_refusal(&self, c: &Conn, tx_hint: bool) -> EngineError {
@@ -863,7 +1216,7 @@ impl LocalEngine {
         if stmts.len() != 1 {
             return Err(EngineError::usage(format!("문장 하나만 실행함 ({}개)", stmts.len())));
         }
-        let (orig, note) = self.proj.expand_enc(&c, stmts[0]).map_err(EngineError::usage)?;
+        let (orig, note) = self.proj().expand_enc(&c, stmts[0]).map_err(EngineError::usage)?;
         // 판정은 감싸기 전 문장으로 한다(Go ui.go ctrl+e·alt+e). ANALYZE 없이 감싼 EXPLAIN 은 속 문장을 실행하지 않아 늘 읽기이고,
         // ANALYZE 로 감쌌거나 직접 쓴 EXPLAIN 이면 속 문장의 읽기·쓰기와 위험(R25)이 그대로다. 감싼 글로 가르면 ANALYZE 낱말에 걸린다
         let analyze = explain.as_ref().is_some_and(|o| o.analyze);
@@ -1150,6 +1503,28 @@ impl LocalEngine {
     }
 }
 
+/// 접속 창의 칸을 접속으로 바꾼다. 종류 글이 틀리면 validate_conn 이 거절한다.
+fn conn_of_fields(f: ConnFields) -> Conn {
+    Conn {
+        kind: Kind::parse(&f.kind),
+        name: f.name,
+        group: f.group,
+        host: f.host,
+        port: f.port,
+        db: f.db,
+        user: f.user,
+        password: f.password,
+        url: f.url,
+        auth: f.auth,
+        region: f.region,
+        profile: f.profile,
+        workgroup: f.workgroup,
+        output: f.output,
+        sslmode: f.sslmode,
+        ..Default::default()
+    }
+}
+
 fn json<T: Serialize>(v: T) -> Result<Value, EngineError> {
     serde_json::to_value(v).map_err(|e| EngineError::run(e.to_string()))
 }
@@ -1261,6 +1636,287 @@ mod tests {
             .await
             .is_ok()
         );
+    }
+
+    // ─── 복호화·전체 내보내기·접속 편집 ───
+
+    const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn one_conn(c: Conn) -> LocalEngine {
+        let proj = Project {
+            dir: Default::default(),
+            conns: vec![c],
+            mapping: Default::default(),
+            warnings: vec![],
+            aes_env: [("GRP_AES_KEY".to_string(), KEY.to_string())].into(),
+        };
+        LocalEngine::new(proj, None)
+    }
+
+    fn pg_conn(name: &str, group: &str, port: u16) -> Conn {
+        Conn {
+            name: name.into(),
+            uuid: format!("u-{name}"),
+            group: group.into(),
+            kind: Some(Kind::Pg),
+            host: "127.0.0.1".into(),
+            port,
+            user: "u".into(),
+            db: "d".into(),
+            sslmode: "disable".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 복호화는_암호문_꼴_칸만_풀고_못_푼_칸은_세고_키는_내지_않는다() {
+        let e = one_conn(pg_conn("a", "grp", 1));
+        let enc = statcrypt::encrypt("홍길동", KEY, "00112233445566778899aabbccddeeff").unwrap();
+        let other = statcrypt::encrypt("x", "another-key", "00112233445566778899aabbccddeeff").unwrap();
+        let r = e.decrypt("a", vec![enc, "plain".into(), "NULL".into(), other]).unwrap();
+        assert_eq!(r.values, [Some("홍길동".to_string()), None, None, None]);
+        assert_eq!(r.failed, 1);
+        let e = one_conn(pg_conn("a", "", 1));
+        assert_eq!(
+            e.decrypt("a", vec![]).unwrap_err().error,
+            "접속 그룹을 몰라 복호화 키를 고를 수 없음"
+        );
+        let e = one_conn(pg_conn("a", "app-x", 1));
+        assert_eq!(e.decrypt("a", vec![]).unwrap_err().error, "APP_X_AES_KEY 가 .env 에 없음");
+    }
+
+    /// 시작 메시지 뒤 simple query 마다 답하는 PostgreSQL 흉내다. COPY 는 rows 행(각 `n,<pad>\n`)을 보낸다.
+    async fn fake_pg(rows: usize, pad: usize) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen2 = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = l.accept().await else { return };
+                let seen = seen2.clone();
+                tokio::spawn(async move {
+                    let msg = |tag: u8, body: &[u8]| {
+                        let mut m = vec![tag];
+                        m.extend_from_slice(&(body.len() as u32 + 4).to_be_bytes());
+                        m.extend_from_slice(body);
+                        m
+                    };
+                    let mut len = [0u8; 4];
+                    if s.read_exact(&mut len).await.is_err() {
+                        return;
+                    }
+                    let mut rest = vec![0u8; u32::from_be_bytes(len) as usize - 4];
+                    let _ = s.read_exact(&mut rest).await;
+                    let _ = s.write_all(&[msg(b'R', &0u32.to_be_bytes()), msg(b'Z', b"I")].concat()).await;
+                    let mut status = b'I';
+                    loop {
+                        let mut head = [0u8; 5];
+                        if s.read_exact(&mut head).await.is_err() {
+                            return;
+                        }
+                        let mut body = vec![0u8; u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize - 4];
+                        if s.read_exact(&mut body).await.is_err() || head[0] != b'Q' {
+                            return;
+                        }
+                        let q = String::from_utf8_lossy(&body[..body.len() - 1]).into_owned();
+                        seen.lock().unwrap().push(q.clone());
+                        let mut out = Vec::new();
+                        if q.starts_with("COPY") {
+                            out.extend(msg(b'H', &[0, 0, 0]));
+                            out.extend(msg(b'd', b"n,v\n"));
+                            for i in 0..rows {
+                                out.extend(msg(b'd', format!("{i},{}\n", "x".repeat(pad)).as_bytes()));
+                            }
+                            out.extend(msg(b'c', b""));
+                            out.extend(msg(b'C', format!("COPY {rows}\0").as_bytes()));
+                        } else {
+                            if q.starts_with("BEGIN") {
+                                status = b'T';
+                            } else if q.starts_with("ROLLBACK") {
+                                status = b'I';
+                            }
+                            out.extend(msg(b'C', b"OK\0"));
+                        }
+                        out.extend(msg(b'Z', &[status]));
+                        if s.write_all(&out).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    #[tokio::test]
+    async fn 전체_내보내기는_조각으로_다_받고_행_수로_끝난다() {
+        let (port, seen) = fake_pg(3000, 1000).await;
+        let e = one_conn(pg_conn("a", "grp", port));
+        let st = e.export_start("a", "select * from t;").await.unwrap();
+        let (mut data, mut chunks) = (Vec::new(), 0);
+        let end = loop {
+            let c = e.export_read(st.export).await.unwrap();
+            if c.done {
+                break c;
+            }
+            assert!(c.data.len() <= idb_sources::pg::EXPORT_CHUNK + 1100);
+            data.extend(c.data);
+            chunks += 1;
+        };
+        assert_eq!(end.rows, 3000);
+        assert_eq!(end.bytes, data.len() as u64);
+        assert!(chunks >= 3, "{chunks}");
+        assert!(data.starts_with(b"n,v\n0,x") && data.ends_with(b"\n"));
+        assert_eq!(data.iter().filter(|&&b| b == b'\n').count(), 3001);
+        // 끝난 id 는 사라진다
+        assert_eq!(e.export_read(st.export).await.unwrap_err().code, CODE_USAGE);
+        let q = seen.lock().unwrap().clone();
+        assert!(q.contains(&"BEGIN READ ONLY".to_string()), "{q:?}");
+        assert!(
+            q.contains(&"COPY (select * from t\n) TO STDOUT WITH (FORMAT csv, HEADER)".to_string()),
+            "{q:?}"
+        );
+        assert_eq!(q.last().map(String::as_str), Some("ROLLBACK"));
+    }
+
+    async fn cancel(e: &LocalEngine, export: u64) -> Value {
+        e.handle(Request::ExportCancel { export }).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn 전체_내보내기는_취소하면_id_가_사라진다() {
+        let (port, _) = fake_pg(20_000, 1000).await;
+        let e = one_conn(pg_conn("a", "grp", port));
+        let st = e.export_start("a", "table t").await.unwrap();
+        assert!(!e.export_read(st.export).await.unwrap().done);
+        assert_eq!(cancel(&e, st.export).await, serde_json::json!({"canceled": true}));
+        assert_eq!(e.export_read(st.export).await.unwrap_err().code, CODE_USAGE);
+        assert_eq!(cancel(&e, st.export).await, serde_json::json!({"canceled": false}));
+    }
+
+    #[tokio::test]
+    async fn 전체_내보내기는_읽기_SELECT_문장_하나만_받는다() {
+        let e = one_conn(pg_conn("a", "grp", 1));
+        let err = |sql: &'static str| {
+            let e = &e;
+            async move { e.export_start("a", sql).await.unwrap_err().error }
+        };
+        assert_eq!(err("delete from t").await, "읽기 문장만 전체 내보내기");
+        assert_eq!(err("show search_path").await, "SELECT 문만 전체 내보내기");
+        assert_eq!(
+            err("select 1; select 2").await,
+            "문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)"
+        );
+        assert_eq!(
+            err("select * from t where id = :id").await,
+            "파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음"
+        );
+        assert_eq!(err("").await, "전체 내보낼 문장이 없음");
+    }
+
+    const DATA_SOURCES: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourceManagerImpl">
+    <data-source name="dg-stg" group="grp" uuid="u-dg"><driver-ref>postgresql</driver-ref><jdbc-url>jdbc:postgresql://127.0.0.1:1/app</jdbc-url></data-source>
+  </component>
+</project>"#;
+
+    fn conn_project() -> (tempfile::TempDir, LocalEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".idea")).unwrap();
+        std::fs::write(dir.path().join(".idea/dataSources.xml"), DATA_SOURCES).unwrap();
+        let proj = idb_core::project::load_project(dir.path()).unwrap();
+        (dir, LocalEngine::new(proj, None))
+    }
+
+    fn fields(name: &str, password: &str) -> ConnFields {
+        ConnFields {
+            name: name.into(),
+            group: "grp".into(),
+            kind: "postgresql".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            db: "app".into(),
+            user: "ro".into(),
+            password: password.into(),
+            sslmode: "disable".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn 접속을_더하고_고치고_지우면_파일과_접속_목록이_바로_바뀐다() {
+        let (dir, e) = conn_project();
+        let saved = e.conn_save("", fields("db-stg", "pw-secret-1")).await.unwrap();
+        assert_eq!((saved.conn.name.as_str(), saved.conn.source.as_str()), ("db-stg", "db"));
+        let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+        assert!(env.contains("PG_DB_STG_PASSWORD=pw-secret-1"), "{env}");
+        assert!(e.project().conns.iter().any(|c| c.name == "db-stg"));
+        let got = e.conn_get("db-stg").unwrap();
+        assert!(got.has_password && got.password.is_empty() && got.user == "ro");
+        assert!(!serde_json::to_string(&got).unwrap().contains("pw-secret-1"));
+        // 이름을 바꾸고 비밀번호를 비우면 .env 값을 새 키로 옮긴다
+        let mut f = fields("db-stg2", "");
+        f.db = "app2".into();
+        e.conn_save("db-stg", f).await.unwrap();
+        let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+        assert!(
+            env.contains("PG_DB_STG2_PASSWORD=pw-secret-1") && !env.contains("PG_DB_STG_PASSWORD"),
+            "{env}"
+        );
+        let names: Vec<String> = e.project().conns.into_iter().map(|c| c.name).collect();
+        assert!(
+            names.contains(&"db-stg2".to_string()) && !names.contains(&"db-stg".to_string()),
+            "{names:?}"
+        );
+        // DataGrip 접속은 고치지 않는다
+        assert_eq!(
+            e.conn_save("dg-stg", fields("dg-stg", "")).await.unwrap_err().error,
+            connstore::DATAGRIP_REFUSAL
+        );
+        assert_eq!(e.conn_delete("dg-stg").await.unwrap_err().error, connstore::DATAGRIP_REFUSAL);
+        assert_eq!(
+            e.conn_save("", fields("bad name", "")).await.unwrap_err().error,
+            "접속 이름은 영숫자·-·_ 만 받음"
+        );
+        // 폴더만 옮긴다
+        e.conn_folder(&["dg-stg".into()], "ops").await.unwrap();
+        assert_eq!(e.project().conns.iter().find(|c| c.name == "dg-stg").unwrap().folder, "ops");
+        e.conn_delete("db-stg2").await.unwrap();
+        assert!(!e.project().conns.iter().any(|c| c.name == "db-stg2"));
+        let env = std::fs::read_to_string(dir.path().join(".env")).unwrap();
+        assert!(!env.contains("pw-secret-1"), "{env}");
+    }
+
+    #[tokio::test]
+    async fn 접속_시험_오류에는_받은_비밀번호가_없다() {
+        let (_dir, e) = conn_project();
+        let err = e
+            .conn_test(String::new().as_str(), Some(fields("x", "pw-secret-2")), "")
+            .await
+            .unwrap_err();
+        assert!(err.error.starts_with("접속 실패: "), "{err:?}");
+        assert!(!err.error.contains("pw-secret-2"));
+        let mut f = fields("x", "");
+        f.kind = "mysql".into();
+        assert_eq!(e.conn_test("", Some(f), "").await.unwrap_err().code, CODE_USAGE);
+    }
+
+    #[tokio::test]
+    async fn serve_에서는_접속_파일을_쓰지_않고_비밀번호를_받지_않는다() {
+        let (dir, e) = conn_project();
+        e.set_serving();
+        let refused = |r: EngineError| (r.code, r.reason);
+        let want = (CODE_REFUSED, Some(REASON_REMOTE_CONN_EDIT.to_string()));
+        assert_eq!(refused(e.conn_save("", fields("db-stg", "pw")).await.unwrap_err()), want);
+        assert_eq!(refused(e.conn_delete("dg-stg").await.unwrap_err()), want);
+        assert_eq!(refused(e.conn_get("dg-stg").unwrap_err()), want);
+        assert_eq!(refused(e.conn_test("", Some(fields("x", "pw")), "").await.unwrap_err()), want);
+        // 비밀번호 없는 시험과 폴더 옮기기는 된다
+        assert_eq!(e.conn_test("dg-stg", None, "").await.unwrap_err().code, CODE_RUN);
+        e.conn_folder(&["dg-stg".into()], "ops").await.unwrap();
+        assert!(!dir.path().join(".dbtui/connections.json").exists());
     }
 
     #[test]
