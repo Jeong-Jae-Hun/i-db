@@ -1,0 +1,16 @@
+[package]
+name = "idb-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+idb-core.workspace = true
+idb-sources.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# process: 원격 ssh 자식 프로세스, io-std: serve 의 표준 입출력
+tokio = { workspace = true, features = ["process", "io-std"] }
+
+[dev-dependencies]
+tempfile.workspace = true
