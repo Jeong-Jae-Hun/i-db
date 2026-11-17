@@ -1,19 +1,24 @@
 #![allow(non_snake_case)]
-//! PostgreSQL·Redis 클라이언트. Go `internal/db` 의 CLI 가 쓰는 쪽(backend·readonly·meta·export·schemadiff·linked)을 옮긴다.
+//! PostgreSQL·Redis 클라이언트와 읽기 전용 저장소. Go `internal/db` 의 CLI 가 쓰는 쪽(backend·readonly·meta·export·schemadiff·linked)을 옮긴다.
 //! 결과 글은 Go 판과 같아야 해서 PostgreSQL 은 텍스트 형식으로 받고 명령 태그를 그대로 싣는 작은 프로토콜 구현을 둔다
 //! (tokio-postgres 는 결과를 바이너리로만 받고 명령 태그를 내주지 않는다).
-//! 읽기 전용 저장소(R60~)는 source 틀 아래 종류마다 모듈을 둔다(dynamo·athena·awsres).
+//! 읽기 전용 저장소(R60~)는 source 틀 아래 종류마다 모듈을 둔다(opensearch·obs·dynamo·athena·awsres).
 
 pub mod athena;
 mod aws;
 pub mod awsres;
 mod dns;
 pub mod dynamo;
+#[cfg(test)]
+mod fakehttp;
 pub mod health;
+mod httpc;
 pub mod linked;
 #[cfg(test)]
 mod live_tests;
 mod net;
+pub mod obs;
+pub mod opensearch;
 pub mod pg;
 pub mod redis;
 pub mod schemadiff;
@@ -61,6 +66,14 @@ pub enum Error {
 impl Error {
     pub fn msg(s: impl Into<String>) -> Error {
         Error::Other(s.into())
+    }
+
+    /// NeedsConfirm 에 실린 까닭이다. 아니면 빈 글이다(Go `source.ConfirmReason`).
+    pub fn confirm_reason(&self) -> &str {
+        match self {
+            Error::NeedsConfirm(r) => r,
+            _ => "",
+        }
     }
 
     /// 서버 statement_timeout 으로 멈춘 오류(57014)인지다.

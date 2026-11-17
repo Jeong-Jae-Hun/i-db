@@ -1,5 +1,5 @@
 //! PostgreSQL·Redis 밖의 읽기 전용 저장소(R60~R63, R67·R68)를 같은 트리·결과로 다루는 틀이다. Go `internal/source` 와
-//! 루트 `sources.go` 의 newSource·testConn 이다. 종류마다 모듈이 Backend 를 구현하고 CLI 는 이 트레이트만 본다.
+//! 루트 `sources.go` 의 newSource·testConn 이다. 종류마다 모듈이 Backend 를 구현하고 CLI·엔진은 이 트레이트만 본다.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -10,7 +10,9 @@ use idb_core::result::QueryResult;
 use idb_core::sqlsafe::{is_ident_byte, mask_sql};
 
 use crate::Error;
-use crate::health::Health;
+pub use crate::health::{Health, Metric};
+use crate::obs::{Grafana, Loki, Prometheus};
+use crate::opensearch::OpenSearch;
 
 /// 트리 한 줄이다. path 는 children·open 에 그대로 돌려줄 종류별 경로다(예: "index/field").
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -27,7 +29,7 @@ pub struct Node {
 }
 
 /// 편집기 실행 한 번이다. since·until 은 Loki·Prometheus 범위(나노초)이고 0 이면 종류 기본값(1시간)을 쓴다.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Query {
     pub text: String,
     pub since_ns: i64,
@@ -42,9 +44,18 @@ pub struct Query {
     pub deadline: Option<tokio::time::Instant>,
 }
 
+// ─── 종류 공통 값 (R60~R63) ───
+
+/// HTTP 응답 본문 상한이다. 결과 표는 MAX_ROWS 행이라 이보다 큰 응답은 질의가 잘못된 것으로 본다
+pub const MAX_BODY: usize = 16 << 20;
 /// 트리 Enter 미리 보기 행 수다(R61.1·R63.1). Loki 만 LOKI_OPEN_LIMIT 줄이다(R62.1)
 pub const OPEN_LIMIT: usize = 50;
 pub const LOKI_OPEN_LIMIT: usize = 100;
+const HOUR_NS: i64 = 3_600_000_000_000;
+/// Loki·Prometheus 범위·라벨 값 기본이다(R62)
+pub const DEFAULT_RANGE_NS: i64 = HOUR_NS;
+/// 이 범위를 넘는 Loki·Prometheus 질의는 확인을 받는다(R60.2)
+pub const CONFIRM_RANGE_NS: i64 = 7 * 24 * HOUR_NS;
 
 /// 요금이 붙는 조회를 여는 환경 변수다. 기본은 막음이다(R72).
 pub const ALLOW_BILLED_ENV: &str = "DB_ALLOW_BILLED";
@@ -75,16 +86,9 @@ pub(crate) fn set_billed_for_test(allow: bool) {
     BILLED_FOR_TEST.with(|c| c.set(Some(allow)));
 }
 
-/// err 에 실린 확인 까닭이다. NeedsConfirm 이 아니거나 까닭이 없으면 빈 글이다.
-pub fn confirm_reason(err: &Error) -> String {
-    match err {
-        Error::NeedsConfirm(r) => r.clone(),
-        _ => String::new(),
-    }
-}
-
 /// SQL 한 문장을 보낼 글과 문자열·주석·"따옴표 이름" 밖의 낱말(소문자)로 나눈다. 끝의 ;·공백·주석은 떼고,
-/// 그 뒤에도 ; 가 남으면 여러 문장이라 Error::Write 다(R61.2·R68.2).
+/// 그 뒤에도 ; 가 남으면 여러 문장이라 Error::Write 다(R61.2·R68.2). 어휘는 mask_sql 로 읽는다. 종류마다 낱말로 쓰기를 가른다.
+/// 단, mask_sql 은 PostgreSQL 의 $태그$ 도 문자열로 본다. OpenSearch·Athena SQL 에는 없는 꼴이라 그 안에 숨긴 글은 서버가 문법 오류로 거절한다.
 pub fn sql_words(text: &str) -> Result<(String, Vec<String>), Error> {
     let masked = mask_sql(text);
     let n = masked.trim_end_matches([';', ' ', '\t', '\r', '\n', '\x0c', '\x0b']).len();
@@ -92,13 +96,16 @@ pub fn sql_words(text: &str) -> Result<(String, Vec<String>), Error> {
     if masked.contains(';') {
         return Err(Error::Write("multiple statements".into()));
     }
+    // Go strings.ToLower 처럼 유니코드로 내린다(K 켈빈 기호 → k)
     let words = masked
-        .to_ascii_lowercase()
-        .split(|c: char| (c as u32) > 0x7f || !is_ident_byte(c as u8))
+        .to_lowercase()
+        .split(|c: char| c as u32 > 0x7f || !is_ident_byte(c as u8))
         .filter(|w| !w.is_empty())
         .map(String::from)
         .collect();
-    Ok((text[..n].trim().to_string(), words))
+    // 가린 글은 원문과 길이·글자 경계가 같아 n 이 원문에서도 글자 경계다
+    let stmt = text.get(..n).unwrap_or(text).trim().to_string();
+    Ok((stmt, words))
 }
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -122,9 +129,34 @@ pub async fn open(c: &Conn) -> Result<Box<dyn Backend>, Error> {
         Some(Kind::DynamoDb) => Ok(Box::new(crate::dynamo::Backend::new(c).await?)),
         Some(Kind::Athena) => Ok(Box::new(crate::athena::Backend::new(c).await?)),
         Some(Kind::Aws) => Ok(Box::new(crate::awsres::Backend::new(c).await?)),
+        Some(Kind::OpenSearch) => Ok(Box::new(OpenSearch::new(c).await?)),
+        Some(Kind::Loki) => Ok(Box::new(Loki::new(c)?)),
+        Some(Kind::Prometheus) => Ok(Box::new(Prometheus::new(c)?)),
+        Some(Kind::Grafana) => Ok(Box::new(Grafana::new(c)?)),
         _ => Err(Error::msg(format!("{} source is not built in", c.kind_str()))),
     }
 }
+
+/// HTTP 저장소는 같은 이름의 고유 메서드(children·run·open·probe)를 두고 여기서 Backend 로 잇는다.
+macro_rules! http_backend {
+    ($($t:ty),*) => {$(
+        impl Backend for $t {
+            fn children<'a>(&'a self, path: &'a str) -> BoxFut<'a, Result<Vec<Node>, Error>> {
+                Box::pin(<$t>::children(self, path))
+            }
+            fn run<'a>(&'a self, q: &'a Query) -> BoxFut<'a, Result<QueryResult, Error>> {
+                Box::pin(<$t>::run(self, q))
+            }
+            fn open<'a>(&'a self, path: &'a str, limit: usize) -> BoxFut<'a, Result<QueryResult, Error>> {
+                Box::pin(<$t>::open(self, path, limit))
+            }
+            fn probe(&self) -> Option<BoxFut<'_, Health>> {
+                Some(Box::pin(<$t>::probe(self)))
+            }
+        }
+    )*};
+}
+http_backend!(OpenSearch, Loki, Prometheus, Grafana);
 
 /// 종류의 보일 이름이다(Go connKinds).
 pub fn kind_label(k: Option<Kind>) -> &'static str {
@@ -175,6 +207,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn 오류_글과_확인_까닭은_Go_와_같다() {
+        let w = "read-only source: write requests are not sent";
+        assert_eq!(Error::Write(String::new()).to_string(), w);
+        assert_eq!(Error::Write("delete".into()).to_string(), format!("{w}: delete"));
+        let e = Error::NeedsConfirm("범위 7일 초과".into());
+        assert_eq!(e.to_string(), "expensive query needs confirmation: 범위 7일 초과");
+        assert_eq!(e.confirm_reason(), "범위 7일 초과");
+        assert_eq!(Error::msg("x").confirm_reason(), "");
+        assert_eq!(Error::Billed.to_string(), "요금이 붙는 조회라 막음 (DB_ALLOW_BILLED=1 로 허용)");
+    }
+
+    #[test]
     fn 한_문장만_낱말로_나누고_끝_세미콜론은_뗀다() {
         let (stmt, words) = sql_words("SELECT a FROM \"T\" -- x;\n ;").unwrap();
         assert_eq!(stmt, "SELECT a FROM \"T\"");
@@ -183,5 +227,25 @@ mod tests {
             sql_words("select 1; drop t").unwrap_err(),
             Error::Write("multiple statements".into())
         );
+    }
+
+    #[test]
+    fn SQL_낱말은_문자열_주석_밖만_세고_끝_세미콜론은_뗀다() {
+        let (stmt, words) = sql_words("SELECT a FROM t WHERE b = 'delete' -- drop\n ;; ").unwrap();
+        assert_eq!(stmt, "SELECT a FROM t WHERE b = 'delete'");
+        assert_eq!(words, ["select", "a", "from", "t", "where", "b"]);
+        assert_eq!(sql_words("select 1; select 2"), Err(Error::Write("multiple statements".into())));
+    }
+
+    #[test]
+    fn 확인_실패는_비밀값을_지우고_한_줄로_붙인다() {
+        let h = Health::failed(std::time::Duration::ZERO, "bad\n  pw hunter2", "hunter2");
+        assert_eq!(h.err, "bad pw ***");
+        assert!(!h.ok);
+        let h = Health {
+            metrics: vec![Metric::new("", "green", false), Metric::new("문서", "3", false)],
+            ..Default::default()
+        };
+        assert_eq!(h.summary(), "green · 문서 3");
     }
 }

@@ -536,6 +536,275 @@
   ]
  },
  {
+  "name": "help-logs",
+  "project": "offline",
+  "args": [
+   "help",
+   "logs"
+  ]
+ },
+ {
+  "name": "help-metrics",
+  "project": "offline",
+  "args": [
+   "help",
+   "metrics"
+  ]
+ },
+ {
+  "name": "source-query-write",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "DELETE logs"
+  ]
+ },
+ {
+  "name": "source-query-write-stdin",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg"
+  ],
+  "stdin": "PUT logs/_doc/1\n{\"a\":1}\n"
+ },
+ {
+  "name": "source-query-write-flag",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "--write",
+   "GET logs/_search"
+  ]
+ },
+ {
+  "name": "source-query-param",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "--param",
+   "a=1",
+   "GET logs/_search"
+  ]
+ },
+ {
+  "name": "source-query-no-input",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg"
+  ]
+ },
+ {
+  "name": "source-sql-multi",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "SELECT 1; DELETE FROM x"
+  ]
+ },
+ {
+  "name": "source-sql-write-word",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "SELECT * FROM (DELETE FROM logs)"
+  ]
+ },
+ {
+  "name": "source-search-size-confirm",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "GET logs/_search?size=20000"
+  ]
+ },
+ {
+  "name": "source-explain",
+  "project": "offline",
+  "args": [
+   "explain",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "x"
+  ]
+ },
+ {
+  "name": "source-logs-on-prometheus",
+  "project": "offline",
+  "args": [
+   "logs",
+   "-p",
+   "{P}",
+   "-c",
+   "metrics-prod",
+   "--prod",
+   "up"
+  ]
+ },
+ {
+  "name": "source-metrics-on-loki",
+  "project": "offline",
+  "args": [
+   "metrics",
+   "-p",
+   "{P}",
+   "-c",
+   "logs-stg",
+   "up"
+  ]
+ },
+ {
+  "name": "source-prod-without-flag",
+  "project": "offline",
+  "args": [
+   "metrics",
+   "-p",
+   "{P}",
+   "-c",
+   "metrics-prod",
+   "up"
+  ]
+ },
+ {
+  "name": "source-logs-range-confirm",
+  "project": "offline",
+  "args": [
+   "logs",
+   "-p",
+   "{P}",
+   "-c",
+   "logs-stg",
+   "--since",
+   "8d",
+   "{a=\"1\"}"
+  ]
+ },
+ {
+  "name": "source-logs-empty-range",
+  "project": "offline",
+  "args": [
+   "logs",
+   "-p",
+   "{P}",
+   "-c",
+   "logs-stg",
+   "--since",
+   "1h",
+   "--until",
+   "1h",
+   "{a=\"1\"}"
+  ]
+ },
+ {
+  "name": "source-logs-bad-since",
+  "project": "offline",
+  "args": [
+   "logs",
+   "-p",
+   "{P}",
+   "-c",
+   "logs-stg",
+   "--since",
+   "3651d",
+   "{a=\"1\"}"
+  ]
+ },
+ {
+  "name": "source-query-aws",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "aws-stg",
+   "x"
+  ]
+ },
+ {
+  "name": "source-tables-unreachable",
+  "project": "offline",
+  "args": [
+   "tables",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "source-count-unreachable",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "--force",
+   "GET logs/_count"
+  ]
+ },
+ {
+  "name": "source-search-unreachable",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "search-stg",
+   "POST logs/_search"
+  ]
+ },
+ {
+  "name": "source-metrics-tables-unreachable",
+  "project": "offline",
+  "args": [
+   "tables",
+   "-p",
+   "{P}",
+   "-c",
+   "metrics-prod",
+   "--prod"
+  ]
+ },
+ {
   "name": "live-setup-drop",
   "project": "live",
   "args": [

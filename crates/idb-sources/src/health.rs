@@ -45,13 +45,31 @@ impl Metric {
     }
 }
 
-/// 확인 실패 결과다. 오류에서 secret 을 지우고 여러 줄이면 한 줄로 붙인다(R64.2).
-pub fn failed(latency: Duration, err: &str, secret: &str) -> Health {
-    Health {
-        latency,
-        err: redact(err, secret).split_whitespace().collect::<Vec<_>>().join(" "),
-        ..Default::default()
+impl std::fmt::Display for Metric {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(format!("{} {}", self.name, self.value).trim())
     }
+}
+
+impl Health {
+    /// 주요 수치를 ` · ` 로 이은 한 줄이다. 예: `green · 문서 120만 · 인덱스 37`.
+    pub fn summary(&self) -> String {
+        self.metrics.iter().map(Metric::to_string).collect::<Vec<_>>().join(" · ")
+    }
+
+    /// 확인 실패 결과다. 오류에서 secret 을 지우고 여러 줄이면 한 줄로 붙인다(R64.2).
+    pub fn failed(latency: Duration, err: &str, secret: &str) -> Health {
+        Health {
+            latency,
+            err: redact(err, secret).split_whitespace().collect::<Vec<_>>().join(" "),
+            ..Default::default()
+        }
+    }
+}
+
+/// Health::failed 와 같다.
+pub fn failed(latency: Duration, err: &str, secret: &str) -> Health {
+    Health::failed(latency, err, secret)
 }
 
 const WARN_RATIO: f64 = 0.8;

@@ -31,7 +31,7 @@ const CLI_WRITE_VERBS: &[&str] = &[
     "insert", "update", "delete", "merge", "create", "alter", "drop", "truncate", "comment", "grant", "revoke", "refresh", "vacuum",
     "analyze", "reindex", "cluster", "select", "with",
 ];
-const MSG_UNSUPPORTED: &str = "이 접속 종류에서는 안 됨";
+pub(crate) const MSG_UNSUPPORTED: &str = "이 접속 종류에서는 안 됨";
 /// 종료 코드를 정한 오류다. Run 은 실행 오류(1)다.
 pub enum CmdError {
     Usage(String),

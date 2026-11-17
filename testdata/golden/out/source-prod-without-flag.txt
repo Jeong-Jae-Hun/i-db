@@ -1,0 +1,5 @@
+args: ["metrics","-p","{P}","-c","metrics-prod","up"]
+exit: 3
+--- stdout
+--- stderr
+prod 접속은 --prod 가 필요함
