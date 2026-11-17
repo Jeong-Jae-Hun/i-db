@@ -124,6 +124,12 @@ pub struct Workspace {
     pub(super) pending_saves: usize,
     /// 저장을 기다린 뒤라 창을 그냥 닫아도 된다
     close_ready: bool,
+    /// flush_saves 가 보내는 중이다. 이때 보낸 쓰기가 충돌하면 같은 일감에서 충돌 사본까지 남긴다
+    closing: bool,
+    /// 닫으며 남기지 못한 글의 까닭이다. 있으면 창을 닫지 않고 알린다
+    close_errors: Vec<String>,
+    /// 남기지 못했다고 알린 뒤다. 다시 닫으면 버리고 닫는다
+    discard_ok: bool,
     /// 파일 탭마다 마지막으로 읽거나 쓴 내용(R45.2 자동 저장이 밖의 바뀜을 가른다)
     file_text: HashMap<u64, String>,
     /// 자동 저장을 멈춘 탭과 까닭
@@ -263,6 +269,9 @@ impl Workspace {
             queued: HashMap::new(),
             pending_saves: 0,
             close_ready: false,
+            closing: false,
+            close_errors: Vec::new(),
+            discard_ok: false,
             file_text: HashMap::new(),
             autosave_stopped: HashMap::new(),
             autosave_tasks: HashMap::new(),
@@ -1432,6 +1441,7 @@ impl Workspace {
                         text,
                         force: false,
                         conn,
+                        keep: self.closing,
                     },
                     cx,
                 );
@@ -1464,7 +1474,8 @@ impl Workspace {
     fn send_save(&mut self, id: u64, q: QueuedSave, cx: &mut Context<Self>) {
         if self.saving.contains(&id) {
             let force = q.force || self.queued.get(&id).is_some_and(|p| p.force);
-            self.queued.insert(id, QueuedSave { force, ..q });
+            let keep = q.keep || self.queued.get(&id).is_some_and(|p| p.keep);
+            self.queued.insert(id, QueuedSave { force, keep, ..q });
             return;
         }
         let Some(engine) = self.engine.clone() else { return };
@@ -1473,18 +1484,34 @@ impl Workspace {
         self.pending_saves += 1;
         let s0 = self.session;
         let job = self.rt.spawn({
-            let (rel, text, force) = (q.rel.clone(), q.text.clone(), q.force);
-            async move { queries::write(&engine, &rel, &text, disk.as_deref(), force).await }
+            let (rel, text, force, keep, conn) = (q.rel.clone(), q.text.clone(), q.force, q.keep, q.conn.clone());
+            // 닫으며 보낸 쓰기는 충돌하면 같은 일감에서 사본까지 남겨, 기다림(pending_saves)이 사본을 놓치지 않게 한다
+            async move {
+                let w = queries::write(&engine, &rel, &text, disk.as_deref(), force).await;
+                let copy = match &w {
+                    Ok(w) if keep && w.conflict => Some(queries::conflict_copy(&engine, &rel, &text, &conn).await),
+                    _ => None,
+                };
+                (w, copy)
+            }
         });
         cx.spawn(async move |this, cx| {
-            let r = job.rx.await.unwrap_or_else(|_| Err("멈춤".into()));
-            let _ = this.update(cx, |ws, cx| ws.save_done(id, s0, q, r, cx));
+            let (r, copy) = job.rx.await.unwrap_or_else(|_| (Err("멈춤".into()), None));
+            let _ = this.update(cx, |ws, cx| ws.save_done(id, s0, q, r, copy, cx));
         })
         .detach();
         cx.notify();
     }
 
-    fn save_done(&mut self, id: u64, s0: u64, q: QueuedSave, r: Result<idb_engine::QueryWritten, String>, cx: &mut Context<Self>) {
+    fn save_done(
+        &mut self,
+        id: u64,
+        s0: u64,
+        q: QueuedSave,
+        r: Result<idb_engine::QueryWritten, String>,
+        copy: Option<Result<idb_engine::QueryWritten, String>>,
+        cx: &mut Context<Self>,
+    ) {
         self.pending_saves = self.pending_saves.saturating_sub(1);
         self.saving.remove(&id);
         if self.session != s0 {
@@ -1497,8 +1524,16 @@ impl Workspace {
                 self.autosave_stopped.insert(id, queries::AUTOSAVE_STOPPED.into());
                 self.set_status(queries::AUTOSAVE_STOPPED, true, cx);
                 // 닫으며 보낸 저장이 막혔으면 글을 사본에 남긴다(R45.3)
-                if open.is_none() {
-                    self.conflict_copy(q.rel.clone(), q.text.clone(), q.conn.clone(), cx);
+                match copy {
+                    Some(Ok(c)) => {
+                        // 같은 글을 두 번 남기지 않는다
+                        self.file_text.insert(id, q.text.clone());
+                        self.set_status(format!("저장 안 한 글을 {} 에 남김", c.path), false, cx);
+                        self.refresh_queries(cx);
+                    }
+                    Some(Err(e)) => self.close_failed(format!("충돌 사본을 남기지 못함: {e}"), cx),
+                    None if open.is_none() => self.conflict_copy(q.rel.clone(), q.text.clone(), q.conn.clone(), cx),
+                    None => {}
                 }
             }
             Ok(w) => {
@@ -1515,6 +1550,7 @@ impl Workspace {
                     self.refresh_queries(cx);
                 }
             }
+            Err(e) if q.keep => self.close_failed(format!("저장 실패: {e}"), cx),
             Err(e) => {
                 let what = if q.force { "저장" } else { "자동 저장" };
                 self.set_status(format!("{what} 실패: {e}"), true, cx);
@@ -1569,7 +1605,7 @@ impl Workspace {
                         ws.set_status(note, false, cx);
                         ws.refresh_queries(cx);
                     }
-                    Err(e) => ws.set_status(format!("충돌 사본을 남기지 못함: {e}"), true, cx),
+                    Err(e) => ws.close_failed(format!("충돌 사본을 남기지 못함: {e}"), cx),
                 }
                 cx.notify();
             });
@@ -1641,13 +1677,37 @@ impl Workspace {
         .detach();
     }
 
+    /// 글을 남기지 못했다. 닫는 중이면 창을 닫지 않게 까닭을 모은다.
+    fn close_failed(&mut self, why: String, cx: &mut Context<Self>) {
+        self.set_status(why.clone(), true, cx);
+        self.close_errors.push(why);
+    }
+
     /// 열린 파일 탭을 모두 저장하고 덮을 수 없는 글은 사본에 남긴다. 창을 닫거나 끝내거나 접속을 닫기 전에 부른다.
     pub(super) fn flush_saves(&mut self, cx: &mut Context<Self>) {
+        self.close_errors.clear();
+        self.closing = true;
         let ids: Vec<u64> = self.tabs.tabs.iter().filter(|t| t.file.is_some()).map(|t| t.id).collect();
         for id in ids {
             self.autosave(id, cx);
             self.keep_stopped_text(id, cx);
         }
+        self.closing = false;
+    }
+
+    /// 닫으며 남기지 못한 글이 있으면 창을 닫지 않고 묻는다(다시 닫으면 버리고 닫는다). 닫아도 되면 true 다.
+    fn close_checked(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.close_errors.is_empty() {
+            return true;
+        }
+        let why = self.close_errors.join(" · ");
+        self.discard_ok = true;
+        self.set_status(
+            format!("저장하지 못한 글이 있어 닫지 않음: {why} (다시 닫으면 버리고 닫는다)"),
+            true,
+            cx,
+        );
+        false
     }
 
     /// 쿼리 파일 쓰기가 다 끝나거나 20초가 지나면 끝나는 기다림이다(TUI 와 같은 한도).
@@ -1666,7 +1726,7 @@ impl Workspace {
 
     /// 창을 닫아도 되는지다. 저장이 남았으면 보내고 기다린 뒤 창을 닫는다(20초까지).
     pub(super) fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.close_ready {
+        if self.close_ready || self.discard_ok {
             return true;
         }
         self.flush_saves(cx);
@@ -1677,9 +1737,11 @@ impl Workspace {
         let wait = self.wait_saves(cx);
         cx.spawn_in(window, async move |this, cx| {
             wait.await;
-            let _ = this.update_in(cx, |ws, window, _| {
-                ws.close_ready = true;
-                window.remove_window();
+            let _ = this.update_in(cx, |ws, window, cx| {
+                if ws.close_checked(cx) {
+                    ws.close_ready = true;
+                    window.remove_window();
+                }
             });
         })
         .detach();
@@ -2053,6 +2115,7 @@ impl Workspace {
                     text,
                     force: true,
                     conn,
+                    keep: false,
                 },
                 cx,
             ),
@@ -2079,6 +2142,7 @@ impl Workspace {
                                         text,
                                         force: true,
                                         conn,
+                                        keep: false,
                                     },
                                     cx,
                                 );
@@ -3057,8 +3121,13 @@ impl gpui::Global for OpenWorkspaces {}
 /// 모든 창의 쿼리 파일을 저장하고 쓰기가 끝나거나 20초가 지나면 끝낸다(TUI 와 같다).
 pub fn quit_after_saves(cx: &mut gpui::App) {
     let open = cx.try_global::<OpenWorkspaces>().map(|o| o.0.clone()).unwrap_or_default();
+    // 남기지 못했다고 알린 뒤 다시 끝내면 버리고 끝낸다
+    if open.iter().any(|w| w.read_with(cx, |ws, _| ws.discard_ok).unwrap_or(false)) {
+        cx.quit();
+        return;
+    }
     let waits: Vec<gpui::Task<()>> = open
-        .into_iter()
+        .iter()
         .filter_map(|w| {
             w.update(cx, |ws, cx| {
                 ws.flush_saves(cx);
@@ -3072,7 +3141,20 @@ pub fn quit_after_saves(cx: &mut gpui::App) {
         for t in waits {
             t.await;
         }
-        cx.update(|cx| cx.quit());
+        cx.update(|cx| {
+            let mut ok = true;
+            for w in &open {
+                let _ = w.update(cx, |ws, cx| {
+                    if !ws.close_checked(cx) {
+                        ws.close_ready = false;
+                        ok = false;
+                    }
+                });
+            }
+            if ok {
+                cx.quit();
+            }
+        })
     })
     .detach();
 }
@@ -3084,6 +3166,8 @@ struct QueuedSave {
     text: String,
     force: bool,
     conn: String,
+    /// 닫으며 보낸 쓰기다. 충돌하면 탭이 아직 열려 있어도 충돌 사본에 남긴다(R45.3)
+    keep: bool,
 }
 
 /// 고른 경로가 프로젝트 `queries/` 아래 .sql 이면 그 상대 경로다(엔진으로 쓴다).
@@ -4158,6 +4242,85 @@ mod tests {
         }
         assert!(closed, "저장이 끝나면 닫는다");
         assert_eq!(std::fs::read_to_string(dir.path().join("queries/app/a.sql")).unwrap(), "select 7");
+    }
+
+    fn closed(cx: &mut VisualTestContext, ws: &Entity<Workspace>) -> bool {
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if ws.read_with(cx, |w, _| saves_done(w) && w.close_ready) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn conflict_copies(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir.join("queries/app"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("a-conflict-"))
+            .collect()
+    }
+
+    /// 리뷰: 밖에서 바뀐 직후 창을 닫으면 쓰기가 충돌하는데 탭이 열려 있어 사본을 만들지 않고 닫혀 글을 잃었다.
+    #[gpui::test]
+    fn 밖에서_바뀐_직후_창을_닫으면_충돌_사본을_남긴_뒤_닫는다(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&offline_project(), dir.path());
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_query("queries/app/a.sql".into(), window, cx)));
+        wait(cx, &ws, |w| w.query_tab("queries/app/a.sql").is_some());
+        let id = cx.update(|_, cx| ws.read(cx).tabs.active().unwrap().id);
+        let file = dir.path().join("queries/app/a.sql");
+        std::fs::write(&file, "-- 다른 편집기").unwrap();
+        set_text(cx, &ws, id, "select 8");
+        let close_now = cx.update(|window, cx| ws.update(cx, |w, cx| w.should_close(window, cx)));
+        assert!(!close_now);
+        assert!(closed(cx, &ws), "사본을 남기면 닫는다");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- 다른 편집기", "밖의 바뀜을 덮지 않는다");
+        let copies = conflict_copies(dir.path());
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("queries/app").join(&copies[0])).unwrap(),
+            "select 8"
+        );
+    }
+
+    /// 충돌 사본도 남기지 못하면 창을 닫지 않고 알리고, 다시 닫으면 그때 닫는다.
+    #[gpui::test]
+    fn 닫으며_충돌_사본을_남기지_못하면_닫지_않고_다시_닫으면_닫는다(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&offline_project(), dir.path());
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_query("queries/app/a.sql".into(), window, cx)));
+        wait(cx, &ws, |w| w.query_tab("queries/app/a.sql").is_some());
+        let id = cx.update(|_, cx| ws.read(cx).tabs.active().unwrap().id);
+        let app_dir = dir.path().join("queries/app");
+        std::fs::write(app_dir.join("a.sql"), "-- 다른 편집기").unwrap();
+        std::fs::set_permissions(&app_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(app_dir.join("probe.sql"), "").is_ok() {
+            return; // root 로 돌면 권한이 듣지 않는다
+        }
+        set_text(cx, &ws, id, "select 8");
+        let close_now = cx.update(|window, cx| ws.update(cx, |w, cx| w.should_close(window, cx)));
+        assert!(!close_now);
+        wait(cx, &ws, |w| saves_done(w) && w.discard_ok);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(!w.close_ready, "남기지 못했으면 닫지 않는다");
+        });
+        let again = cx.update(|window, cx| ws.update(cx, |w, cx| w.should_close(window, cx)));
+        assert!(again, "알린 뒤 다시 닫으면 닫는다");
+        std::fs::set_permissions(&app_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// 리뷰: prod WHERE 가 gui.json 에 남았다(R75.5 는 prod 기록을 막는다).
