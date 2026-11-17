@@ -215,8 +215,22 @@ fn prod_쓰기는_확인을_받아_confirm_prod_로_다시_보낸다() {
     let (id, req) = jobs(&mut a).pop().unwrap();
     assert_eq!(req["confirm_prod"], false);
     a.on_done(id, Err(refused("confirm_prod", "prod(shop-prod)에 쓰기 실행: y/N")));
+    // UPDATE 하나라 예상 행 수(R39)를 먼저 묻는다(실행하지 않음)
+    let (eid, ereq) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (ereq["op"].as_str(), ereq["sql"].as_str()),
+        (Some("estimate_rows"), Some("update t set a = 1 where id = 1"))
+    );
+    assert!(a.overlay.is_none());
+    a.on_done(eid, Ok(json!({"rows": 120000})));
     let s = screen(&mut a);
-    assert!(s.lines().last().unwrap().contains(" prod(shop-prod)에 쓰기 실행: y/N"), "{s}");
+    assert!(
+        s.lines()
+            .last()
+            .unwrap()
+            .contains(" prod(shop-prod)에 쓰기 실행 · 약 120,000행 (추정): y/N"),
+        "{s}"
+    );
     a.on_key("y");
     let (_, req) = jobs(&mut a).pop().unwrap();
     assert_eq!(
@@ -232,6 +246,10 @@ fn prod_쓰기는_확인을_받아_confirm_prod_로_다시_보낸다() {
     b.on_key("ctrl+r");
     let (id, _) = jobs(&mut b).pop().unwrap();
     b.on_done(id, Err(refused("confirm_prod", "prod(shop-prod)에 쓰기 실행: y/N")));
+    // 추정이 실패하면 빼고 묻는다
+    let (eid, _) = jobs(&mut b).pop().unwrap();
+    b.on_done(eid, Err(EngineError::run("x")));
+    assert!(matches!(&b.overlay, Overlay::Confirm { q, .. } if q == "prod(shop-prod)에 쓰기 실행"));
     b.on_key("n");
     assert!(jobs(&mut b).is_empty() && b.overlay.is_none());
 }
@@ -246,10 +264,15 @@ fn prod_와_위험_문장이_겹치면_한_창에_이유를_같이_묻는다() {
     a.on_key("ctrl+r");
     let (id, _) = jobs(&mut a).pop().unwrap();
     a.on_done(id, Err(refused("confirm_prod", "prod(shop-prod)에 쓰기 실행: y/N")));
+    let (eid, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(eid, Ok(json!({"rows": 3})));
     let Overlay::Confirm { q, .. } = &a.overlay else {
         panic!("확인 창이 아님")
     };
-    assert_eq!(q, "prod(shop-prod)에 쓰기 실행 · 위험: WHERE 없는 DELETE — 실행할까요?");
+    assert_eq!(
+        q,
+        "prod(shop-prod)에 쓰기 실행 · 위험: WHERE 없는 DELETE · 약 3행 (추정) — 실행할까요?"
+    );
     a.on_key("y");
     let (_, req) = jobs(&mut a).pop().unwrap();
     assert_eq!(

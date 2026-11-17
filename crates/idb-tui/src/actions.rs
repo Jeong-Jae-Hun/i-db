@@ -44,6 +44,27 @@ pub struct Script {
     pub again: Option<Again>,
 }
 
+/// 확인 창 질문 조각이다. 예상 행 수(R39)는 이유 뒤에 붙는다.
+pub struct ConfirmParts {
+    prod_both: bool,
+    name: String,
+    danger: String,
+    error: String,
+    reason: String,
+}
+
+impl ConfirmParts {
+    pub fn question(&self, est: &str) -> String {
+        if self.prod_both {
+            format!("prod({})에 쓰기 실행 · 위험: {}{est} — 실행할까요?", self.name, self.danger)
+        } else if self.reason == REASON_CONFIRM_DANGER {
+            format!("{}{est} — 실행할까요?", self.error)
+        } else {
+            format!("{}{est}", self.error.trim_end_matches(": y/N"))
+        }
+    }
+}
+
 pub enum Again {
     Keep {
         sort: Option<(usize, bool)>,
@@ -405,6 +426,20 @@ impl App {
             Pend::Source(job) => self.source_done(id, *job, res),
             Pend::Health { tab, round, conn } => self.health_done(id, tab, round, conn, res),
             Pend::Outbox { tab, round } => self.outbox_done(tab, round, res),
+            Pend::Estimate => {
+                if let Some((job, _, parts, then)) = self.estimating.take() {
+                    if job != id {
+                        self.estimating = Some((job, Instant::now(), parts, then));
+                        return;
+                    }
+                    let est = res
+                        .ok()
+                        .and_then(|v| v.get("rows").and_then(Value::as_i64))
+                        .map(|n| format!(" · 약 {}행 (추정)", idb_core::textutil::group_digits(n)))
+                        .unwrap_or_default();
+                    self.confirm(parts.question(&est), then);
+                }
+            }
             Pend::Flows { tab, round } => self.flows_done(tab, round, res),
             Pend::BoardList => self.board_list_done(res),
             Pend::Board { tab, round } => self.board_done(tab, round, res),
@@ -1850,15 +1885,17 @@ impl App {
                     idb_core::sqlsafe::danger_of(&stmt)
                 };
                 let name = self.conns[s.conn].name.clone();
-                let q = if reason == REASON_CONFIRM_PROD && !danger.is_empty() && !s.confirm_danger {
-                    format!("prod({name})에 쓰기 실행 · 위험: {danger} — 실행할까요?")
-                } else if reason == REASON_CONFIRM_DANGER {
-                    format!("{} — 실행할까요?", e.error)
-                } else {
-                    e.error.trim_end_matches(": y/N").to_string()
+                let (redis, stmts_len, conn, params) = (s.redis, s.stmts.len(), s.conn, s.params.clone());
+                // R39: prod 쓰기·위험 확인에 오르는 UPDATE·DELETE 하나면 EXPLAIN 예상 행 수를 3초까지 기다려 같이 보인다
+                let parts = ConfirmParts {
+                    prod_both: reason == REASON_CONFIRM_PROD && !danger.is_empty() && !s.confirm_danger,
+                    name,
+                    danger: danger.clone(),
+                    error: e.error.clone(),
+                    reason: reason.clone(),
                 };
                 let both = reason == REASON_CONFIRM_PROD && !danger.is_empty();
-                self.confirm(q, move |a| {
+                let then: Box<dyn FnOnce(&mut App)> = Box::new(move |a| {
                     match reason.as_str() {
                         REASON_CONFIRM_PROD => {
                             s.confirm_prod = true;
@@ -1873,6 +1910,21 @@ impl App {
                     }
                     a.start_script(s);
                 });
+                let estimable = !redis
+                    && stmts_len == 1
+                    && matches!(parts.reason.as_str(), REASON_CONFIRM_PROD | REASON_CONFIRM_DANGER)
+                    && matches!(idb_core::sqlsafe::first_sql_word(&stmt).as_str(), "update" | "delete");
+                if estimable {
+                    let req = Request::EstimateRows {
+                        conn: self.conns[conn].name.clone(),
+                        sql: stmt,
+                        params: params.clone(),
+                    };
+                    let id = self.call(req, Pend::Estimate);
+                    self.estimating = Some((id, Instant::now(), parts, then));
+                } else {
+                    self.confirm(parts.question(""), then);
+                }
             }
             Err(e) => {
                 if e.reason.as_deref() == Some("in_tx") {

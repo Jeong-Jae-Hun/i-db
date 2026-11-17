@@ -279,6 +279,13 @@ impl App {
             self.autosave(i);
         }
         self.pane_tick();
+        // 예상 행 수가 3초 안에 안 오면 빼고 묻는다(R39)
+        if self.estimating.as_ref().is_some_and(|e| e.1.elapsed().as_secs() >= 3) {
+            let (job, _, parts, then) = self.estimating.take().unwrap();
+            self.cancel(job);
+            self.pending.remove(&job);
+            self.confirm(parts.question(""), then);
+        }
     }
 
     /// Ctrl+S: 연 파일에 덮어쓴다(자동 저장이 멈췄어도). 연 파일이 없으면 알린다(R5.2).

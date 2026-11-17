@@ -159,6 +159,7 @@ pub enum Pend {
         tab: u64,
         round: u64,
     },
+    Estimate,
     Health {
         tab: u64,
         round: u64,
@@ -431,6 +432,8 @@ pub struct App {
     pub deleting: Option<crate::ops::Deleting>,
     /// 이 세션에 마지막으로 고른 복사 꼴(R71.1)
     pub last_copy_fmt: &'static str,
+    /// 확인 창 전에 기다리는 예상 행 수(R39): 요청 id·시작·질문·확인하면 할 일
+    pub estimating: Option<(u64, Instant, crate::actions::ConfirmParts, After)>,
 }
 
 impl App {
@@ -480,6 +483,7 @@ impl App {
             history_view: None,
             deleting: None,
             last_copy_fmt: "tsv",
+            estimating: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
