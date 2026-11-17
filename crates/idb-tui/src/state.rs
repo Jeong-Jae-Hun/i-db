@@ -113,8 +113,17 @@ impl SessionCtx {
         }
     }
 
+    /// 켤 때 접어 둘 그룹 이름이다(`g:` 를 뗀 것).
     pub fn closed_groups(&self) -> Vec<String> {
-        self.recent.as_ref().map(|r| r.tree().1).unwrap_or_default()
+        self.recent
+            .as_ref()
+            .map(|r| r.tree().1.iter().filter_map(|id| id.strip_prefix("g:").map(String::from)).collect())
+            .unwrap_or_default()
+    }
+
+    /// 펼쳐 두었던 노드 id 다.
+    pub fn open_nodes(&self) -> Vec<String> {
+        self.recent.as_ref().map(|r| r.tree().0).unwrap_or_default()
     }
 
     /// 테이블 보기의 지난 정렬·WHERE 다(R75.4). prod 는 남기지 않아 없다.
@@ -312,14 +321,76 @@ impl App {
                 });
             }
         }
-        if let Some(r) = &mut self.session.recent {
-            let closed = self.tree.closed_groups();
-            let (open, _) = r.tree();
-            if r.set_tree(&open, &closed) {
-                let _ = r.save();
-            }
+        let (open, closed) = self.tree_snapshot();
+        if let Some(r) = &mut self.session.recent
+            && r.set_tree(&open, &closed)
+        {
+            let _ = r.save();
         }
         session::save(&path, &self.session.project, &st).map_err(|e| format!("session save failed: {e}"))
+    }
+}
+
+impl App {
+    /// 지금 트리 펼침이다(R75.6). 이번 실행에서 목록을 읽지 않은 접속은 예전 기억을 그대로 두고, 없어진 접속의 기억은 버린다.
+    pub(crate) fn tree_snapshot(&self) -> (Vec<String>, Vec<String>) {
+        let prev = self.session.open_nodes();
+        let loaded: Vec<&str> = self
+            .tree
+            .nodes
+            .iter()
+            .filter_map(|n| match n.kind {
+                crate::tree::NodeKind::Conn(c) if n.loaded => Some(self.conns[c].uuid.as_str()),
+                _ => None,
+            })
+            .collect();
+        let known = |uuid: &str| self.conns.iter().any(|c| c.uuid == uuid);
+        let mut open: Vec<String> = prev
+            .into_iter()
+            .filter(|id| match id.split_once(':').map(|(_, r)| r.split(':').next().unwrap_or("")) {
+                Some("") | None => false,
+                Some(u) => known(u) && !loaded.contains(&u),
+            })
+            .collect();
+        let mut closed = Vec::new();
+        for i in 0..self.tree.nodes.len() {
+            let id = self.tree.node_id(i, &self.conns);
+            if id.is_empty() {
+                continue;
+            }
+            let n = &self.tree.nodes[i];
+            match n.kind {
+                crate::tree::NodeKind::Group if !n.expanded => closed.push(id),
+                crate::tree::NodeKind::Group => {}
+                _ if n.expanded && self.tree.reachable(i) => open.push(id),
+                _ => {}
+            }
+        }
+        open.truncate(500);
+        (open, closed)
+    }
+
+    /// 그 접속 목록이 처음 오면 기억한 자식을 다시 펼친다(실행마다 접속당 한 번, R75.6). 스키마 테이블은 비동기로 읽는다.
+    pub(crate) fn restore_conn_tree(&mut self, conn: usize, node: usize) {
+        let uuid = self.conns[conn].uuid.clone();
+        if uuid.is_empty() || !self.tree_restored.insert(uuid) {
+            return;
+        }
+        let open = self.session.open_nodes();
+        let mut stack = self.tree.nodes[node].children.clone();
+        while let Some(n) = stack.pop() {
+            let id = self.tree.node_id(n, &self.conns);
+            if id.is_empty() || !open.contains(&id) {
+                continue;
+            }
+            self.tree.nodes[n].expanded = true;
+            if self.tree.nodes[n].loaded {
+                stack.extend(self.tree.nodes[n].children.clone());
+            } else {
+                self.load_tree_children(n);
+            }
+        }
+        self.tree.rebuild();
     }
 }
 

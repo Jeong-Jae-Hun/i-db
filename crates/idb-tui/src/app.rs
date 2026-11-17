@@ -494,6 +494,8 @@ pub struct App {
     pub history_seed: Vec<String>,
     /// 지금 보이는 팁(R74.3). 다음 키에서 사라진다
     pub tip: Option<String>,
+    /// 이번 실행에서 펼침을 되살린 접속 uuid(R75.6)
+    pub tree_restored: HashSet<String>,
 }
 
 impl App {
@@ -552,6 +554,7 @@ impl App {
             hist_pick: None,
             history_seed: Vec::new(),
             tip: None,
+            tree_restored: HashSet::new(),
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));

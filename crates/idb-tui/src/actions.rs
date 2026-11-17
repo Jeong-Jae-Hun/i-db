@@ -117,6 +117,7 @@ impl App {
                         .collect();
                     let q = self.queries_for(conn);
                     self.tree.set_conn_children(node, q, kids);
+                    self.restore_conn_tree(conn, node);
                 }
                 Err(e) => self.status = format!("스키마 읽기 실패: {}", one_line(&e.error)),
             },
@@ -150,6 +151,7 @@ impl App {
                     kids.extend(self.tree.nodes[node].children.clone());
                     self.tree.nodes[node].children = kids;
                     self.tree.rebuild();
+                    self.restore_conn_tree(conn, node);
                 }
                 Err(e) => self.status = format!("SCAN 실패: {}", one_line(&e.error)),
             },
@@ -558,6 +560,10 @@ impl App {
         let pattern = self.tree.patterns.get(&conn).cloned().unwrap_or_else(|| "*".into());
         let name = self.conns[conn].name.clone();
         self.call(Request::RedisScan { conn: name, pattern }, Pend::Scan { conn, node });
+    }
+
+    pub(crate) fn load_tree_children(&mut self, n: usize) {
+        self.load_children(n);
     }
 
     fn load_children(&mut self, n: usize) {

@@ -263,6 +263,18 @@ impl Tree {
         }
     }
 
+    /// 조상이 모두 남아 있는(옛 자식 자리가 아닌) 노드인지다.
+    pub fn reachable(&self, n: usize) -> bool {
+        let mut cur = n;
+        while let Some(p) = self.nodes[cur].parent {
+            if !self.nodes[p].children.contains(&cur) {
+                return false;
+            }
+            cur = p;
+        }
+        self.roots.contains(&cur)
+    }
+
     pub fn conn_node(&self, conn: usize) -> Option<usize> {
         self.nodes.iter().position(|n| n.kind == NodeKind::Conn(conn))
     }
@@ -381,6 +393,21 @@ impl Tree {
             return;
         }
         self.cursor = (self.cursor as isize + d).clamp(0, n - 1) as usize;
+    }
+
+    /// 펼침 기억(R75.6)의 노드 id 다. Go 와 같은 꼴이라 같은 recent.json 을 같이 쓴다:
+    /// 그룹 `g:<이름>`, 스키마 `s:<uuid>:<이름>`, Redis 이름공간 `f:<uuid>:<접두어>`, 쿼리 묶음 `q:<uuid>`(접속 없음은 `q:`). 그 밖은 빈 글이다.
+    pub fn node_id(&self, n: usize, conns: &[ConnSummary]) -> String {
+        let node = &self.nodes[n];
+        let uuid = |c: usize| conns.get(c).map_or("", |c| c.uuid.as_str());
+        match &node.kind {
+            NodeKind::Group => format!("g:{}", node.label),
+            NodeKind::Queries(None) => "q:".into(),
+            NodeKind::Queries(Some(c)) => format!("q:{}", uuid(*c)),
+            NodeKind::Schema { conn, name } => format!("s:{}:{name}", uuid(*conn)),
+            NodeKind::Folder { conn, prefix } => format!("f:{}:{prefix}", uuid(*conn)),
+            _ => String::new(),
+        }
     }
 
     /// 접은 폴더 이름들(R75.6 다음 실행에 접어 둔다)이다.

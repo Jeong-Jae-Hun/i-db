@@ -1640,3 +1640,19 @@ fn 처음_보는_화면의_팁은_한_번만_보이고_다음_키에서_사라�
     assert!(!screen(&mut a).contains("팁:"));
     assert_eq!(a.session.tips_shown, ["readonly"]);
 }
+
+#[test]
+fn 트리_펼침_기억은_Go_와_같은_id_로_남긴다() {
+    let mut a = app();
+    select_conn(&mut a, "app-stg");
+    a.on_key("enter");
+    let (sid, _) = jobs(&mut a).into_iter().find(|(_, r)| r["op"] == "schemas").unwrap();
+    a.on_done(sid, Ok(json!(["public", "etc"])));
+    keys(&mut a, &["j", "enter"]);
+    let (open, closed) = a.tree_snapshot();
+    assert_eq!(open, ["s:uuid-app-stg:public"], "펼친 스키마만, 접속 줄은 남기지 않는다");
+    assert!(closed.is_empty());
+    a.tree.cursor = 0;
+    a.on_key("h");
+    assert_eq!(a.tree_snapshot().1, ["g:app"]);
+}
