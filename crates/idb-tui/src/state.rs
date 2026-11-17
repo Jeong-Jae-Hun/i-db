@@ -23,6 +23,10 @@ pub struct SessionCtx {
     params_path: Option<PathBuf>,
     params: BTreeMap<String, String>,
     pub notes: Vec<String>,
+    /// 처음 보는 화면의 팁(R74.3): 파일 자리와 이미 보인 팁. DB_TIPS=0·쓰기 실패면 None 이라 팁을 끈다
+    tips_path: Option<PathBuf>,
+    pub tips_shown: Vec<String>,
+    pub tips_on: bool,
 }
 
 impl SessionCtx {
@@ -37,6 +41,9 @@ impl SessionCtx {
             params_path: None,
             params: BTreeMap::new(),
             notes: Vec::new(),
+            tips_path: None,
+            tips_shown: Vec::new(),
+            tips_on: false,
         }
     }
 
@@ -75,11 +82,35 @@ impl SessionCtx {
             }
             c.recent = Some(store);
         }
+        if std::env::var("DB_TIPS").as_deref() != Ok("0")
+            && let Some(p) = c.path.as_ref().map(|p| p.with_file_name("tips.json"))
+        {
+            // 없거나 깨졌으면 빈 목록으로 시작한다
+            c.tips_shown = std::fs::read(&p)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+            c.tips_path = Some(p);
+            c.tips_on = true;
+        }
         if let Ok(p) = paramstore::path() {
             c.params = paramstore::load(&p, project).unwrap_or_default();
             c.params_path = Some(p);
         }
         c
+    }
+
+    /// 팁을 보였다고 남긴다. 쓰지 못하면 이번 실행 동안 팁을 끈다(같은 팁을 거듭 보이지 않게).
+    pub fn tip_shown(&mut self, key: &str) {
+        self.tips_shown.push(key.to_string());
+        if let Some(p) = &self.tips_path {
+            let body = serde_json::to_vec(&self.tips_shown).unwrap_or_default();
+            if p.parent().map(std::fs::create_dir_all).transpose().is_err()
+                || idb_core::atomicfile::write(p, ".tips-*", &body, 0o600).is_err()
+            {
+                self.tips_on = false;
+            }
+        }
     }
 
     pub fn closed_groups(&self) -> Vec<String> {

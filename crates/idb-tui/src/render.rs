@@ -210,6 +210,7 @@ impl App {
         pane(buf, res_rect, "Result", &res_info, self.focus == Focus::Result, false);
         self.draw_result(buf, inner(res_rect));
         // ─── 상태 줄 ───
+        self.pick_tip();
         self.draw_status(buf);
         if self.conn_form.is_some() {
             self.draw_conn_form(buf, area);
@@ -673,7 +674,10 @@ impl App {
         }
         let status = format!(" {}", printable(&self.status, false));
         let room = (self.w as usize).saturating_sub(width(&status) + 2);
-        let items: Vec<String> = self.hints().into_iter().map(|h| self.label(&h)).collect();
+        let mut items: Vec<String> = self.hints().into_iter().map(|h| self.label(&h)).collect();
+        if let Some(t) = &self.tip {
+            items.insert(0, t.clone());
+        }
         let hint = help::fit(&items, room);
         let right = if hint.is_empty() {
             Vec::new()
@@ -681,6 +685,42 @@ impl App {
             vec![(format!("{hint} "), theme::hint())]
         };
         bar_line(buf, y, self.w, &[(status, theme::bar())], &right);
+    }
+
+    /// 처음 들어간 화면 종류면 팁을 한 번 건다(R74.3). 창이 떠 있거나 상태 줄 남은 폭에 다 들어가지 않으면 기다린다.
+    fn pick_tip(&mut self) {
+        if !self.session.tips_on || self.tip.is_some() || !self.overlay.is_none() {
+            return;
+        }
+        let t = self.cur();
+        let kind = match (&t.pane, self.focus) {
+            (Some(crate::app::Pane::Flow(_)), _) => "flow",
+            (Some(crate::app::Pane::Board(_)), _) => "board",
+            (None, Focus::Result) if t.view.is_some() && t.grid.is_some() => "table",
+            (None, Focus::Result) => match t.shown() {
+                Some(g) if g.screen == Screen::Table && g.editable() && t.sub.is_none() => "edit",
+                Some(g) if g.screen == Screen::Table => "readonly",
+                _ => return,
+            },
+            _ => return,
+        };
+        if self.session.tips_shown.iter().any(|k| k == kind) {
+            return;
+        }
+        let text = match kind {
+            "edit" => "팁: a 로 행 추가, Enter 로 고치고 Ctrl+S 로 제출 (? 로 이 화면의 키)",
+            "readonly" => "팁: ? 로 이 화면의 키를 볼 수 있음",
+            "table" => "팁: w 로 WHERE, [ ] 로 페이지 (? 로 이 화면의 키)",
+            "flow" => "팁: ←→ 로 상자를 고르고 Enter 로 상세 (? 로 이 화면의 키)",
+            _ => "팁: 방향키로 패널을 고르고 Enter 로 쿼리 탭에 열기 (? 로 이 화면의 키)",
+        };
+        let text = self.label(text);
+        let room = (self.w as usize).saturating_sub(width(&format!(" {}", printable(&self.status, false))) + 2);
+        if width(&text) > room {
+            return;
+        }
+        self.session.tip_shown(kind);
+        self.tip = Some(text);
     }
 
     /// 지금 포커스·상태에서 실제로 듣는 키를 중요한 순서로 늘어놓는다(R74.1).

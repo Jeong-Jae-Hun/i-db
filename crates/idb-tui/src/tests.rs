@@ -1621,3 +1621,22 @@ fn 거르기_입력의_위아래는_이전_거르기를_고르고_끝까지_내�
     a.on_key("down");
     assert_eq!(filt(&a), "x");
 }
+
+#[test]
+fn 처음_보는_화면의_팁은_한_번만_보이고_다음_키에서_사라진다() {
+    let mut a = app();
+    a.session.tips_on = true;
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select 1");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(rs(&["a"], &[&["1"]])));
+    a.set_focus(Focus::Result);
+    a.w = 160;
+    assert!(screen(&mut a).contains("팁: ? 로 이 화면의 키를 볼 수 있음"));
+    a.on_key("j");
+    assert!(!screen(&mut a).contains("팁:"));
+    assert_eq!(a.session.tips_shown, ["readonly"]);
+}

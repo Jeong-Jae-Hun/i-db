@@ -492,6 +492,8 @@ pub struct App {
     pub hist_pick: Option<(Vec<String>, isize, String)>,
     /// 파일 기록 뒤에 붙는 기록이다. 상태 파일을 쓰지 않는 시험이 기록을 넣는 자리다
     pub history_seed: Vec<String>,
+    /// 지금 보이는 팁(R74.3). 다음 키에서 사라진다
+    pub tip: Option<String>,
 }
 
 impl App {
@@ -549,6 +551,7 @@ impl App {
             big_edit: None,
             hist_pick: None,
             history_seed: Vec::new(),
+            tip: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -848,6 +851,7 @@ impl App {
     }
 
     pub fn on_key(&mut self, k: &str) {
+        self.tip = None;
         if !self.overlay.is_none() {
             return self.overlay_key(k);
         }
