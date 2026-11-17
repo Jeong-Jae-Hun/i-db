@@ -147,6 +147,38 @@ pub enum Pend {
     Diff {
         tab: u64,
     },
+    /// 저장소 트리 한 단계(R60)
+    SourceKids {
+        conn: usize,
+        node: usize,
+    },
+    /// 저장소 편집기 실행·트리 미리 보기(R60~R68)
+    Source(Box<crate::sources::SourceJob>),
+    /// 대시보드 확인 하나(R64)
+    Health {
+        tab: u64,
+        round: u64,
+        conn: usize,
+    },
+    /// 흐름 풀이(R69)
+    Flows {
+        tab: u64,
+        round: u64,
+    },
+    /// 보드 고르기 목록(R70.4)
+    BoardList,
+    /// 보드 한 회차(R70)
+    Board {
+        tab: u64,
+        round: u64,
+    },
+}
+
+/// 편집기·결과 자리를 한 영역으로 쓰는 탭 화면이다(대시보드 R64·흐름 R69·보드 R70).
+pub enum Pane {
+    Dash(crate::dash::DashState),
+    Flow(crate::flow::FlowState),
+    Board(crate::board::BoardState),
 }
 
 pub type Then = Box<dyn FnOnce(&mut App, String)>;
@@ -248,6 +280,9 @@ pub struct Tab {
     /// 서버로 다시 읽을 원래 문장(R14.5). 없으면 base_why 가 까닭이다
     pub base: Option<String>,
     pub base_why: &'static str,
+    /// Loki·Prometheus·Grafana 편집기 범위(나노초, 0 이면 1시간, R62.2)
+    pub since: i64,
+    pub pane: Option<Pane>,
 }
 
 impl Tab {
@@ -281,6 +316,8 @@ impl Tab {
             snapshot: false,
             base: None,
             base_why: "편집기 실행 결과가 아님",
+            since: 0,
+            pane: None,
         }
     }
 
@@ -304,6 +341,7 @@ impl Tab {
             && self.view.is_none()
             && self.redis.is_none()
             && self.running.is_none()
+            && self.pane.is_none()
     }
 
     pub fn pending(&self) -> usize {
@@ -733,6 +771,10 @@ impl App {
         if self.global_key(k) {
             return;
         }
+        // 대시보드·흐름·보드 탭은 편집기·결과 자리를 한 영역으로 쓴다
+        if self.focus != Focus::Tree && self.cur().pane.is_some() {
+            return self.pane_key(k);
+        }
         match self.focus {
             Focus::Tree => self.tree_key(k),
             Focus::Editor => self.editor_key(k),
@@ -817,7 +859,12 @@ impl App {
                 self.resize_editor(if k == "ctrl+up" { -EDITOR_STEP } else { EDITOR_STEP });
             }
             "ctrl+h" => self.open_history(),
-            "ctrl+g" | "alt+f" | "alt+b" | "alt+c" | "ctrl+]" | "f7" => {
+            "ctrl+g" => self.open_dash(),
+            "alt+f" => self.open_flows(None),
+            "alt+b" => self.pick_board(),
+            "ctrl+]" => self.cycle_range(),
+            "?" if self.focus != Focus::Tree && self.cur().pane.is_some() => self.open_keys(),
+            "alt+c" | "f7" => {
                 self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", self.label(&key_label(k)));
             }
             _ => {
@@ -892,6 +939,8 @@ impl App {
             self.cancel(id);
             self.pending.remove(&id);
         }
+        // 닫는 대시보드·흐름·보드의 진행 중인 회차를 멈춘다(R64.2·R69.4·R70.4)
+        self.stop_pane(i);
         // 그 접속을 쓰는 다른 탭이 없고 트랜잭션이 열려 있으면 먼저 끝낸다
         if let Some(c) = conn
             && self.in_tx.contains_key(&c)
@@ -1126,7 +1175,11 @@ impl App {
             "X" => self.pattern_delete(n),
             "?" => self.open_keys(),
             "q" => self.request_quit(),
-            "F" => self.data_search(n),
+            "F" => {
+                if !self.tree_flow(n) {
+                    self.data_search(n);
+                }
+            }
             "=" => self.schema_compare(n),
             "I" | "N" | "E" | "M" | "alt+X" => {
                 self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", key_label(k));
@@ -1157,10 +1210,18 @@ impl App {
     }
 
     pub fn open_keys(&mut self) {
-        let want: &[&str] = match self.focus {
-            Focus::Tree => &["트리"],
-            Focus::Result if self.cur().redis.is_some() => &["Redis 값 편집", "결과"],
-            Focus::Result
+        let pane = if self.focus == Focus::Tree {
+            None
+        } else {
+            self.cur().pane.as_ref()
+        };
+        let want: &[&str] = match (self.focus, pane) {
+            (_, Some(Pane::Dash(_))) => &["대시보드 (Ctrl+G)"],
+            (_, Some(Pane::Flow(_))) => &["흐름 (Alt+F)"],
+            (_, Some(Pane::Board(_))) => &["보드 (Alt+B)"],
+            (Focus::Tree, _) => &["트리"],
+            (Focus::Result, _) if self.cur().redis.is_some() => &["Redis 값 편집", "결과"],
+            (Focus::Result, _)
                 if self
                     .cur()
                     .shown()
@@ -1168,7 +1229,7 @@ impl App {
             {
                 &["JSON 값 보기 (o)", "결과"]
             }
-            Focus::Result => &["결과"],
+            (Focus::Result, _) => &["결과"],
             _ => return,
         };
         let secs = crate::help::SECTIONS

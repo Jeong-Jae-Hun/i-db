@@ -330,6 +330,9 @@ pub const NONE_HINTS: &[&str] = &["Shift+Tab 편집기", "Ctrl+R 실행", "F1 �
 pub const WHERE_HINTS: &[&str] = &["Enter 적용", "esc 취소", "Tab 열 이름"];
 pub const REDIS_HINTS: &[&str] = &["t TTL", "r 이름 바꾸기", "D 키 지우기", "esc 닫기", "? 키"];
 pub const REDIS_EDIT_HINTS: &[&str] = &["Enter 확정", "esc 취소"];
+pub const DASH_HINTS: &[&str] = &["r 새로고침", "Enter 트리에서 고르기", "/ 거르기", "? 키", "Ctrl+W 닫기"];
+pub const FLOW_HINTS: &[&str] = &["r 새로고침", "↑↓ 흐름", "←→ 상자", "Enter 상세", "? 키", "Ctrl+W 닫기"];
+pub const BOARD_HINTS: &[&str] = &["r 새로고침", "방향키·hjkl 패널", "Enter 쿼리 탭에 열기", "? 키", "Ctrl+W 닫기"];
 pub const REDIS_ASK_HINTS: &[&str] = &["y 삭제", "esc 취소"];
 
 pub fn redis_type_hints(t: &str) -> &'static [&'static str] {

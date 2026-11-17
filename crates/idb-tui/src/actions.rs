@@ -401,6 +401,12 @@ impl App {
             Pend::PatternKeys { conn, pattern } => self.pattern_counted(conn, pattern, res),
             Pend::Unlink => self.unlinked(res),
             Pend::Diff { tab } => self.diff_done(tab, res),
+            Pend::SourceKids { conn, node } => self.source_kids_done(conn, node, res),
+            Pend::Source(job) => self.source_done(id, *job, res),
+            Pend::Health { tab, round, conn } => self.health_done(id, tab, round, conn, res),
+            Pend::Flows { tab, round } => self.flows_done(tab, round, res),
+            Pend::BoardList => self.board_list_done(res),
+            Pend::Board { tab, round } => self.board_done(tab, round, res),
             Pend::User360 { tab } => match res.and_then(decode::<Vec<User360Item>>) {
                 Ok(items) => {
                     let Some(t) = self.tab_by_id(tab) else { return };
@@ -512,15 +518,14 @@ impl App {
                     self.ensure_catalog(c);
                 } else if self.is_redis(c) {
                     self.load_keys(c, n);
+                } else if self.is_source(c) {
+                    self.load_source_children(n);
                 } else {
                     let q = self.queries_for(c);
                     self.tree.set_conn_children(n, q, Vec::new());
-                    self.status = format!(
-                        "{} 접속은 Rust 화면에 아직 옮기지 않음",
-                        crate::theme::kind_label(&self.conns[c].kind)
-                    );
                 }
             }
+            NodeKind::Source { .. } => self.load_source_children(n),
             NodeKind::Schema { conn, name } => {
                 let cn = self.conns[*conn].name.clone();
                 self.call(
@@ -553,6 +558,14 @@ impl App {
             NodeKind::Key { conn, key } => self.open_redis_key(*conn, key.clone()),
             NodeKind::File(rel) => self.open_query_file(&format!("queries/{rel}")),
             NodeKind::Info => {}
+            // Enter 는 미리 보기, l 은 펼치기다(R60.3)
+            NodeKind::Source { openable: true, .. } if enter => self.open_source_node(n),
+            NodeKind::Source { conn, kids: false, .. } => {
+                let (ti, c) = (self.tab, *conn);
+                if self.tabs[ti].conn != Some(c) {
+                    self.set_conn(ti, Some(c));
+                }
+            }
             _ => {
                 let opening = !node.expanded;
                 self.tree.nodes[n].expanded = opening;
@@ -560,6 +573,12 @@ impl App {
                     self.load_children(n);
                 }
                 self.tree.rebuild();
+                if let NodeKind::Source { conn, .. } = node.kind
+                    && self.tabs[self.tab].conn != Some(conn)
+                {
+                    let ti = self.tab;
+                    self.set_conn(ti, Some(conn));
+                }
                 if let NodeKind::Conn(c) = node.kind {
                     let ti = self.tab;
                     if self.tabs[ti].conn != Some(c) {
@@ -609,7 +628,7 @@ impl App {
     }
 
     /// 탭을 테이블 보기로 바꿀지, 새 탭에 열지 정한다(R3.1). 글·파일·다른 접속의 보기가 있으면 새 탭이다.
-    fn target_tab(&mut self, conn: usize) -> usize {
+    pub(crate) fn target_tab(&mut self, conn: usize) -> usize {
         let t = self.cur();
         let other = t.conn.is_some_and(|c| c != conn) && (t.view.is_some() || t.redis.is_some() || t.pending() > 0);
         if t.file.is_some() || !t.editor.value().trim().is_empty() || other || t.running.is_some() {
@@ -1630,12 +1649,8 @@ impl App {
             self.status = "트리에서 접속을 먼저 고르세요".into();
             return;
         };
-        if !self.is_pg(conn) && !self.is_redis(conn) {
-            self.status = format!(
-                "{} 실행은 Rust 화면에 아직 옮기지 않음",
-                crate::theme::kind_label(&self.conns[conn].kind)
-            );
-            return;
+        if self.is_source(conn) {
+            return self.run_source(ti, conn, explain.is_some());
         }
         if self.tabs[ti].running.is_some() {
             self.status = "실행 중 (Ctrl+C 로 취소)".into();

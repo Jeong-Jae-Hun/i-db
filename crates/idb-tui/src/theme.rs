@@ -111,3 +111,13 @@ pub fn kind_label(kind: &str) -> &'static str {
         _ => "",
     }
 }
+
+/// 대시보드·흐름·보드의 경고 칸(Go dashWarnStyle)
+pub fn warn() -> Style {
+    Style::new().fg(STG).add_modifier(Modifier::BOLD)
+}
+
+/// 대시보드 연결됨(Go dashOKStyle)
+pub fn ok() -> Style {
+    Style::new().fg(GREEN)
+}

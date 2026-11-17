@@ -4,10 +4,13 @@
 
 mod actions;
 pub mod app;
+mod board;
 mod complete;
+mod dash;
 pub mod editor;
 mod files;
 mod finder;
+mod flow;
 pub mod grid;
 pub mod help;
 mod history;
@@ -16,6 +19,7 @@ mod jsontree;
 pub mod keys;
 mod ops;
 mod render;
+mod sources;
 mod state;
 pub mod tableview;
 mod theme;

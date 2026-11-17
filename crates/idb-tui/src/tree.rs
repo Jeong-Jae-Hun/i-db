@@ -31,6 +31,13 @@ pub enum NodeKind {
         conn: usize,
         key: String,
     },
+    /// 읽기 전용 저장소 노드(R60). path 는 source_children·source_open 에 그대로 돌려줄 경로다
+    Source {
+        conn: usize,
+        path: String,
+        openable: bool,
+        kids: bool,
+    },
     Info,
 }
 
@@ -44,10 +51,16 @@ pub struct Node {
     pub parent: Option<usize>,
     /// 폴더 옆 키 수
     pub count: usize,
+    /// 저장소 노드 오른쪽 흐린 글(타입·개수)과 경고 색 여부(R67.2)
+    pub info: String,
+    pub warn: bool,
 }
 
 impl Node {
     pub fn expandable(&self) -> bool {
+        if let NodeKind::Source { kids, .. } = self.kind {
+            return kids;
+        }
         matches!(
             self.kind,
             NodeKind::Group | NodeKind::Conn(_) | NodeKind::Queries(_) | NodeKind::Schema { .. } | NodeKind::Folder { .. }
@@ -57,7 +70,7 @@ impl Node {
     pub fn conn(&self) -> Option<usize> {
         match &self.kind {
             NodeKind::Conn(c) | NodeKind::Schema { conn: c, .. } | NodeKind::Table { conn: c, .. } => Some(*c),
-            NodeKind::Folder { conn, .. } | NodeKind::Key { conn, .. } => Some(*conn),
+            NodeKind::Folder { conn, .. } | NodeKind::Key { conn, .. } | NodeKind::Source { conn, .. } => Some(*conn),
             NodeKind::Queries(c) => *c,
             _ => None,
         }
@@ -144,6 +157,8 @@ impl Tree {
             children: Vec::new(),
             parent,
             count: 0,
+            info: String::new(),
+            warn: false,
         });
         self.nodes.len() - 1
     }
@@ -281,6 +296,31 @@ impl Tree {
         }
         self.nodes[n].children = all;
         self.nodes[n].loaded = true;
+        self.rebuild();
+    }
+
+    /// 저장소 노드 n 아래에 source_children 답을 단다. 자식이 없는 노드는 펼칠 것이 없어 읽은 것으로 둔다.
+    /// 접속 줄이면 쿼리 묶음을 앞에 지킨다. 비면 `(비어 있음)` 한 줄이다(Go childrenMsg 와 같다).
+    pub fn set_source_children(&mut self, n: usize, conn: usize, queries: Option<(String, Vec<String>)>, kids: Vec<idb_engine::Node>) {
+        let empty = kids.is_empty();
+        self.set_conn_children(n, queries, Vec::new());
+        for sn in kids {
+            let kind = NodeKind::Source {
+                conn,
+                path: sn.path,
+                openable: sn.openable,
+                kids: sn.has_children,
+            };
+            let id = self.add(kind, sn.name, Some(n));
+            self.nodes[id].info = sn.info;
+            self.nodes[id].warn = sn.warn;
+            self.nodes[id].loaded = !sn.has_children;
+            self.nodes[n].children.push(id);
+        }
+        if empty {
+            let id = self.add(NodeKind::Info, "(비어 있음)", Some(n));
+            self.nodes[n].children.push(id);
+        }
         self.rebuild();
     }
 

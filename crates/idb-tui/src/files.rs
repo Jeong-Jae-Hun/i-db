@@ -278,6 +278,7 @@ impl App {
             self.tabs[i].dirty_at = None;
             self.autosave(i);
         }
+        self.pane_tick();
     }
 
     /// Ctrl+S: 연 파일에 덮어쓴다(자동 저장이 멈췄어도). 연 파일이 없으면 알린다(R5.2).

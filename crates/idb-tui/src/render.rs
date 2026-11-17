@@ -146,12 +146,26 @@ impl App {
         if x + 3 <= self.w {
             buf.set_string(x, 1, " + ", theme::tab_inactive());
         }
+        // 대시보드·흐름·보드(R64·R69·R70)는 편집기·결과 두 영역(테두리 포함)을 한 영역으로 쓴다
+        if self.tabs[self.tab].pane.is_some() {
+            let rect = Rect::new(rx, 2, l.right_w + 2, l.ed_h + l.res_h + 4);
+            self.draw_pane(buf, rect);
+            self.draw_status(buf);
+            return;
+        }
         // ─── 편집기 ───
         let ed_rect = Rect::new(rx, 2, l.right_w + 2, l.ed_h + 2);
         let t = &self.tabs[self.tab];
         let mut ed_info = t.file.clone().map(|f| printable(&f, false)).unwrap_or_default();
         if t.autosave_stopped {
             ed_info = format!("{ed_info} · 자동 저장 멈춤");
+        }
+        // Loki·Prometheus·Grafana 탭은 편집기 위 줄(테두리)에 범위를 보인다(R62.2)
+        if let Some(c) = t.conn
+            && crate::sources::uses_range(&self.conns[c].kind)
+        {
+            let head = format!("최근 {} · {}", crate::sources::range_label(t.since), self.label("Ctrl+]"));
+            ed_info = if ed_info.is_empty() { head } else { format!("{head} · {ed_info}") };
         }
         let title = printable(&t.display_name(), false);
         pane(
@@ -221,7 +235,21 @@ impl App {
                     left.push((format!("  {b}"), theme::tx_badge()));
                 }
             }
-            None => left.push(("접속 없음 · 트리에서 고르세요".into(), theme::hint())),
+            None => {
+                let pane = match &t.pane {
+                    Some(crate::app::Pane::Dash(_)) => Some(("대시보드".to_string(), format!(" · 접속 {}", self.conns.len()))),
+                    Some(crate::app::Pane::Flow(f)) => Some(("흐름".to_string(), format!(" · {}", f.items.len() + f.adhoc.len()))),
+                    Some(crate::app::Pane::Board(b)) => Some(("보드".to_string(), format!(" · {}", App::board_head(b)))),
+                    None => None,
+                };
+                match pane {
+                    Some((name, rest)) => {
+                        left.push((name, theme::bar().add_modifier(Modifier::BOLD)));
+                        left.push((rest, theme::hint()));
+                    }
+                    None => left.push(("접속 없음 · 트리에서 고르세요".into(), theme::hint())),
+                }
+            }
         }
         let base = std::path::Path::new(&self.dir)
             .file_name()
@@ -281,6 +309,13 @@ impl App {
                 NodeKind::Info => style = theme::dim(),
                 _ => {}
             }
+            // 저장소 노드 오른쪽 흐린 글(R60, warn 이면 경고 색 R67.2)
+            let info = (matches!(node.kind, NodeKind::Source { .. }) && !node.info.is_empty()).then(|| {
+                (
+                    format!(" {}", printable(&node.info, false)),
+                    if node.warn { theme::warn() } else { theme::dim() },
+                )
+            });
             let row = self.tree.top + y;
             if row == self.tree.cursor {
                 let sel = if self.focus == Focus::Tree {
@@ -303,8 +338,39 @@ impl App {
             }
             if (x - r.x) < r.width {
                 let room = w - (x - r.x) as usize;
-                buf.set_stringn(x, yy, truncate(&label, room, "…"), room, style);
+                let shown = truncate(&label, room, "…");
+                buf.set_stringn(x, yy, &shown, room, style);
+                let used = width(&shown);
+                if let Some((info, ist)) = info
+                    && used < room
+                {
+                    let ist = if row == self.tree.cursor { ist.patch(style) } else { ist };
+                    buf.set_stringn(x + used as u16, yy, truncate(&info, room - used, "…"), room - used, ist);
+                }
             }
+        }
+    }
+
+    /// 대시보드·흐름·보드 탭 한 영역이다. 머리 오른쪽에 그 화면의 키와 `확인 중 N` 을 보인다.
+    fn draw_pane(&self, buf: &mut Buffer, rect: Rect) {
+        use crate::app::Pane;
+        let t = &self.tabs[self.tab];
+        let Some(p) = &t.pane else { return };
+        let (title, keys, n) = match p {
+            Pane::Dash(d) => ("대시보드".to_string(), "r 새로고침 · Enter 트리 · / 거르기", d.jobs.len()),
+            Pane::Flow(f) => ("흐름".to_string(), "r 새로고침 · ←→ 상자 · Enter 상세", App::flow_pending(f)),
+            Pane::Board(b) => (printable(&t.title, false), "r 새로고침 · Enter 쿼리 탭", App::board_pending(b)),
+        };
+        let mut info = self.label(keys);
+        if n > 0 {
+            info = format!("확인 중 {n} · {info}");
+        }
+        pane(buf, rect, &title, &info, self.focus != Focus::Tree, false);
+        let r = inner(rect);
+        match p {
+            Pane::Dash(d) => self.draw_dash(buf, r, d),
+            Pane::Flow(f) => self.draw_flow(buf, r, f),
+            Pane::Board(b) => self.draw_board(buf, r, b),
         }
     }
 
@@ -560,6 +626,17 @@ impl App {
     /// 지금 포커스·상태에서 실제로 듣는 키를 중요한 순서로 늘어놓는다(R74.1).
     pub fn hints(&self) -> Vec<String> {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        if self.focus != Focus::Tree {
+            let pane: Option<&[&str]> = match &self.cur().pane {
+                Some(crate::app::Pane::Dash(_)) => Some(help::DASH_HINTS),
+                Some(crate::app::Pane::Flow(_)) => Some(help::FLOW_HINTS),
+                Some(crate::app::Pane::Board(_)) => Some(help::BOARD_HINTS),
+                None => None,
+            };
+            if let Some(p) = pane {
+                return s(p);
+            }
+        }
         match self.focus {
             Focus::Editor => s(help::EDITOR_HINTS),
             Focus::Tree => self.tree_hints(),
@@ -579,7 +656,22 @@ impl App {
             NodeKind::Group => vec!["Enter 펼치기", "/ 거르기", "? 키"],
             NodeKind::Conn(c) if self.is_pg(*c) => vec!["Enter 펼치기", "A/L/S 운영", "B DB", "r 새로고침", "/ 거르기", "? 키"],
             NodeKind::Conn(c) if self.is_redis(*c) => vec!["Enter 펼치기", "A/L/S 운영", "/ SCAN 패턴", "r 새로고침", "? 키"],
+            NodeKind::Conn(c) if self.is_source(*c) => vec!["Enter 펼치기", "r 새로고침", "/ 거르기", "? 키"],
             NodeKind::Conn(_) => vec!["Enter 펼치기", "/ 거르기", "? 키"],
+            NodeKind::Source { openable, kids, .. } => {
+                let mut v = Vec::new();
+                if self.sns_topic(n).is_some() {
+                    v.push("F 흐름");
+                }
+                if *openable {
+                    v.push("Enter 미리 보기");
+                }
+                if *kids {
+                    v.push("l 펼치기");
+                }
+                v.extend(["r 새로고침", "? 키"]);
+                v
+            }
             NodeKind::Schema { .. } => vec!["Enter 펼치기", "r 새로고침", "/ 거르기", "? 키"],
             NodeKind::Table { .. } => vec!["Enter 열기", "d 구조", "D DDL", "/ 거르기", "? 키"],
             NodeKind::Key { .. } => vec!["Enter 값 편집", "/ SCAN 패턴", "r 새로고침", "? 키"],

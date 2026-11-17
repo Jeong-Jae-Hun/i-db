@@ -641,3 +641,497 @@ fn JSON_칸_값은_나무로_보이고_경로를_복사한다() {
     a.on_key("t");
     assert!(screen(&mut a).contains("\"items\": ["), "t 는 원문");
 }
+
+// ─── 읽기 전용 저장소 (R60~R68) ───
+
+fn src_app() -> App {
+    let info = ProjectInfo {
+        dir: "/tmp/proj".into(),
+        conns: vec![
+            conn("app-stg", "postgresql", "stg", "app"),
+            conn("logs-stg", "loki", "stg", "obs"),
+            conn("search-stg", "opensearch", "stg", "obs"),
+            conn("ddb-stg", "dynamodb", "stg", "obs"),
+            conn("infra-stg", "aws", "stg", "obs"),
+            conn("cache", "redis", "local", "app"),
+        ],
+        warnings: vec![],
+    };
+    let mut a = App::new(info, None, false, SessionCtx::disabled());
+    a.w = 120;
+    a.h = 32;
+    a
+}
+
+fn snode(name: &str, path: &str, info: &str, kids: bool, open: bool) -> Value {
+    json!({"name": name, "path": path, "info": info, "has_children": kids, "openable": open, "warn": false})
+}
+
+/// 접속 줄을 펼쳐 맨 위 자식을 답으로 넣는다.
+fn expand_source(a: &mut App, name: &str, kids: Value) {
+    select_conn(a, name);
+    a.on_key("enter");
+    let (id, req) = jobs(a).into_iter().find(|(_, r)| r["op"] == "source_children").unwrap();
+    assert_eq!((req["conn"].as_str(), req["path"].as_str()), (Some(name), Some("")));
+    a.on_done(id, Ok(kids));
+}
+
+#[test]
+fn 저장소_접속은_source_children_으로_펼치고_Enter_는_미리_보기다() {
+    let mut a = src_app();
+    expand_source(&mut a, "logs-stg", json!([snode("app", "app", "라벨", true, false)]));
+    assert_eq!(a.cur().conn, Some(1), "펼친 저장소 접속이 탭 접속이 된다");
+    a.on_key("j");
+    let s = screen(&mut a);
+    assert!(s.contains("app 라벨"), "오른쪽 흐린 정보\n{s}");
+    assert!(s.lines().last().unwrap().ends_with("l 펼치기 · r 새로고침 · ? 키"), "{s}");
+    a.on_key("l");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!((req["op"].as_str(), req["path"].as_str()), (Some("source_children"), Some("app")));
+    a.on_done(id, Ok(json!([snode("api", "app/api", "", false, true)])));
+    a.on_key("j");
+    assert!(
+        screen(&mut a)
+            .lines()
+            .last()
+            .unwrap()
+            .ends_with("Enter 미리 보기 · r 새로고침 · ? 키")
+    );
+    a.on_key("enter");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["conn"].as_str(), req["path"].as_str()),
+        (Some("source_open"), Some("logs-stg"), Some("app/api"))
+    );
+    assert!(a.cur().running.is_some());
+    a.on_done(id, Ok(rs(&["time", "line"], &[&["2024-01-01 09:00:00", "hello"]])));
+    let s = screen(&mut a);
+    assert!(s.contains("hello"), "{s}");
+    assert_eq!(a.focus, Focus::Result);
+    assert_eq!(a.cur().base_why, "이 저장소는 서버 정렬 없음");
+}
+
+#[test]
+fn 빈_저장소_목록은_비어_있음_한_줄이고_읽기_실패는_접어_둔다() {
+    let mut a = src_app();
+    expand_source(&mut a, "search-stg", json!([]));
+    assert!(screen(&mut a).contains("(비어 있음)"));
+    let mut b = src_app();
+    select_conn(&mut b, "search-stg");
+    b.on_key("enter");
+    let (id, _) = jobs(&mut b).pop().unwrap();
+    b.on_done(id, Err(EngineError::run("connection refused")));
+    assert_eq!(b.status, "읽기 실패: connection refused");
+    let n = b.tree.current().unwrap();
+    assert!(!b.tree.node(n).expanded, "다시 펼치면 다시 읽는다");
+}
+
+#[test]
+fn 다이나모_테이블_미리_보기는_비싼_질의_확인_뒤_force_로_스캔한다() {
+    let mut a = src_app();
+    expand_source(&mut a, "ddb-stg", json!([snode("users", "users", "항목 ≈12", true, true)]));
+    keys(&mut a, &["j", "enter"]);
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "source_open");
+    a.on_done(id, Err(refused("confirm_expensive", "비싼 질의: 전체 스캔")));
+    let Overlay::Confirm { q, .. } = &a.overlay else {
+        panic!("확인 창이 아님")
+    };
+    assert_eq!(q, "비싼 질의: 전체 스캔");
+    assert!(screen(&mut a).lines().last().unwrap().contains("비싼 질의: 전체 스캔: y/N"));
+    a.on_key("y");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (
+            req["op"].as_str(),
+            req["text"].as_str(),
+            req["force"].as_bool(),
+            req["limit"].as_u64()
+        ),
+        (Some("source_run"), Some("SELECT * FROM \"users\""), Some(true), Some(50))
+    );
+    a.on_done(id, Ok(rs(&["pk"], &[&["u1"]])));
+    assert!(screen(&mut a).contains("u1"));
+}
+
+#[test]
+fn 다시_보낼_질의가_없는_비싼_미리_보기는_알리기만_한다() {
+    let mut a = src_app();
+    expand_source(&mut a, "search-stg", json!([snode("logs", "logs", "문서 12", true, true)]));
+    keys(&mut a, &["j", "enter"]);
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Err(refused("confirm_expensive", "비싼 질의: size 1만 초과")));
+    assert!(a.overlay.is_none());
+    assert_eq!(a.status, "비싼 질의라 보내지 않음 (size 1만 초과)");
+}
+
+#[test]
+fn 편집기_실행은_탭_범위를_싣고_Ctrl_대괄호로_범위를_돈다() {
+    let mut a = src_app();
+    a.set_conn(0, Some(1));
+    a.set_focus(Focus::Editor);
+    assert!(screen(&mut a).contains("최근 1h · Ctrl+]"), "편집기 위 줄에 범위");
+    a.on_key("ctrl+]");
+    assert_eq!(a.status, "범위: 최근 6h");
+    assert!(screen(&mut a).contains("최근 6h · Ctrl+]"));
+    typed(&mut a, "{app=\"api\"}");
+    a.on_key("ctrl+r");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["conn"].as_str(), req["text"].as_str()),
+        (Some("source_run"), Some("logs-stg"), Some("{app=\"api\"}"))
+    );
+    assert_eq!(req["since_ns"].as_i64(), Some(6 * 3_600_000_000_000));
+    assert_eq!(req["force"], false);
+    a.on_done(id, Err(refused("confirm_expensive", "비싼 질의: 범위 7일 초과")));
+    a.on_key("y");
+    let (_, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["force"].as_bool(), req["since_ns"].as_i64()),
+        (Some(true), Some(6 * 3_600_000_000_000))
+    );
+    // 범위 없는 종류는 범위를 싣지 않는다
+    let mut b = src_app();
+    b.set_conn(0, Some(2));
+    b.set_focus(Focus::Editor);
+    assert!(!screen(&mut b).contains("최근 1h"));
+    b.on_key("ctrl+]");
+    assert_eq!(b.status, "범위는 Loki·Prometheus·Grafana 탭에서만 바꿈");
+    typed(&mut b, "GET logs/_search");
+    b.on_key("ctrl+r");
+    let (_, req) = jobs(&mut b).pop().unwrap();
+    assert_eq!(req["since_ns"], 0);
+}
+
+#[test]
+fn 읽기_전용_요금_거절은_상태_줄에만_보이고_aws_는_보내지_않는다() {
+    for (reason, msg) in [
+        ("read_only", "읽기 전용 저장소라 보내지 않음"),
+        ("billed", "요금이 붙는 조회라 막음 (DB_ALLOW_BILLED=1 로 허용)"),
+    ] {
+        let mut a = src_app();
+        a.set_conn(0, Some(3));
+        a.set_focus(Focus::Editor);
+        typed(&mut a, "SELECT * FROM \"users\"");
+        a.on_key("ctrl+r");
+        let (id, _) = jobs(&mut a).pop().unwrap();
+        a.on_done(id, Err(refused(reason, msg)));
+        assert_eq!(a.status, msg);
+        assert!(a.overlay.is_none() && jobs(&mut a).is_empty());
+        assert!(a.cur().running.is_none() && a.cur().err.is_empty());
+    }
+    let mut a = src_app();
+    a.set_conn(0, Some(4));
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "x");
+    a.on_key("ctrl+r");
+    assert_eq!(a.status, "aws 접속은 트리로 본다");
+    assert!(jobs(&mut a).is_empty());
+}
+
+// ─── 대시보드 (R64) ───
+
+#[test]
+fn 대시보드는_모든_접속을_트리_순서로_확인하고_요약과_표를_그린다() {
+    let mut a = app();
+    a.on_key("ctrl+g");
+    assert_eq!(a.cur().title, "대시보드");
+    assert_eq!(a.status, "대시보드 확인 중…");
+    let js = jobs(&mut a);
+    let names: Vec<&str> = js.iter().map(|(_, r)| r["conn"].as_str().unwrap()).collect();
+    assert!(js.iter().all(|(_, r)| r["op"] == "health"));
+    assert_eq!(names, ["cache", "app-stg", "shop-prod"], "트리 순서(환경 local→stg→prod)");
+    let s = screen(&mut a);
+    assert!(s.contains("확인 중 3"), "{s}");
+    a.on_done(
+        js[1].0,
+        Ok(json!({"ok": true, "latency_ms": 12, "version": "16.2", "summary": "",
+            "metrics": [{"name": "세션", "value": "12/200", "warn": false}, {"name": "활성", "value": "3", "warn": false}], "err": ""})),
+    );
+    a.on_done(js[0].0, Err(EngineError::run("dial tcp: refused")));
+    let s = screen(&mut a);
+    assert!(s.contains("PG 활성 세션") && s.contains("● 1") && s.contains("✕ 1"), "{s}");
+    assert!(
+        s.contains("세션 12/200 · 활성 3") && s.contains("12ms") && s.contains("16.2"),
+        "{s}"
+    );
+    assert!(s.contains("dial tcp: refused"), "{s}");
+    assert!(s.contains("확인 중 1"), "{s}");
+    assert!(
+        s.lines()
+            .last()
+            .unwrap()
+            .ends_with("r 새로고침 · Enter 트리에서 고르기 · / 거르기 · ? 키 · Ctrl+W 닫기"),
+        "{s}"
+    );
+    a.on_done(
+        js[2].0,
+        Ok(json!({"ok": true, "latency_ms": 1, "version": "", "summary": "", "metrics": [], "err": ""})),
+    );
+    assert!(a.status.starts_with("대시보드 확인함 "), "{}", a.status);
+    // ? 는 대시보드 묶음만 보인다
+    a.on_key("?");
+    let Overlay::Keys(secs) = &a.overlay else {
+        panic!("키 창이 아님")
+    };
+    assert_eq!(secs.len(), 1);
+    assert_eq!(crate::help::SECTIONS[secs[0]].title, "대시보드 (Ctrl+G)");
+}
+
+#[test]
+fn 대시보드_r_과_30초_타이머는_이전_확인을_취소하고_다시_본다() {
+    let mut a = app();
+    a.on_key("ctrl+g");
+    let first: Vec<u64> = jobs(&mut a).into_iter().map(|(id, _)| id).collect();
+    a.on_key("r");
+    let cancels = a.take_cancels();
+    assert_eq!(cancels.len(), 3, "진행 중인 확인을 멈춘다");
+    assert!(first.iter().all(|id| cancels.contains(id)));
+    let second = jobs(&mut a);
+    assert_eq!(second.len(), 3);
+    // 늦게 온 이전 결과는 버린다
+    a.on_done(
+        first[0],
+        Ok(json!({"ok": true, "latency_ms": 1, "version": "", "summary": "", "metrics": [], "err": ""})),
+    );
+    assert!(screen(&mut a).contains("● 0"));
+    // 때가 되면 활성 탭일 때만 다시 본다
+    if let Some(crate::app::Pane::Dash(d)) = &mut a.cur_mut().pane {
+        d.due = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    }
+    a.tick();
+    assert_eq!(jobs(&mut a).len(), 3);
+    let dash = a.tab;
+    a.new_tab();
+    a.take_jobs();
+    if let Some(crate::app::Pane::Dash(d)) = &mut a.tabs[dash].pane {
+        d.due = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    }
+    a.tick();
+    assert!(jobs(&mut a).is_empty(), "다른 탭이 활성이면 다음 때만 미룬다");
+    let Some(crate::app::Pane::Dash(d)) = &a.tabs[dash].pane else {
+        panic!()
+    };
+    assert!(d.due > std::time::Instant::now());
+    // 탭을 닫으면 진행 중인 확인을 멈춘다
+    a.take_cancels();
+    a.close_tab(dash);
+    assert_eq!(a.take_cancels().len(), 3);
+    assert!(a.pending.is_empty());
+}
+
+#[test]
+fn 대시보드_Enter_는_트리에서_접속을_고르고_거르기는_그룹_이름_환경이다() {
+    let mut a = app();
+    a.on_key("ctrl+g");
+    a.take_jobs();
+    a.on_key("/");
+    typed(&mut a, "prod");
+    a.on_key("enter");
+    let s = screen(&mut a);
+    assert!(
+        s.contains("거르기 prod · esc 해제") && s.contains("shop-prod") && !s.contains("▸ app-stg"),
+        "{s}"
+    );
+    a.on_key("enter");
+    assert_eq!(a.focus, Focus::Tree);
+    let n = a.tree.current().unwrap();
+    assert_eq!(a.tree.node(n).kind, crate::tree::NodeKind::Conn(1));
+}
+
+// ─── 흐름 (R69) ───
+
+fn flow_answer() -> Value {
+    json!([
+        {"flow": "hub", "boxes": [
+            {"stage": "outbox", "name": "app-stg public.t_outbox", "metrics": "대기 120 · 재시도 3", "warn": true, "idle": false, "err": "", "note": "", "conn": "app-stg"},
+            {"stage": "sns", "name": "hub", "metrics": "", "warn": false, "idle": false, "err": "", "note": "", "conn": "infra-stg"},
+            {"stage": "sqs", "name": "q1", "metrics": "", "warn": false, "idle": false, "err": "", "note": "", "conn": "infra-stg"},
+            {"stage": "lambda", "name": "worker", "metrics": "Enabled · OK", "warn": false, "idle": false, "err": "", "note": "", "conn": "infra-stg"}
+        ]},
+        {"flow": "broken", "boxes": [
+            {"stage": "config", "name": "broken", "metrics": "", "warn": false, "idle": false, "err": "설정 오류: no queues", "note": "", "conn": ""}
+        ]}
+    ])
+}
+
+#[test]
+fn 흐름_탭은_모든_흐름을_한_번에_풀고_목록과_그림을_그린다() {
+    let mut a = src_app();
+    a.w = 200;
+    a.on_key("alt+f");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req, json!({"op": "flows", "names": [], "prod": true}));
+    assert!(screen(&mut a).contains("흐름 확인 중…"));
+    a.on_done(id, Ok(flow_answer()));
+    let s = screen(&mut a);
+    assert!(s.contains("▸ ! hub") && s.contains("✕ broken"), "{s}");
+    assert!(s.contains("수치는 요금이 붙어 보지 않음"), "{s}");
+    assert!(
+        s.contains("[아웃박스 app-stg public.t_outbox | 대기 120 · 재시도 3] ──▶ [SNS hub] ──▶ [SQS q1] ──▶ [λ worker OK]"),
+        "{s}"
+    );
+    assert!(
+        s.lines()
+            .last()
+            .unwrap()
+            .ends_with("r 새로고침 · ↑↓ 흐름 · ←→ 상자 · Enter 상세 · ? 키 · Ctrl+W 닫기")
+    );
+    assert!(a.status.starts_with("흐름 확인함 "));
+    // Lambda 상자 Enter 는 aws 매핑 표다
+    keys(&mut a, &["l", "l", "l", "enter"]);
+    let (_, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["conn"].as_str(), req["path"].as_str()),
+        (Some("source_open"), Some("infra-stg"), Some("lambda/worker"))
+    );
+    // 이름만 아는 토픽은 상세가 없다(설정을 읽을 로컬 파일 없음)
+    a.switch_tab(a.tabs.len() - 2);
+    keys(&mut a, &["h", "h", "enter"]);
+    assert_eq!(a.status, "열 상세가 없음: hub");
+    keys(&mut a, &["h", "enter"]);
+    assert_eq!(a.status, "원격 접속에서는 아웃박스 상세를 열지 않음");
+}
+
+#[test]
+fn 흐름_파일_오류와_빈_목록은_안내를_보인다() {
+    let mut a = src_app();
+    a.on_key("alt+f");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(json!([])));
+    assert!(screen(&mut a).contains("흐름 없음 · .dbtui/flows.json 을 쓰세요"));
+    a.on_key("r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Err(EngineError::run(".dbtui/flows.json: invalid character")));
+    assert!(screen(&mut a).contains("설정 오류: .dbtui/flows.json: invalid character"));
+}
+
+#[test]
+fn aws_트리_SNS_토픽_F_는_그_토픽만의_흐름을_더해_고른다() {
+    let mut a = src_app();
+    expand_source(&mut a, "infra-stg", json!([snode("SNS 토픽", "sns", "", true, false)]));
+    keys(&mut a, &["j", "l"]);
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let arn = "arn:aws:sns:ap-northeast-2:1:hub";
+    a.on_done(id, Ok(json!([snode("hub", &format!("sns/{arn}"), "구독 2", true, true)])));
+    a.on_key("j");
+    assert!(
+        screen(&mut a)
+            .lines()
+            .last()
+            .unwrap()
+            .ends_with("F 흐름 · Enter 미리 보기 · l 펼치기 · r 새로고침 · ? 키")
+    );
+    a.on_key("F");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "flows");
+    a.on_done(id, Ok(json!([])));
+    let s = screen(&mut a);
+    assert!(s.contains("▸ ● hub · infra-stg") && s.contains("[SNS hub]"), "{s}");
+    a.on_key("enter");
+    let (_, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["path"].as_str()),
+        (Some("source_open"), Some(&*format!("sns/{arn}")))
+    );
+}
+
+// ─── 보드 (R70) ───
+
+fn board_answer() -> Value {
+    json!({"title": "운영", "panels": [
+        {"title": "대기", "conn": "app-stg", "flow": "", "view": "number", "prod": false, "value": "42", "warn": true},
+        {"title": "최근", "conn": "shop-prod", "flow": "", "view": "table", "prod": true, "warn": false,
+            "result": rs(&["id", "state"], &[&["1", "ok"]])},
+        {"title": "틀림", "conn": "x", "flow": "", "view": "number", "prod": false, "warn": false, "error": "설정 오류: no such connection: x"},
+        {"title": "흐름", "conn": "", "flow": "hub", "view": "flow", "prod": false, "warn": false,
+            "boxes": [{"stage": "sns", "name": "hub", "metrics": "", "warn": false, "idle": false, "err": "", "note": "", "conn": "infra"}]}
+    ]})
+}
+
+#[test]
+fn 보드는_목록에서_골라_한_회차를_돌리고_패널_격자를_그린다() {
+    let mut a = app();
+    a.on_key("alt+b");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "board_list");
+    a.on_done(id, Ok(json!([])));
+    assert_eq!(a.status, "보드 없음 · .dbtui/boards/<이름>.json 을 쓰세요");
+    a.on_key("alt+b");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(json!([{"name": "ops", "title": "운영", "panels": 4}])));
+    assert!(matches!(a.overlay, Overlay::Picker { .. }));
+    a.on_key("enter");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req, json!({"op": "board_run", "name": "ops", "prod": true}));
+    assert!(screen(&mut a).contains("보드 확인 중…"));
+    a.on_done(id, Ok(board_answer()));
+    assert_eq!(a.cur().title, "운영");
+    let s = screen(&mut a);
+    assert!(s.contains("보드 · 패널 4 · 1m0s마다"), "{s}");
+    assert!(s.contains("대기 · app-stg") && s.contains("42"), "{s}");
+    assert!(s.contains("최근 · shop-prod prod") && s.contains("state"), "{s}");
+    assert!(s.contains("설정 오류: no such connection: x"), "{s}");
+    assert!(s.contains("흐름 · 흐름 hub") && s.contains("[SNS hub]"), "{s}");
+    assert!(
+        s.lines()
+            .last()
+            .unwrap()
+            .ends_with("r 새로고침 · 방향키·hjkl 패널 · Enter 쿼리 탭에 열기 · ? 키 · Ctrl+W 닫기")
+    );
+    // 120칸 오른쪽 영역은 2열이다: j 는 아래 줄, Enter 는 설정 오류면 까닭만 보인다
+    keys(&mut a, &["j", "enter"]);
+    assert_eq!(a.status, "설정 오류: no such connection: x");
+    keys(&mut a, &["k", "l", "enter"]);
+    assert_eq!(a.status, "원격 접속에서는 패널 질의를 열지 않음");
+    // 흐름 패널은 흐름 탭에서 그 흐름을 고른다
+    keys(&mut a, &["j", "enter"]);
+    assert!(matches!(a.cur().pane, Some(crate::app::Pane::Flow(_))));
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "flows");
+    a.on_done(id, Ok(flow_answer()));
+    let Some(crate::app::Pane::Flow(f)) = &a.cur().pane else { panic!() };
+    assert_eq!(f.cursor, 0);
+    // 같은 보드를 다시 열면 그 탭으로 옮겨 다시 돈다
+    let n = a.tabs.len();
+    a.open_board("ops");
+    assert_eq!(a.tabs.len(), n);
+    assert_eq!(jobs(&mut a).pop().unwrap().1["op"], "board_run");
+}
+
+#[test]
+fn 로컬_보드는_파일의_refresh_와_패널_질의로_쿼리_탭을_연다() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".dbtui/boards")).unwrap();
+    std::fs::write(
+        dir.path().join(".dbtui/boards/ops.json"),
+        r#"{"refresh":"15s","panels":[{"title":"오류","conn":"logs-stg","query":"{app=\"api\"} |= \"error\"","view":"table","since":"6h"}]}"#,
+    )
+    .unwrap();
+    let info = ProjectInfo {
+        dir: dir.path().to_string_lossy().into_owned(),
+        conns: vec![conn("logs-stg", "loki", "stg", "obs")],
+        warnings: vec![],
+    };
+    let files = crate::files::Files::new(dir.path().to_path_buf(), Default::default());
+    let mut a = App::new(info, Some(files), false, SessionCtx::disabled());
+    a.w = 120;
+    a.h = 32;
+    a.take_jobs();
+    a.open_board("ops");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(
+        id,
+        Ok(json!({"title": "ops", "panels": [{"title": "오류", "conn": "logs-stg", "flow": "", "view": "table", "prod": false, "warn": false,
+            "result": rs(&["time", "line"], &[])}]})),
+    );
+    assert!(screen(&mut a).contains("패널 1 · 15s마다"));
+    a.on_key("enter");
+    assert_eq!(a.cur().title, "오류");
+    assert_eq!(a.focus, Focus::Editor);
+    let (_, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["text"].as_str(), req["since_ns"].as_i64()),
+        (Some("source_run"), Some("{app=\"api\"} |= \"error\""), Some(6 * 3_600_000_000_000))
+    );
+}
