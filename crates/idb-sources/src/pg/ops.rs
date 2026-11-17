@@ -471,9 +471,8 @@ impl Pg {
             1 => {}
             _ => return Err(Error::msg("only one statement can be exported")),
         }
-        if !idb_core::sqlsafe::is_read_only_sql(stmt) {
-            return Err(Error::msg(idb_core::sqlsafe::ReadOnlyError::NotReadOnly.to_string()));
-        }
+        // 부수 효과 함수(pg_terminate_backend 등)는 READ ONLY 트랜잭션에서도 돌아 read_query 와 같은 검사로 막는다
+        idb_core::sqlsafe::check_read_only_sql(stmt).map_err(|e| Error::msg(e.to_string()))?;
         if !matches!(first_sql_word(stmt).as_str(), "select" | "with" | "values" | "table") {
             return Err(Error::msg(ERR_EXPORT_NOT_SELECT));
         }
@@ -582,6 +581,7 @@ mod tests {
         assert_eq!(err("select 1; select 2").await, "only one statement can be exported");
         assert!(err("delete from t").await.starts_with("only read-only statements"));
         assert_eq!(err("show search_path").await, ERR_EXPORT_NOT_SELECT);
+        assert!(err("select pg_terminate_backend(1)").await.contains("is not allowed"));
         assert_eq!(err("select 1) to stdout (format text").await, "unbalanced parentheses");
         assert_eq!(err("select (1").await, "unbalanced parentheses");
         assert!(err("select ')' from t;").await.starts_with("failed to connect"));

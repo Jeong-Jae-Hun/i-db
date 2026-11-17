@@ -91,7 +91,7 @@ ResultSet 은 `{cols, types?, rows, text, truncated, elapsed_ms, in_tx?, note?, 
 
 ## 전체 내보내기
 
-`export_start`는 문장을 거른 뒤 COPY 를 serve 안의 따로 도는 작업으로 띄우고 id 를 돌려준다. 거절은 code 2 이고 글은 화면 글이다: 문장이 둘 이상이면 `문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)`, 읽기 문장(R6.1)이 아니면 `읽기 문장만 전체 내보내기`, `select`·`with`·`values`·`table`로 시작하지 않으면 `SELECT 문만 전체 내보내기`, `:이름` 파라미터가 있으면 `파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음`이다. enc()는 serve 가 바꾸고 알림은 note 다(R52).
+`export_start`는 문장을 거른 뒤 COPY 를 serve 안의 따로 도는 작업으로 띄우고 id 를 돌려준다. 거절은 code 2 이고 글은 화면 글이다: 문장이 둘 이상이면 `문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)`, 읽기 문장(R6.1)이 아니면 `읽기 문장만 전체 내보내기`, `select`·`with`·`values`·`table`로 시작하지 않으면 `SELECT 문만 전체 내보내기`, `:이름` 파라미터가 있으면 `파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음`이다. 부수 효과 함수(`pg_terminate_backend` 등, `read_query`와 같은 목록)는 READ ONLY 트랜잭션 안에서도 돌아 code 3 `read_only`로 거절하고, 위험 문장(R25)도 내보내지 않는다. prod 잠금(R54)과 상관없이 같다. enc()는 serve 가 바꾸고 알림은 note 다(R52).
 
 COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN READ ONLY` 트랜잭션에서 `COPY (<문장>\n) TO STDOUT WITH (FORMAT csv, HEADER)`로 돈다. 편집기에서 고른 데이터베이스(R27.1)와 `search_path`(R27.2, `SET LOCAL`)를 따르고, 편집기의 열린 트랜잭션을 기다리거나 막지 않는다. 읽기만 하는 트랜잭션이라 prod 도 묻지 않고 잠금(R54)에 걸리지 않는다. 첫 단어 판정이 놓친 CTE 안 쓰기는 서버의 READ ONLY 가 거절한다.
 

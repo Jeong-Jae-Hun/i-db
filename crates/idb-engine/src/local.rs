@@ -650,16 +650,25 @@ impl LocalEngine {
             1 => {}
             _ => return Err(EngineError::usage("문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)")),
         }
-        if !is_read_only_sql(stmts[0]) {
-            return Err(EngineError::usage("읽기 문장만 전체 내보내기"));
+        // read_query 와 같은 검사다. 첫 단어만 보면 `select pg_terminate_backend(…)` 같은 부수 효과 함수가 지나가고
+        // 그런 함수는 READ ONLY 트랜잭션 안에서도 돈다. 그래서 prod 잠금(R54)과 상관없이 늘 막는다
+        match check_read_only_sql(stmts[0]) {
+            Err(idb_core::sqlsafe::ReadOnlyError::NotReadOnly) => return Err(EngineError::usage("읽기 문장만 전체 내보내기")),
+            Err(e) => return Err(EngineError::refused(REASON_READ_ONLY, e.to_string())),
+            Ok(()) => {}
         }
         if !matches!(first_sql_word(stmts[0]).as_str(), "select" | "with" | "values" | "table") {
             return Err(EngineError::usage("SELECT 문만 전체 내보내기"));
+        }
+        let danger = danger_of(stmts[0]);
+        if !danger.is_empty() {
+            return Err(EngineError::usage(format!("위험 문장은 전체 내보내지 않음: {danger}")));
         }
         if !idb_core::params::bind(stmts[0]).1.is_empty() {
             return Err(EngineError::usage("파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음"));
         }
         let (stmt, note) = self.proj().expand_enc(&c, stmts[0]).map_err(EngineError::usage)?;
+        check_read_only_sql(&stmt).map_err(|e| EngineError::refused(REASON_READ_ONLY, e.to_string()))?;
         let pg = self.clients.pg(&c).await.map_err(|e| self.run_err(&c, &e))?;
         let sp = self.search_path(&c).await;
         let (data_tx, data) = tokio::sync::mpsc::channel(EXPORT_BUFFER);
@@ -1836,6 +1845,10 @@ mod tests {
             "파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음"
         );
         assert_eq!(err("").await, "전체 내보낼 문장이 없음");
+        // 부수 효과 함수는 READ ONLY 트랜잭션 안에서도 돌아 접속하기 전에 막는다(read_query 와 같은 검사)
+        let refused = e.export_start("a", "select pg_terminate_backend(1)").await.unwrap_err();
+        assert_eq!((refused.code, refused.reason.as_deref()), (CODE_REFUSED, Some(REASON_READ_ONLY)));
+        assert!(refused.error.contains("pg_terminate_backend"), "{}", refused.error);
     }
 
     const DATA_SOURCES: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
