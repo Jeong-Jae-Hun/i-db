@@ -1,0 +1,5 @@
+args: ["conn","edit","logs-stg","--port","x","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn edit: --port 는 1~65535 숫자

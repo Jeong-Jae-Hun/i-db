@@ -1359,5 +1359,494 @@
    "--format",
    "json"
   ]
+ },
+ {
+  "name": "history-empty-json",
+  "project": "offline",
+  "args": [
+   "history",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "history-empty-tsv",
+  "project": "offline",
+  "args": [
+   "history",
+   "--format",
+   "tsv"
+  ]
+ },
+ {
+  "name": "history-empty-table",
+  "project": "offline",
+  "args": [
+   "history",
+   "--format",
+   "table",
+   "--conn",
+   "app-stg",
+   "--since",
+   "7d"
+  ]
+ },
+ {
+  "name": "history-show-missing",
+  "project": "offline",
+  "args": [
+   "history",
+   "show",
+   "20260101-000000-abcdef"
+  ]
+ },
+ {
+  "name": "history-show-bad-id",
+  "project": "offline",
+  "args": [
+   "history",
+   "show",
+   "../x"
+  ]
+ },
+ {
+  "name": "history-bad-format",
+  "project": "offline",
+  "args": [
+   "history",
+   "--format",
+   "csv"
+  ]
+ },
+ {
+  "name": "history-bad-limit",
+  "project": "offline",
+  "args": [
+   "history",
+   "--limit",
+   "-1"
+  ]
+ },
+ {
+  "name": "history-extra-arg",
+  "project": "offline",
+  "args": [
+   "history",
+   "foo"
+  ]
+ },
+ {
+  "name": "history-bad-since",
+  "project": "offline",
+  "args": [
+   "history",
+   "--since",
+   "x"
+  ]
+ },
+ {
+  "name": "history-help",
+  "project": "offline",
+  "args": [
+   "history",
+   "-h"
+  ]
+ },
+ {
+  "name": "conn-no-sub",
+  "project": "offline",
+  "args": [
+   "conn"
+  ]
+ },
+ {
+  "name": "conn-help-flag",
+  "project": "offline",
+  "args": [
+   "conn",
+   "--help"
+  ]
+ },
+ {
+  "name": "conn-unknown-sub-url",
+  "project": "offline",
+  "args": [
+   "conn",
+   "postgres://u:sekrit@h/d"
+  ]
+ },
+ {
+  "name": "conn-unknown-sub-name",
+  "project": "offline",
+  "args": [
+   "conn",
+   "list"
+  ]
+ },
+ {
+  "name": "conn-bad-flag",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "--nope"
+  ]
+ },
+ {
+  "name": "conn-timeout-zero",
+  "project": "offline",
+  "args": [
+   "conn",
+   "test",
+   "x",
+   "--timeout",
+   "0s"
+  ]
+ },
+ {
+  "name": "conn-add-no-name",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-bad-name",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "postgres://u:sekrit@h/d",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-exists",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "app-stg",
+   "--url",
+   "postgres://u@h/d",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-no-url",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "x",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-bad-url",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "x",
+   "--url",
+   "mysql://u:sekrit@h/d",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-kind-mismatch",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "x",
+   "--kind",
+   "redis",
+   "--url",
+   "postgres://u@h/d",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-bad-port",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "x",
+   "--url",
+   "postgres://u@h:0/d",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-prod-refused",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "x-prod",
+   "--url",
+   "postgres://u:sekrit@h/d",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-source-bad-url",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "x",
+   "--kind",
+   "loki",
+   "--url",
+   "ftp://h",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-add-athena-no-region",
+  "project": "offline",
+  "args": [
+   "conn",
+   "add",
+   "ath",
+   "--kind",
+   "athena",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-edit-datagrip",
+  "project": "offline",
+  "args": [
+   "conn",
+   "edit",
+   "app-stg",
+   "--host",
+   "x",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-edit-nothing",
+  "project": "offline",
+  "args": [
+   "conn",
+   "edit",
+   "logs-stg",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-edit-missing",
+  "project": "offline",
+  "args": [
+   "conn",
+   "edit",
+   "nope",
+   "--host",
+   "x",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-edit-bad-port",
+  "project": "offline",
+  "args": [
+   "conn",
+   "edit",
+   "logs-stg",
+   "--port",
+   "x",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-rm-needs-yes",
+  "project": "offline",
+  "args": [
+   "conn",
+   "rm",
+   "logs-stg",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-rm-missing",
+  "project": "offline",
+  "args": [
+   "conn",
+   "rm",
+   "nope",
+   "--yes",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-rm-datagrip",
+  "project": "offline",
+  "args": [
+   "conn",
+   "rm",
+   "app-stg",
+   "--yes",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-test-prod",
+  "project": "offline",
+  "args": [
+   "conn",
+   "test",
+   "app-prod",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-test-both",
+  "project": "offline",
+  "args": [
+   "conn",
+   "test",
+   "x",
+   "--url",
+   "postgres://u@h/d"
+  ]
+ },
+ {
+  "name": "conn-test-bad-url",
+  "project": "offline",
+  "args": [
+   "conn",
+   "test",
+   "--url",
+   "postgres://u:sekrit@h:99999/d"
+  ]
+ },
+ {
+  "name": "conn-test-unknown",
+  "project": "offline",
+  "args": [
+   "conn",
+   "test",
+   "nope",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-folder-usage",
+  "project": "offline",
+  "args": [
+   "conn",
+   "folder",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-folder-missing",
+  "project": "offline",
+  "args": [
+   "conn",
+   "folder",
+   "nope",
+   "x",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-folder-rename-usage",
+  "project": "offline",
+  "args": [
+   "conn",
+   "folder",
+   "--rename",
+   "grp",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-folder-rename-missing",
+  "project": "offline",
+  "args": [
+   "conn",
+   "folder",
+   "--rename",
+   "nope",
+   "new",
+   "-p",
+   "{P}"
+  ]
+ },
+ {
+  "name": "conn-no-project",
+  "project": "offline",
+  "args": [
+   "conn",
+   "test",
+   "x",
+   "-p",
+   "/nonexistent-golden"
+  ]
+ },
+ {
+  "name": "update-bad-version",
+  "project": "offline",
+  "args": [
+   "update",
+   "--version",
+   "1.0"
+  ]
+ },
+ {
+  "name": "update-extra-arg",
+  "project": "offline",
+  "args": [
+   "update",
+   "foo"
+  ]
+ },
+ {
+  "name": "update-bad-flag",
+  "project": "offline",
+  "args": [
+   "update",
+   "--nope"
+  ]
+ },
+ {
+  "name": "update-help",
+  "project": "offline",
+  "args": [
+   "update",
+   "-h"
+  ]
  }
 ]

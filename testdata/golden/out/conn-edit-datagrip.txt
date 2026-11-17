@@ -1,0 +1,5 @@
+args: ["conn","edit","app-stg","--host","x","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn edit: DataGrip 접속은 DataGrip 에서 고침

@@ -1,0 +1,5 @@
+args: ["conn","test","x","--timeout","0s"]
+exit: 2
+--- stdout
+--- stderr
+db conn: --timeout must be positive
