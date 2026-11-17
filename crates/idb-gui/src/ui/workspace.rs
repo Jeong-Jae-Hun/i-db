@@ -26,6 +26,7 @@ use idb_engine::{Catalog, ConnSummary, Engine, EngineError, LockState, ProjectIn
 
 use super::redis::RedisView;
 use super::results::{ResultsView, Source};
+use super::source::SourceView;
 use super::sql_completion::{CatalogCell, SqlCompletion};
 use super::{
     About, CancelRun, CloseTab, ExplainQuery, Minimize, NewTab, OpenFile, OpenSettings, RunAll, RunQuery, SaveFile, ShowShortcuts,
@@ -85,6 +86,9 @@ enum Body {
     },
     Redis {
         view: Entity<RedisView>,
+    },
+    Source {
+        view: Entity<SourceView>,
     },
 }
 
@@ -516,7 +520,23 @@ impl Workspace {
                 self.bodies.insert(id, Body::Redis { view });
                 self.refresh_conn_state(&name, window, cx);
             }
-            k => self.set_status(format!("{k} 접속은 아직 GUI 에서 열지 않는다(터미널 db 를 쓴다)"), true, cx),
+            k => {
+                // 읽기 전용 저장소: 이미 열린 탭이 있으면 그리로 간다
+                if let Some(i) =
+                    self.tabs.tabs.iter().position(|t| {
+                        t.conn.as_deref() == Some(name.as_str()) && matches!(self.bodies.get(&t.id), Some(Body::Source { .. }))
+                    })
+                {
+                    self.tabs.activate(i);
+                } else {
+                    let id = self.tabs.open_named(Some(name.clone()), name.clone());
+                    let (rt, ws) = (self.rt.clone(), cx.entity().downgrade());
+                    let Some(engine) = self.engine.clone() else { return };
+                    let kind = k.to_string();
+                    let view = cx.new(|cx| SourceView::new(ws, rt, engine, name.clone(), kind, window, cx));
+                    self.bodies.insert(id, Body::Source { view });
+                }
+            }
         }
         cx.notify();
     }
@@ -1160,6 +1180,11 @@ impl Workspace {
             // RedisView 가 작업 공간을 다시 빌리므로 지금 대여가 끝난 뒤에 부른다
             let view = view.clone();
             window.defer(cx, move |window, cx| view.update(cx, |v, cx| v.run_command(window, cx)));
+            return;
+        }
+        if let Some(Body::Source { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
+            let view = view.clone();
+            window.defer(cx, move |window, cx| view.update(cx, |v, cx| v.run(window, cx)));
             return;
         }
         let Some(t) = self.tabs.active() else { return };
@@ -2207,6 +2232,7 @@ impl Workspace {
             Some(Body::Table { result: Some(r) }) => r.clone().into_any_element(),
             Some(Body::Table { result: None }) => empty("읽는 중…", ""),
             Some(Body::Redis { view }) => view.clone().into_any_element(),
+            Some(Body::Source { view }) => view.clone().into_any_element(),
             None => empty("", ""),
         }
     }
@@ -2489,6 +2515,41 @@ mod tests {
             let t = w.tabs.active().unwrap();
             assert!(matches!(w.bodies.get(&t.id), Some(Body::Redis { .. })));
         });
+    }
+
+    #[gpui::test]
+    fn 저장소_접속을_누르면_트리_탭을_열고_다시_누르면_그_탭으로_간다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("aws-stg".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("logs-stg".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("aws-stg".into(), window, cx)));
+        draw(cx);
+        let view = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            let n = w
+                .tabs
+                .tabs
+                .iter()
+                .filter(|t| matches!(w.bodies.get(&t.id), Some(Body::Source { .. })))
+                .count();
+            assert_eq!(n, 2, "같은 저장소는 탭 하나");
+            match w.tabs.active().and_then(|t| w.bodies.get(&t.id)) {
+                Some(Body::Source { view }) => view.clone(),
+                _ => panic!("저장소 탭이 아니다"),
+            }
+        });
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert_eq!((v.conn.as_str(), v.kind.as_str()), ("aws-stg", "aws"));
+        });
+        // ⌘↵: 빈 편집기는 보내지 않는다
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.run_query(false, window, cx)));
+        draw(cx);
+        cx.update(|_, cx| assert!(ws.read(cx).busy.is_none()));
     }
 
     fn redis_project() -> tempfile::TempDir {

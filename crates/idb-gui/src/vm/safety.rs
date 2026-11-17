@@ -13,6 +13,8 @@ pub enum Ask {
     Always,
     /// R9.2: 읽기 전용이 아닌 문장의 EXPLAIN ANALYZE(문장을 실제로 실행한다)
     Analyze,
+    /// R60: 비싼 저장소 질의(전체 스캔, 7일 넘는 범위). 확인하면 force 로 다시 보낸다
+    Expensive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +34,7 @@ pub struct Confirms {
     pub danger: bool,
     pub always: bool,
     pub analyze: bool,
+    pub expensive: bool,
 }
 
 impl Confirms {
@@ -41,6 +44,7 @@ impl Confirms {
             Ask::Danger => self.danger,
             Ask::Always => self.always,
             Ask::Analyze => self.analyze,
+            Ask::Expensive => self.expensive,
         }
     }
 
@@ -50,6 +54,7 @@ impl Confirms {
             Ask::Danger => self.danger = true,
             Ask::Always => self.always = true,
             Ask::Analyze => self.analyze = true,
+            Ask::Expensive => self.expensive = true,
         }
     }
 
@@ -64,6 +69,7 @@ impl Confirms {
             Some("confirm_danger") => Ask::Danger,
             Some("confirm") => Ask::Always,
             Some("confirm_analyze") => Ask::Analyze,
+            Some("confirm_expensive") => Ask::Expensive,
             // KEYS(서버를 멈춤)와 원격 접속 편집은 확인으로 풀리지 않는다. 엔진 글을 그대로 보인다
             Some("keys" | "remote_conn_edit") => return Gate::Fail(e.error.clone()),
             _ => return Gate::Fail(e.error.clone()),
@@ -86,6 +92,7 @@ impl Ask {
             Ask::Danger => "위험한 문장",
             Ask::Always => "확인",
             Ask::Analyze => "EXPLAIN ANALYZE",
+            Ask::Expensive => "비싼 질의",
         }
     }
 
@@ -95,6 +102,7 @@ impl Ask {
             Ask::Danger => "그래도 실행",
             Ask::Always => "실행",
             Ask::Analyze => "실제로 실행",
+            Ask::Expensive => "그래도 실행",
         }
     }
 }
@@ -153,6 +161,7 @@ mod tests {
             ("confirm_danger", Ask::Danger),
             ("confirm", Ask::Always),
             ("confirm_analyze", Ask::Analyze),
+            ("confirm_expensive", Ask::Expensive),
         ] {
             match c.gate(&refused(reason)) {
                 Gate::Ask { ask: a, question } => {
@@ -170,6 +179,7 @@ mod tests {
                 danger: true,
                 always: true,
                 analyze: true,
+                expensive: true,
             }
         );
     }
@@ -189,6 +199,9 @@ mod tests {
         assert_eq!(c.gate(&EngineError::run("boom")), Gate::Fail("boom".into()));
         assert!(matches!(c.gate(&refused("new_reason")), Gate::Fail(_)));
         assert!(matches!(c.gate(&refused("keys")), Gate::Fail(_)));
+        // 요금이 붙는 조회·읽기 전용 저장소의 쓰기는 확인으로 풀리지 않는다(엔진 글을 보인다)
+        assert!(matches!(c.gate(&refused("billed")), Gate::Fail(_)));
+        assert!(matches!(c.gate(&refused("read_only")), Gate::Fail(_)));
         assert!(matches!(c.gate(&refused("remote_conn_edit")), Gate::Fail(_)));
         let mut e = EngineError::run("tx");
         e.reason = Some("in_tx".into());

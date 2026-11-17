@@ -3,6 +3,7 @@
 mod dialogs;
 mod redis;
 mod results;
+mod source;
 mod sql_completion;
 mod workspace;
 
