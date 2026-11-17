@@ -24,13 +24,14 @@ use gpui_component::{
 };
 use idb_engine::{Catalog, ConnSummary, Engine, EngineError, LockState, ProjectInfo, ResultSet, RunRequest, TablePageRequest};
 
+use super::dashboard::DashboardView;
 use super::redis::RedisView;
 use super::results::{ResultsView, Source};
 use super::source::SourceView;
 use super::sql_completion::{CatalogCell, SqlCompletion};
 use super::{
-    About, CancelRun, CloseTab, ExplainQuery, Minimize, NewTab, OpenFile, OpenSettings, RunAll, RunQuery, SaveFile, ShowShortcuts,
-    SwitchConn, ToggleProdLock, ToggleResults, ToggleSidebar, TxBegin, TxCommit, TxRollback, ZoomIn, ZoomOut, ZoomReset,
+    About, CancelRun, CloseTab, ExplainQuery, Minimize, NewTab, OpenFile, OpenSettings, RunAll, RunQuery, SaveFile, ShowDashboard,
+    ShowShortcuts, SwitchConn, ToggleProdLock, ToggleResults, ToggleSidebar, TxBegin, TxCommit, TxRollback, ZoomIn, ZoomOut, ZoomReset,
 };
 use crate::vm::font::FontChoice;
 use crate::vm::picker;
@@ -89,6 +90,9 @@ enum Body {
     },
     Source {
         view: Entity<SourceView>,
+    },
+    Dashboard {
+        view: Entity<DashboardView>,
     },
 }
 
@@ -1019,6 +1023,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// 대시보드 탭을 하나만 연다(R64.1).
+    pub(super) fn open_dashboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(i) = self
+            .tabs
+            .tabs
+            .iter()
+            .position(|t| matches!(self.bodies.get(&t.id), Some(Body::Dashboard { .. })))
+        {
+            self.tabs.activate(i);
+            cx.notify();
+            return;
+        }
+        let Some(engine) = self.engine.clone() else { return };
+        let id = self.tabs.open_named(None, "대시보드".into());
+        let (rt, conns) = (self.rt.clone(), self.tree.conns.clone());
+        let view = cx.new(|cx| DashboardView::new(rt, engine, conns, window, cx));
+        self.bodies.insert(id, Body::Dashboard { view });
+        cx.notify();
+    }
+
     // ─── 쿼리 파일(R43·R45) ───
 
     fn project_dir(&self) -> Option<PathBuf> {
@@ -1841,6 +1865,14 @@ impl Workspace {
                     .gap_1()
                     .child(div().flex_1().child(Input::new(&self.tree_filter).small().cleanable(true)))
                     .child(
+                        Button::new("dashboard")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::LayoutDashboard)
+                            .tooltip("대시보드 (⌘G)")
+                            .on_click(cx.listener(|ws, _, w, cx| ws.open_dashboard(w, cx))),
+                    )
+                    .child(
                         Button::new("switch-conn")
                             .xsmall()
                             .ghost()
@@ -2233,6 +2265,7 @@ impl Workspace {
             Some(Body::Table { result: None }) => empty("읽는 중…", ""),
             Some(Body::Redis { view }) => view.clone().into_any_element(),
             Some(Body::Source { view }) => view.clone().into_any_element(),
+            Some(Body::Dashboard { view }) => view.clone().into_any_element(),
             None => empty("", ""),
         }
     }
@@ -2350,6 +2383,7 @@ impl Render for Workspace {
                 ws.show_sidebar = !ws.show_sidebar;
                 cx.notify();
             }))
+            .on_action(cx.listener(|ws, _: &ShowDashboard, w, cx| ws.open_dashboard(w, cx)))
             .on_action(cx.listener(|ws, _: &ToggleResults, _, cx| {
                 ws.show_results = !ws.show_results;
                 cx.notify();
@@ -2550,6 +2584,42 @@ mod tests {
         cx.update(|window, cx| ws.update(cx, |w, cx| w.run_query(false, window, cx)));
         draw(cx);
         cx.update(|_, cx| assert!(ws.read(cx).busy.is_none()));
+    }
+
+    #[gpui::test]
+    fn 대시보드는_한_탭만_열고_모든_접속을_확인한다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_dashboard(window, cx)));
+        draw(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_dashboard(window, cx)));
+        draw(cx);
+        let (view, n_conns) = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            let dash: Vec<_> = w
+                .tabs
+                .tabs
+                .iter()
+                .filter_map(|t| match w.bodies.get(&t.id) {
+                    Some(Body::Dashboard { view }) => Some(view.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(dash.len(), 1);
+            (dash[0].clone(), w.tree.conns.len())
+        });
+        // 확인은 접속마다 하나씩 동시에 간다(읽기 전용, 확인 창 없음)
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert!(
+                v.checking + v.health.len() >= n_conns,
+                "확인 {} + 결과 {} < 접속 {n_conns}",
+                v.checking,
+                v.health.len()
+            );
+            assert!(ws.read(cx).busy.is_none(), "대시보드 확인은 작업 공간 요청 칸을 쓰지 않는다");
+        });
     }
 
     fn redis_project() -> tempfile::TempDir {

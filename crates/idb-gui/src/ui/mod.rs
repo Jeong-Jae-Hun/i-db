@@ -1,5 +1,6 @@
 //! GPUI 화면. 무엇을 보일지는 `vm` 이 정하고 여기서는 그리고 입력을 넘긴다.
 
+mod dashboard;
 mod dialogs;
 mod redis;
 mod results;
@@ -40,6 +41,7 @@ actions!(
         ZoomReset,
         ToggleSidebar,
         ToggleResults,
+        ShowDashboard,
         RunQuery,
         RunAll,
         ExplainQuery,
@@ -77,6 +79,7 @@ fn action_for(cmd: Cmd) -> Box<dyn Action> {
         Cmd::ZoomReset => Box::new(ZoomReset),
         Cmd::ToggleSidebar => Box::new(ToggleSidebar),
         Cmd::ToggleResults => Box::new(ToggleResults),
+        Cmd::Dashboard => Box::new(ShowDashboard),
         Cmd::Run => Box::new(RunQuery),
         Cmd::RunAll => Box::new(RunAll),
         Cmd::Explain => Box::new(ExplainQuery),

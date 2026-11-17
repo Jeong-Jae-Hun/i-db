@@ -2,6 +2,7 @@
 
 pub mod completion;
 pub mod crashlog;
+pub mod dashboard;
 pub mod edits;
 pub mod export;
 pub mod font;
