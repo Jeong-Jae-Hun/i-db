@@ -97,6 +97,8 @@ pub enum Pend {
     Enums {
         conn: usize,
     },
+    /// 쿼리 파일 일감(files.rs)
+    File(Box<crate::files::FileJob>),
     Resolve {
         tab: u64,
         conn: usize,
@@ -296,6 +298,8 @@ pub struct Tab {
     pub disk: String,
     pub autosave_stopped: bool,
     pub dirty_at: Option<Instant>,
+    /// 보낸 저장 일감(같은 탭에 둘을 겹쳐 보내지 않는다)
+    pub saving: Option<u64>,
     pub grid: Option<Grid>,
     pub text: String,
     pub err: String,
@@ -350,6 +354,7 @@ impl Tab {
             disk: String::new(),
             autosave_stopped: false,
             dirty_at: None,
+            saving: None,
             grid: None,
             text: String::new(),
             err: String::new(),
@@ -1140,9 +1145,8 @@ impl App {
             };
             return;
         }
-        self.autosave(i);
-        if let Some(note) = self.keep_text(i) {
-            self.status = note;
+        if self.keep_on_close(i) {
+            // 답은 일감으로 온다(실패하면 탭을 되살린다)
         } else if self.unsaved_text(i) && !self.tabs[i].close_ok {
             // 친 글을 남길 수 없으면(Redis·접속 없음·쓰기 실패) 묻는다(R45.3)
             self.confirm("저장하지 않은 글이 있는 탭을 닫을까요", move |a| {

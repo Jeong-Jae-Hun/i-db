@@ -1,28 +1,35 @@
 //! queries 파일(R5·R43·R44·R45), 즐겨찾기(R29), 내보내기(R14.2), 긴 실행 알림(R30).
 //! 쿼리 파일과 즐겨찾기는 엔진 op(`query_*`·`favorite*`)로만 읽고 쓴다. 로컬이면 이 기계의 프로젝트, `--remote` 면
-//! serve 쪽 프로젝트다. 경계(queries/ 밖·링크 탈출·1MiB)는 엔진이 지킨다. 저장은 화면을 닫을 때도 끝나야 해서
-//! 일감 대신 그 자리에서 기다리는 호출이다.
+//! serve 쪽 프로젝트다. 경계(queries/ 밖·링크 탈출·1MiB)는 엔진이 지킨다.
+//! 열기·목록·자동 저장·Ctrl+S·첫 실행 저장·탭 닫기 저장은 일감으로 보내 원격이 느려도 화면이 서지 않는다.
+//! 화면을 끝낼 때의 저장만 그 자리에서 기다리고, 모두 합쳐 20초 안에 끝낸다. 즐겨찾기 창은 사람이 고르는 동안
+//! 한 번 부르는 것이라 기다리는 호출로 둔다.
 
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use idb_core::favorites::Fav;
 use idb_engine::{EngineError, FavoriteSaved, QueryFile, QueryText, QueryWritten, Request};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::app::App;
+use crate::app::{App, Pend};
 use crate::help::Focus;
 
 const AUTOSAVE_STOPPED: &str = "파일이 밖에서 바뀌어 자동 저장 멈춤 (Ctrl+S 로 덮어쓰기)";
 const NO_FILES: &str = "쿼리 파일을 쓸 수 없음";
+/// 기다리는 호출 하나의 상한이자 끝낼 때 저장 전체의 상한이다
+const WAIT: Duration = Duration::from_secs(20);
 
-/// 엔진에 요청 하나를 보내고 답을 기다린다.
-pub type Call = Box<dyn Fn(Request) -> Result<Value, EngineError>>;
+/// 엔진에 요청 하나를 보내고 길어야 둘째 값만큼 답을 기다린다.
+pub type Call = Box<dyn Fn(Request, Duration) -> Result<Value, EngineError>>;
 
 pub struct Files {
     call: Call,
+    /// 끝낼 때 저장의 마감이다. 있으면 기다리는 호출이 모두 이 안에서 끝난다
+    deadline: Option<Instant>,
     /// 최근 수정 순
     pub list: Vec<QueryFile>,
 }
@@ -36,30 +43,88 @@ fn base_hash(disk: &str) -> String {
     idb_engine::queries::hash(disk)
 }
 
+fn write_req(rel: &str, text: &str, disk: &str, force: bool) -> Request {
+    Request::QueryWrite {
+        path: rel.into(),
+        content: text.into(),
+        base_hash: base_hash(disk),
+        force,
+    }
+}
+
+/// 보낸 쿼리 파일 일감과 답을 받아 할 일이다.
+pub enum FileJob {
+    Open {
+        rel: String,
+    },
+    List {
+        picker: bool,
+    },
+    /// 열린 탭의 자동 저장(force=false)·Ctrl+S(force=true)
+    Save {
+        tab: u64,
+        text: String,
+        force: bool,
+    },
+    /// 파일 없는 탭의 첫 실행 저장
+    New {
+        tab: u64,
+        text: String,
+        conn: usize,
+    },
+    /// 닫은 탭의 글을 남긴다. 실패하면 탭을 되살린다
+    Keep(Kept),
+}
+
+pub struct Kept {
+    rel: Option<String>,
+    text: String,
+    name: String,
+    conn: Option<usize>,
+    /// 덮기가 충돌해 사본을 쓰는 중이다
+    copying: bool,
+}
+
 impl Files {
     pub fn new(call: Call) -> Files {
-        let mut f = Files { call, list: Vec::new() };
+        let mut f = Files {
+            call,
+            deadline: None,
+            list: Vec::new(),
+        };
         f.reload();
         f
     }
 
-    /// 엔진을 rt 위에서 부른다. 원격이 멈춰도 화면이 굳지 않게 20초에서 끊는다.
+    /// 엔진을 rt 위에서 부른다.
     pub fn engine(engine: idb_engine::Engine, rt: tokio::runtime::Handle) -> Files {
-        Files::new(Box::new(move |req| {
+        Files::new(Box::new(move |req, wait| {
             rt.block_on(async {
-                tokio::time::timeout(std::time::Duration::from_secs(20), engine.call(req))
+                tokio::time::timeout(wait, engine.call(req))
                     .await
-                    .unwrap_or_else(|_| Err(EngineError::run("쿼리 파일 요청이 20초 안에 끝나지 않음")))
+                    .unwrap_or_else(|_| Err(EngineError::run("쿼리 파일 요청이 시간 안에 끝나지 않음")))
             })
         }))
     }
 
+    /// 지금부터 기다리는 호출을 모두 합쳐 20초 안에 끝낸다(화면을 끝낼 때).
+    pub fn start_deadline(&mut self) {
+        self.deadline = Some(Instant::now() + WAIT);
+    }
+
     fn req<T: DeserializeOwned>(&self, r: Request) -> Result<T, String> {
-        let v = (self.call)(r).map_err(|e| e.error)?;
+        let wait = match self.deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()),
+            None => WAIT,
+        };
+        if wait.is_zero() {
+            return Err("끝낼 때 저장이 20초를 넘겨 멈춤".into());
+        }
+        let v = (self.call)(r, wait).map_err(|e| e.error)?;
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
-    /// 목록을 다시 읽는다. 읽지 못하면 비운다.
+    /// 목록을 다시 읽는다(켤 때). 읽지 못하면 비운다.
     pub fn reload(&mut self) {
         self.list = self.req(Request::QueryList).unwrap_or_default();
     }
@@ -92,44 +157,52 @@ impl Files {
             .collect()
     }
 
+    /// 새로 만든 파일을 다시 읽지 않고 목록 맨 앞에 둔다.
+    fn add(&mut self, w: &QueryWritten) {
+        self.list.retain(|f| f.path != w.path);
+        let conn_uuid = if w.mapping_error.is_empty() {
+            w.uuid.clone()
+        } else {
+            String::new()
+        };
+        self.list.insert(
+            0,
+            QueryFile {
+                path: w.path.clone(),
+                conn_uuid,
+                ..Default::default()
+            },
+        );
+    }
+
     pub fn read(&self, rel: &str) -> Result<String, String> {
         self.req::<QueryText>(Request::QueryRead { path: rel.into() }).map(|t| t.content)
     }
 
     /// 원자적으로 쓴다(R5.2). disk 는 마지막으로 읽거나 쓴 내용이고 그사이 바뀌었으면 conflict 다. force 는 그래도 덮는다.
     pub fn write(&self, rel: &str, text: &str, disk: &str, force: bool) -> Result<QueryWritten, String> {
-        self.req(Request::QueryWrite {
-            path: rel.into(),
-            content: text.into(),
-            base_hash: base_hash(disk),
-            force,
-        })
-    }
-
-    fn after_new(&mut self, w: Result<QueryWritten, String>) -> Result<QueryWritten, String> {
-        if w.is_ok() {
-            self.reload();
-        }
-        w
+        self.req(write_req(rel, text, disk, force))
     }
 
     /// 새 쿼리 파일을 엔진이 정한 곳에 쓰고 그 접속을 붙인다(R45.1).
     pub fn create(&mut self, conn: &str, text: &str) -> Result<QueryWritten, String> {
-        let w = self.req(Request::QueryNew {
+        let w: QueryWritten = self.req(Request::QueryNew {
             conn: conn.into(),
             content: text.into(),
-        });
-        self.after_new(w)
+        })?;
+        self.add(&w);
+        Ok(w)
     }
 
     /// 덮을 수 없는 글을 rel 옆 충돌 사본에 남긴다(R45.3).
     pub fn conflict_copy(&mut self, rel: &str, text: &str, conn: &str) -> Result<QueryWritten, String> {
-        let w = self.req(Request::QueryConflict {
+        let w: QueryWritten = self.req(Request::QueryConflict {
             path: rel.into(),
             content: text.into(),
             conn: conn.into(),
-        });
-        self.after_new(w)
+        })?;
+        self.add(&w);
+        Ok(w)
     }
 
     pub fn favorites(&self) -> Result<Vec<Fav>, String> {
@@ -196,22 +269,34 @@ pub fn notify(conn: &str, ms: u64, rows: usize, failed: bool) {
 }
 
 impl App {
-    /// 파일을 연다(R5.1·R43). 이미 연 탭이면 그 탭으로, 빈 탭이면 그 탭에, 아니면 새 탭에 연다.
+    fn file_call(&mut self, req: Request, job: FileJob) -> u64 {
+        self.call(req, Pend::File(Box::new(job)))
+    }
+
+    /// 파일을 연다(R5.1·R43). 이미 연 탭이면 그 탭으로 가고, 아니면 읽기 일감을 보낸다.
     pub fn open_query_file(&mut self, rel: &str) {
         if let Some(i) = self.tabs.iter().position(|t| t.file.as_deref() == Some(rel)) {
             self.switch_tab(i);
             self.set_focus(Focus::Editor);
             return;
         }
-        let Some(f) = &self.files else { return };
-        let text = match f.read(rel) {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = format!("열지 못함: {e}");
-                return;
-            }
-        };
-        let conn = f.mapped(rel).and_then(|u| self.conns.iter().position(|c| c.uuid == u));
+        if self.files.is_none() {
+            return;
+        }
+        self.file_call(Request::QueryRead { path: rel.into() }, FileJob::Open { rel: rel.into() });
+    }
+
+    /// 읽은 파일을 빈 탭이면 그 탭에, 아니면 새 탭에 둔다.
+    fn opened(&mut self, rel: String, text: String) {
+        if let Some(i) = self.tabs.iter().position(|t| t.file.as_deref() == Some(rel.as_str())) {
+            self.switch_tab(i);
+            return;
+        }
+        let conn = self
+            .files
+            .as_ref()
+            .and_then(|f| f.mapped(&rel))
+            .and_then(|u| self.conns.iter().position(|c| c.uuid == u));
         let i = if self.cur().reusable() { self.tab } else { self.new_tab() };
         if conn.is_some() {
             self.set_conn(i, conn);
@@ -219,27 +304,28 @@ impl App {
         let t = &mut self.tabs[i];
         t.editor.set_value(&text);
         t.editor.typed = false;
-        t.file = Some(rel.to_string());
+        t.file = Some(rel.clone());
         t.disk = text;
         t.autosave_stopped = false;
         self.tab = i;
-        self.session
-            .touch_file(conn.map(|c| self.conns[c].uuid.clone()), Some(rel.to_string()));
+        self.session.touch_file(conn.map(|c| self.conns[c].uuid.clone()), Some(rel));
         self.set_focus(Focus::Editor);
     }
 
+    /// 목록을 다시 읽고 고르게 한다.
     pub fn open_file_picker(&mut self) {
-        let Some(f) = &mut self.files else {
+        if self.files.is_none() {
             self.status = NO_FILES.into();
             return;
-        };
-        f.reload();
-        let items = f.paths();
-        if items.is_empty() {
-            self.status = "queries/ 에 .sql 파일이 없음".into();
-            return;
         }
-        self.picker("쿼리 파일 열기", items, |a, rel| a.open_query_file(&rel));
+        self.file_call(Request::QueryList, FileJob::List { picker: true });
+    }
+
+    /// 트리 r: 쿼리 파일 목록을 다시 읽는다.
+    pub(crate) fn reload_files(&mut self) {
+        if self.files.is_some() {
+            self.file_call(Request::QueryList, FileJob::List { picker: false });
+        }
     }
 
     /// 그 접속을 쓰는 탭이 없으면 가장 최근 파일을 연다(R44).
@@ -263,40 +349,28 @@ impl App {
         }
     }
 
-    /// 파일 탭을 디스크에 맞춰 자동 저장한다(R45.2). 밖에서 바뀌었으면(엔진의 conflict) 멈춘다.
+    /// 파일 탭을 자동 저장한다(R45.2). 밖에서 바뀌었으면(엔진의 conflict) 답에서 멈춘다. 저장이 가는 중이면 그 답 뒤에 다시 한다.
     pub fn autosave(&mut self, i: usize) {
-        if !autosave_on() {
+        if !autosave_on() || self.files.is_none() {
             return;
         }
-        let Some(f) = &self.files else { return };
         let t = &self.tabs[i];
-        let (Some(rel), false) = (t.file.clone(), t.autosave_stopped) else {
+        let (Some(rel), false, None) = (t.file.clone(), t.autosave_stopped, t.saving) else {
             return;
         };
         let text = t.editor.value().to_string();
         if text == t.disk {
             return;
         }
-        match f.write(&rel, &text, &t.disk, false) {
-            Ok(w) if w.conflict => {
-                self.tabs[i].autosave_stopped = true;
-                self.status = AUTOSAVE_STOPPED.into();
-            }
-            Ok(_) => {
-                self.tabs[i].disk = text;
-                self.tabs[i].dirty_at = None;
-            }
-            Err(e) => {
-                self.tabs[i].autosave_stopped = true;
-                self.status = format!("자동 저장 멈춤: {e}");
-            }
-        }
+        let (tab, req) = (t.id, write_req(&rel, &text, &t.disk, false));
+        let id = self.file_call(req, FileJob::Save { tab, text, force: false });
+        self.tabs[i].saving = Some(id);
     }
 
     /// 마지막 고침 1초 뒤 자동 저장한다(R45.2). Runner 가 틱마다 부른다.
     pub fn tick(&mut self) {
         let due: Vec<usize> = (0..self.tabs.len())
-            .filter(|&i| self.tabs[i].dirty_at.is_some_and(|d| d.elapsed().as_millis() >= 1000))
+            .filter(|&i| self.tabs[i].dirty_at.is_some_and(|d| d.elapsed().as_millis() >= 1000) && self.tabs[i].saving.is_none())
             .collect();
         for i in due {
             self.tabs[i].dirty_at = None;
@@ -314,30 +388,19 @@ impl App {
 
     /// Ctrl+S: 연 파일에 덮어쓴다(자동 저장이 멈췄어도). 연 파일이 없으면 알린다(R5.2).
     pub fn save_file(&mut self, ti: usize) {
-        let Some(f) = &mut self.files else {
+        if self.files.is_none() {
             self.status = NO_FILES.into();
             return;
-        };
-        let Some(rel) = self.tabs[ti].file.clone() else {
+        }
+        let t = &self.tabs[ti];
+        let Some(rel) = t.file.clone() else {
             self.status = "연 파일이 없음 (실행하면 queries/ 에 저장)".into();
             return;
         };
-        let text = self.tabs[ti].editor.value().to_string();
-        match f.write(&rel, &text, &self.tabs[ti].disk, true) {
-            Ok(w) => {
-                f.reload();
-                let t = &mut self.tabs[ti];
-                t.disk = text;
-                t.autosave_stopped = false;
-                t.dirty_at = None;
-                self.status = if w.created {
-                    format!("지워진 파일을 다시 만듦: {rel}")
-                } else {
-                    format!("저장함: {rel}")
-                };
-            }
-            Err(e) => self.status = format!("저장 실패: {e}"),
-        }
+        let text = t.editor.value().to_string();
+        let (tab, req) = (t.id, write_req(&rel, &text, &t.disk, true));
+        let id = self.file_call(req, FileJob::Save { tab, text, force: true });
+        self.tabs[ti].saving = Some(id);
     }
 
     /// 파일 없는 PostgreSQL 탭의 첫 실행이면 queries/<그룹>/<접속>-<시각>.sql 에 저장하고 매핑에 붙인다(R45.1).
@@ -347,30 +410,113 @@ impl App {
         }
         let t = &self.tabs[ti];
         let Some(c) = t.conn else { return };
-        if t.file.is_some() || !self.is_pg(c) || t.editor.value().trim().is_empty() {
+        if t.file.is_some() || t.saving.is_some() || !self.is_pg(c) || t.editor.value().trim().is_empty() {
             return;
         }
-        let conn = self.conns[c].clone();
         let text = t.editor.value().to_string();
-        let f = self.files.as_mut().unwrap();
-        let w = match f.create(&conn.name, &text) {
-            Ok(w) => w,
-            Err(e) => {
-                self.status = format!("새 쿼리 저장 실패: {e}");
-                return;
+        let tab = t.id;
+        let req = Request::QueryNew {
+            conn: self.conns[c].name.clone(),
+            content: text.clone(),
+        };
+        let id = self.file_call(req, FileJob::New { tab, text, conn: c });
+        self.tabs[ti].saving = Some(id);
+    }
+
+    /// 쿼리 파일 일감의 답이다.
+    pub(crate) fn file_done(&mut self, job: FileJob, res: Result<Value, EngineError>) {
+        let res = res.map_err(|e| e.error);
+        match job {
+            FileJob::Open { rel } => match res.and_then(|v| serde_json::from_value::<QueryText>(v).map_err(|e| e.to_string())) {
+                Ok(t) => self.opened(rel, t.content),
+                Err(e) => self.status = format!("열지 못함: {e}"),
+            },
+            FileJob::List { picker } => {
+                let list: Vec<QueryFile> = match res.and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.status = format!("쿼리 파일 목록을 읽지 못함: {e}");
+                        return;
+                    }
+                };
+                let items: Vec<String> = list.iter().map(|f| f.path.clone()).collect();
+                if let Some(f) = &mut self.files {
+                    f.list = list;
+                }
+                for c in 0..self.conns.len() {
+                    self.reattach_queries(c);
+                }
+                if picker {
+                    if items.is_empty() {
+                        self.status = "queries/ 에 .sql 파일이 없음".into();
+                    } else {
+                        self.picker("쿼리 파일 열기", items, |a, rel| a.open_query_file(&rel));
+                    }
+                }
             }
-        };
-        let rel = w.path;
-        let t = &mut self.tabs[ti];
-        t.file = Some(rel.clone());
-        t.disk = text;
-        self.status = if w.mapping_error.is_empty() {
-            format!("저장함: {rel}")
-        } else {
-            w.mapping_error
-        };
-        self.session.touch_file(Some(conn.uuid), Some(rel));
-        self.reattach_queries(c);
+            FileJob::Save { tab, text, force } => {
+                let w = res.and_then(|v| serde_json::from_value::<QueryWritten>(v).map_err(|e| e.to_string()));
+                let Some(i) = self.tab_index(tab) else { return };
+                self.tabs[i].saving = None;
+                let rel = self.tabs[i].file.clone().unwrap_or_default();
+                match w {
+                    Ok(w) if w.conflict => {
+                        self.tabs[i].autosave_stopped = true;
+                        self.status = AUTOSAVE_STOPPED.into();
+                    }
+                    Ok(w) => {
+                        let t = &mut self.tabs[i];
+                        // 보내는 사이 더 친 글은 다음 틱에 다시 저장한다
+                        if t.editor.value() != text {
+                            t.dirty_at = Some(Instant::now());
+                        }
+                        t.disk = text;
+                        if force {
+                            t.autosave_stopped = false;
+                            self.status = if w.created {
+                                format!("지워진 파일을 다시 만듦: {rel}")
+                            } else {
+                                format!("저장함: {rel}")
+                            };
+                        }
+                    }
+                    Err(e) if force => self.status = format!("저장 실패: {e}"),
+                    Err(e) => {
+                        self.tabs[i].autosave_stopped = true;
+                        self.status = format!("자동 저장 멈춤: {e}");
+                    }
+                }
+            }
+            FileJob::New { tab, text, conn } => {
+                let w = res.and_then(|v| serde_json::from_value::<QueryWritten>(v).map_err(|e| e.to_string()));
+                let Some(i) = self.tab_index(tab) else { return };
+                self.tabs[i].saving = None;
+                let w = match w {
+                    Ok(w) => w,
+                    Err(e) => {
+                        self.status = format!("새 쿼리 저장 실패: {e}");
+                        return;
+                    }
+                };
+                if let Some(f) = &mut self.files {
+                    f.add(&w);
+                }
+                let t = &mut self.tabs[i];
+                t.file = Some(w.path.clone());
+                if t.editor.value() != text {
+                    t.dirty_at = Some(Instant::now());
+                }
+                t.disk = text;
+                self.status = if w.mapping_error.is_empty() {
+                    format!("저장함: {}", w.path)
+                } else {
+                    w.mapping_error
+                };
+                self.session.touch_file(Some(self.conns[conn].uuid.clone()), Some(w.path));
+                self.reattach_queries(conn);
+            }
+            FileJob::Keep(k) => self.kept(k, res),
+        }
     }
 
     fn reattach_queries(&mut self, c: usize) {
@@ -413,37 +559,112 @@ impl App {
         t.editor.typed && t.file.is_none() && !t.editor.value().trim().is_empty()
     }
 
-    /// 탭을 닫을 때 남길 글을 충돌 사본·새 쿼리에 둔다(R45.3). 남긴 경로 알림을 돌려준다.
-    pub fn keep_text(&mut self, i: usize) -> Option<String> {
-        if !autosave_on() {
-            return None;
+    /// 탭을 닫을 때 글을 남기는 일감을 보낸다(R45.2·R45.3). 연 파일은 덮어 보고(밖에서 바뀌었으면 충돌 사본),
+    /// 파일 없는 PostgreSQL 탭의 친 글은 새 쿼리로 둔다. 보냈으면 true 다. 실패하면 답에서 탭을 되살린다.
+    pub fn keep_on_close(&mut self, i: usize) -> bool {
+        if !autosave_on() || self.files.is_none() {
+            return false;
         }
         let t = &self.tabs[i];
-        if t.file.is_none() && t.editor.typed {
-            self.save_new_query(i);
-            return self.tabs[i].file.as_ref().map(|f| format!("저장함: {f}"));
+        let text = t.editor.value().to_string();
+        let kept = Kept {
+            rel: t.file.clone(),
+            text: text.clone(),
+            name: t.display_name(),
+            conn: t.conn,
+            copying: false,
+        };
+        let req = match &t.file {
+            Some(rel) if text != t.disk && !text.trim().is_empty() => write_req(rel, &text, &t.disk, false),
+            None if t.editor.typed && !text.trim().is_empty() && t.conn.is_some_and(|c| self.is_pg(c)) => Request::QueryNew {
+                conn: self.conns[t.conn.unwrap()].name.clone(),
+                content: text,
+            },
+            _ => return false,
+        };
+        self.file_call(req, FileJob::Keep(kept));
+        true
+    }
+
+    fn kept(&mut self, mut k: Kept, res: Result<Value, String>) {
+        let w = res.and_then(|v| serde_json::from_value::<QueryWritten>(v).map_err(|e| e.to_string()));
+        match (w, &k.rel) {
+            (Ok(w), Some(rel)) if w.conflict && !k.copying => {
+                let req = Request::QueryConflict {
+                    path: rel.clone(),
+                    content: k.text.clone(),
+                    conn: k.conn.map(|c| self.conns[c].name.clone()).unwrap_or_default(),
+                };
+                k.copying = true;
+                self.file_call(req, FileJob::Keep(k));
+            }
+            (Ok(w), _) => {
+                let saved = w.created || k.copying;
+                if saved && let Some(f) = &mut self.files {
+                    f.add(&w);
+                }
+                self.status = match (&k.rel, k.copying) {
+                    (Some(rel), true) => format!("{rel} 이 밖에서 바뀌어 닫은 탭의 글을 {} 에 남김", w.path),
+                    (Some(rel), false) => format!("저장함: {rel}"),
+                    (None, _) => format!("저장함: {}", w.path),
+                };
+                if k.rel.is_none()
+                    && let Some(c) = k.conn
+                {
+                    self.reattach_queries(c);
+                }
+            }
+            (Err(e), _) => {
+                // 글을 잃지 않게 탭을 되살린다
+                let i = self.new_tab();
+                self.set_conn(i, k.conn);
+                let t = &mut self.tabs[i];
+                t.name = format!("{} (저장 못 함)", k.name);
+                t.editor.set_value(&k.text);
+                t.editor.typed = true;
+                t.close_ok = false;
+                self.status = format!("닫은 탭의 글을 저장하지 못해 되살림: {e}");
+            }
         }
-        let rel = t.file.clone()?;
+    }
+
+    /// 끝낼 때 모든 탭의 글을 그 자리에서 남긴다(R45.1~R45.3). 기다림은 모두 합쳐 20초다.
+    pub fn save_all_on_quit(&mut self) {
+        if !autosave_on() {
+            return;
+        }
+        let Some(f) = &mut self.files else { return };
+        f.start_deadline();
+        for i in 0..self.tabs.len() {
+            self.keep_sync(i);
+        }
+    }
+
+    fn keep_sync(&mut self, i: usize) {
+        let t = &self.tabs[i];
         let text = t.editor.value().to_string();
         let conn = t.conn.map(|c| self.conns[c].name.clone()).unwrap_or_default();
         let name = t.display_name();
-        let stopped = t.autosave_stopped;
-        let f = self.files.as_mut()?;
-        if !stopped || text.trim().is_empty() || f.read(&rel).ok().as_deref() == Some(text.as_str()) {
-            return None;
-        }
-        match f.conflict_copy(&rel, &text, &conn) {
-            Ok(w) => {
-                let copy = w.path;
-                // 화면을 닫은 뒤 터미널에도 알린다(R45.3)
-                self.quit_notes.push(format!("saved unsaved text of {rel} to {copy}"));
-                Some(format!("저장 안 한 글을 {copy} 에 남김"))
-            }
-            Err(e) => {
-                self.quit_notes.push(format!("could not save {name}: {e}"));
-                None
-            }
-        }
+        let pg = t.conn.is_some_and(|c| self.is_pg(c));
+        let (rel, disk, typed) = (t.file.clone(), t.disk.clone(), t.editor.typed);
+        let Some(f) = self.files.as_mut() else { return };
+        let note = match rel {
+            Some(rel) if text != disk && !text.trim().is_empty() => match f.write(&rel, &text, &disk, false) {
+                Ok(w) if !w.conflict => None,
+                Ok(_) => Some(match f.conflict_copy(&rel, &text, &conn) {
+                    Ok(w) => format!("saved unsaved text of {rel} to {}", w.path),
+                    Err(e) => format!("could not save {name}: {e}"),
+                }),
+                Err(e) => Some(format!("could not save {name}: {e}")),
+            },
+            None if typed && pg && !text.trim().is_empty() => match f.create(&conn, &text) {
+                Ok(_) => None,
+                Err(e) => Some(format!("could not save {name}: {e}")),
+            },
+            _ => None,
+        };
+        // 화면을 닫은 뒤 터미널에 알린다(R45.3)
+        self.quit_notes.extend(note);
     }
 
     // ─── 즐겨찾기 (R29) ───
