@@ -39,6 +39,71 @@ pub fn progress(bytes: u64, rows: Option<i64>) -> String {
     }
 }
 
+/// 내보내기 파일. 같은 폴더의 0600 임시 파일에 쓰고 끝나면 바꿔 끼운다. 그래서 있던 0644 파일을 덮어도 0600 이 되고,
+/// 중간에 멈추거나 실패하면(버리면) 임시 파일을 지워 반쪽 파일이 남지 않는다.
+pub struct PrivateFile {
+    tmp: std::path::PathBuf,
+    dest: std::path::PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl PrivateFile {
+    pub fn create(dest: &std::path::Path) -> std::io::Result<PrivateFile> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let dir = dest
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let tmp = dir.join(format!(".{name}.part-{}-{nanos}", std::process::id()));
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        Ok(PrivateFile {
+            tmp,
+            dest: dest.to_path_buf(),
+            file: Some(file),
+        })
+    }
+
+    pub fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match &mut self.file {
+            Some(f) => std::io::Write::write_all(f, data),
+            None => Err(std::io::Error::other("export file is closed")),
+        }
+    }
+
+    pub fn commit(mut self) -> std::io::Result<()> {
+        if let Some(f) = self.file.take() {
+            f.sync_all()?;
+        }
+        std::fs::rename(&self.tmp, &self.dest)
+    }
+}
+
+impl Drop for PrivateFile {
+    fn drop(&mut self) {
+        // commit 하지 않고 버렸다(실패·멈춤)
+        if self.file.is_some() || self.tmp.exists() {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// 내보내기 id 를 받은 뒤의 일을 돌리고, 실패하면 serve 의 내보내기를 멈춘다(COPY 가 연결을 붙잡지 않게).
+pub async fn cancel_on_error<T, E, W, C>(work: W, cancel: C) -> Result<T, E>
+where
+    W: std::future::Future<Output = Result<T, E>>,
+    C: std::future::Future<Output = ()>,
+{
+    let r = work.await;
+    if r.is_err() {
+        cancel.await;
+    }
+    r
+}
+
 /// 복호화할 칸이다. 암호문 꼴만, 같은 글은 한 번, 상한까지.
 pub fn cipher_cells<'a>(cells: impl Iterator<Item = &'a str>, max: usize) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -97,6 +162,43 @@ mod tests {
         let cells = ["plain", ENC, ENC, "NULL"];
         assert_eq!(cipher_cells(cells.into_iter(), 10), vec![ENC.to_string()]);
         assert!(cipher_cells([ENC].into_iter(), 0).is_empty());
+    }
+
+    #[test]
+    fn 내보내기는_있던_0644_파일을_0600_으로_바꿔_끼우고_실패하면_흔적이_없다() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("out.csv");
+        std::fs::write(&dest, "old").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut f = PrivateFile::create(&dest).unwrap();
+        f.write(b"a,b\n").unwrap();
+        f.commit().unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "a,b\n");
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600);
+        let mut f = PrivateFile::create(&dest).unwrap();
+        f.write(b"half").unwrap();
+        drop(f);
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "a,b\n",
+            "실패하면 원래 파일을 건드리지 않는다"
+        );
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 1, "임시 파일이 남지 않는다");
+    }
+
+    #[test]
+    fn 내보내기_id_뒤에_실패하면_멈춤을_보낸다() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let cancelled = std::cell::Cell::new(0);
+        let r: Result<u8, &str> = rt.block_on(cancel_on_error(async { Err("disk full") }, async {
+            cancelled.set(cancelled.get() + 1)
+        }));
+        assert!(r.is_err());
+        assert_eq!(cancelled.get(), 1);
+        let r: Result<u8, &str> = rt.block_on(cancel_on_error(async { Ok(1) }, async { cancelled.set(cancelled.get() + 1) }));
+        assert_eq!(r, Ok(1));
+        assert_eq!(cancelled.get(), 1, "성공하면 멈추지 않는다");
     }
 
     #[test]

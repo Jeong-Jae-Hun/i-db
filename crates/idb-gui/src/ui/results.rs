@@ -989,14 +989,24 @@ pub(super) fn run_export(
             async move {
                 let s = e.export_start(&conn, &sql).await?;
                 *started.lock().unwrap() = Some(s.export);
-                let mut f = open_private(&path).map_err(|e| EngineError::run(format!("export file: {e}")))?;
-                loop {
-                    let ch = e.export_read(s.export).await?;
-                    if ch.done {
-                        return Ok((ch.rows, ch.bytes));
+                let id = s.export;
+                let file_err = |e: std::io::Error| EngineError::run(format!("export file: {e}"));
+                let work = async {
+                    let mut f = export::PrivateFile::create(&path).map_err(file_err)?;
+                    loop {
+                        let ch = e.export_read(id).await?;
+                        if ch.done {
+                            f.commit().map_err(file_err)?;
+                            return Ok((ch.rows, ch.bytes));
+                        }
+                        f.write(&ch.data).map_err(file_err)?;
                     }
-                    std::io::Write::write_all(&mut f, &ch.data).map_err(|e| EngineError::run(format!("export file: {e}")))?;
-                }
+                };
+                // id 를 받은 뒤의 어느 실패에서도 serve 의 COPY 를 멈춘다
+                export::cancel_on_error(work, async {
+                    let _ = e.export_cancel(id).await;
+                })
+                .await
             }
         }),
         Rc::new(move |ws: &mut Workspace, (rows, bytes): (i64, u64), _, cx| {
@@ -1011,17 +1021,6 @@ pub(super) fn run_export(
         window,
         cx,
     );
-}
-
-/// 새 파일이면 0600 으로 만든다(결과에 개인정보가 들 수 있다).
-fn open_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
 }
 
 /// 반영·되돌리기는 (확인 뒤 다시 보낼 때도) 보내기 바로 전에 데이터베이스 세대·바꾸는 중을 다시 본다.
