@@ -69,7 +69,7 @@ impl Kind {
         matches!(self, Kind::DynamoDb | Kind::Athena | Kind::Aws)
     }
 
-    fn auth_options(self) -> &'static [&'static str] {
+    pub(crate) fn auth_options(self) -> &'static [&'static str] {
         match self {
             Kind::OpenSearch => &["", "basic", "sigv4"],
             Kind::Loki | Kind::Prometheus => &["", "basic"],
@@ -490,22 +490,22 @@ fn parse_mapping(b: &[u8]) -> Result<Vec<(String, String)>, String> {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct ConnEntry {
-    uuid: String,
-    name: String,
-    group: String,
-    kind: String,
-    host: String,
-    port: i64,
-    db: String,
-    user: String,
-    url: String,
-    auth: String,
-    region: String,
-    profile: String,
-    sslmode: String,
-    workgroup: String,
-    output: String,
+pub(crate) struct ConnEntry {
+    pub(crate) uuid: String,
+    pub(crate) name: String,
+    pub(crate) group: String,
+    pub(crate) kind: String,
+    pub(crate) host: String,
+    pub(crate) port: i64,
+    pub(crate) db: String,
+    pub(crate) user: String,
+    pub(crate) url: String,
+    pub(crate) auth: String,
+    pub(crate) region: String,
+    pub(crate) profile: String,
+    pub(crate) sslmode: String,
+    pub(crate) workgroup: String,
+    pub(crate) output: String,
 }
 
 fn load_db_conns(p: &mut Project, env: &HashMap<String, String>) -> Result<(), LoadError> {
@@ -564,12 +564,12 @@ fn load_db_conns(p: &mut Project, env: &HashMap<String, String>) -> Result<(), L
     Ok(())
 }
 
-fn valid_conn_name(name: &str) -> bool {
+pub(crate) fn valid_conn_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Go `ValidateConn` 과 같은 순서로 같은 오류 글을 낸다. raw_kind·raw_port 는 파일에 적힌 그대로다.
-fn validate_conn(c: &Conn, raw_kind: &str, raw_port: i64) -> Result<(), String> {
+pub(crate) fn validate_conn(c: &Conn, raw_kind: &str, raw_port: i64) -> Result<(), String> {
     if !valid_conn_name(&c.name) {
         return Err("name must be letters, digits, - or _".into());
     }

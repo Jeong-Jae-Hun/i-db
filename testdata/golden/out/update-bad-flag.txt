@@ -1,0 +1,13 @@
+args: ["update","--nope"]
+exit: 2
+--- stdout
+--- stderr
+flag provided but not defined: -nope
+사용법:
+  db update [--check] [--version vX.Y.Z] [--force] [--timeout 2m]
+
+  GitHub 릴리스(Jeong-Jae-Hun/i-db)의 최신 판(또는 --version 판)을 받아 checksums.txt 로 검증하고
+  지금 실행 중인 db 를 바꿔 끼운다. 심볼릭 링크면 가리키는 파일을 바꾼다. GITHUB_TOKEN 이 있으면 API 요청에 붙인다.
+  --check 는 바꾸지 않고 새 판 여부만 보인다. 낮은 판으로 내리거나 소스 빌드(dev)를 바꿀 때는 --force 가 필요하다.
+
+종료 코드: 0 성공·이미 최신 · 1 실행 오류 · 2 사용법 · 3 --force 가 필요함 · 10 새 판 있음(--check)

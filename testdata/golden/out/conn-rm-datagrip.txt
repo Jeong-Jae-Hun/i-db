@@ -1,0 +1,5 @@
+args: ["conn","rm","app-stg","--yes","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn rm: DataGrip 접속은 DataGrip 에서 고침

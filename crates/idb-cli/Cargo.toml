@@ -14,6 +14,21 @@ idb-core.workspace = true
 idb-sources.workspace = true
 idb-engine.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
+chrono.workspace = true
+url.workspace = true
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+percent-encoding.workspace = true
+rustls.workspace = true
+tar = "0.4"
+# db update 의 HTTPS(AWS SDK 가 이미 쓰는 판과 같다)
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "native-tokio", "tls12", "logging"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 serde.workspace = true

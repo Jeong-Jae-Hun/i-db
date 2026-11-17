@@ -32,6 +32,21 @@ rustls-native-certs = "0.8"
 postgres-protocol = "0.6"
 bytes = "1"
 fallible-iterator = "0.2"
+# AWS 저장소(DynamoDB·Athena·aws 트리). 기본 HTTPS 클라이언트(aws-lc)를 끄고 rustls(ring) 클라이언트를 직접 넘긴다
+aws-config = { version = "1.13", default-features = false, features = ["rt-tokio", "credentials-process", "sso", "behavior-version-latest"] }
+aws-smithy-http-client = { version = "1.5", features = ["rustls-ring"] }
+aws-smithy-types = "1"
+aws-smithy-runtime-api = "1"
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-athena = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sts = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sns = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-lambda = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-eventbridge = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-scheduler = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sfn = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
 
 [profile.release]
 strip = true

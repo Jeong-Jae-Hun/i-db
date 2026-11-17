@@ -1,0 +1,5 @@
+args: ["status","-p","{P}","--format","csv"]
+exit: 2
+--- stdout
+--- stderr
+db status: --format must be one of table|tsv|json

@@ -1,0 +1,8 @@
+args: ["board","-p","{P}","--format","table"]
+exit: 0
+--- stdout
+name     title    panels  error
+-------  -------  ------  -----
+app-stg  app stg  1       
+(1행)
+--- stderr

@@ -1,0 +1,5 @@
+args: ["history","--format","csv"]
+exit: 2
+--- stdout
+--- stderr
+db history: --format must be one of table|tsv|json
