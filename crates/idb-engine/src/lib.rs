@@ -421,9 +421,15 @@ impl Engine {
     }
 
     pub async fn source_open(&self, conn: &str, path: &str) -> Result<ResultSet, EngineError> {
+        self.source_open_rows(conn, path, 0).await
+    }
+
+    /// limit 행까지의 미리 보기다. 0 이면 source_open 과 같다
+    pub async fn source_open_rows(&self, conn: &str, path: &str, limit: usize) -> Result<ResultSet, EngineError> {
         self.typed(Request::SourceOpen {
             conn: conn.into(),
             path: path.into(),
+            limit,
         })
         .await
     }
@@ -446,5 +452,14 @@ impl Engine {
 
     pub async fn board_run(&self, name: &str, prod: bool) -> Result<BoardResult, EngineError> {
         self.typed(Request::BoardRun { name: name.into(), prod }).await
+    }
+
+    pub async fn read_query(&self, conn: &str, sql: &str, limit: usize) -> Result<ResultSet, EngineError> {
+        self.typed(Request::ReadQuery {
+            conn: conn.into(),
+            sql: sql.into(),
+            limit,
+        })
+        .await
     }
 }

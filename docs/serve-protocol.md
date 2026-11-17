@@ -24,7 +24,7 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 
 | op | 필드 | result |
 | --- | --- | --- |
-| `project` | | `{dir, conns:[{name,group,folder,kind,env,host,db,source}], warnings}` |
+| `project` | | `{dir, conns:[{name,group,folder,kind,env,host,db,source,region?,profile?}], warnings}`(region·profile 은 빈 값이면 없다) |
 | `schemas` | conn | `["public",…]` |
 | `tables` | conn, schema(기본 public) | `["t",…]` |
 | `describe`·`ddl` | conn, schema, table(`스키마.테이블` 꼴도) | ResultSet · CREATE 글 |
@@ -63,12 +63,13 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 | `redis_pattern_keys` | conn, pattern | `{keys, truncated}`(R42, 100,000개까지) |
 | `redis_unlink` | conn, keys, confirm, confirm_prod | `{rows}`(지운 수) |
 | `source_children` | conn, path(기본 맨 위 "") | `[{name, path, info, has_children, openable, warn}]`(R60~R68) |
-| `source_open` | conn, path | ResultSet(트리 Enter 미리 보기, Loki 100줄·나머지 50행) |
+| `source_open` | conn, path, limit(0 이면 Loki 100줄·나머지 50행, 상한 1,000) | ResultSet(트리 Enter 미리 보기) |
 | `source_run` | conn, text, since_ns, until_ns, limit(기본 1,000), direction(Loki `forward`·`backward`), force | ResultSet. aws 접속은 code 2 |
 | `health` | conn(모든 종류) | `{ok, latency_ms, version, metrics:[{name,value,warn}], summary, err}`(R64.2) |
 | `flows` | names(비면 모두), prod | `[{flow, boxes:[{stage, name, metrics, warn, idle, err, note, conn}]}]`(R69) |
 | `board_list` | | `[{name, title, panels, error?}]` |
 | `board_run` | name, prod | `{title, error?, panels:[{title, conn, flow, view, prod, value?, warn, result?, boxes?, error?, note?}]}`(R70) |
+| `read_query` | conn, sql(문장 하나), limit(0 이면 1,000) | ResultSet. `db mcp` 의 query 다. 버리는 연결의 READ ONLY 트랜잭션(30초)에서 돌고, 쓰기·여러 문장·부수 효과 함수는 접속 전에 code 3 `read_only` 다 |
 
 저장소 op 의 prod 는 화면처럼 읽기를 막지 않는다. `flows`·`board_run` 은 `prod:false` 면 prod 접속을 묻지 않고 그 자리에 note `--prod 로 확인`을 둔다. 저장소 접속은 serve 안에서 접속마다 한 번 열어 다시 쓴다.
 
