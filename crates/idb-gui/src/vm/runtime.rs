@@ -247,12 +247,14 @@ mod tests {
     fn 화면_설정은_저장하고_다시_읽고_옛_파일은_기본값이다() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gui.json");
-        let mut p = Prefs::default();
-        p.zoom = 1.25;
-        p.theme = super::super::settings::ThemePref::Dark;
-        p.row_limit = 200;
-        p.sidebar_width = 320.0;
-        p.editor_height = 300.0;
+        let p = Prefs {
+            zoom: 1.25,
+            theme: super::super::settings::ThemePref::Dark,
+            row_limit: 200,
+            sidebar_width: 320.0,
+            editor_height: 300.0,
+            ..Default::default()
+        };
         p.save(&path).unwrap();
         assert_eq!(Prefs::load(&path), p);
         let raw = std::fs::read_to_string(&path).unwrap();

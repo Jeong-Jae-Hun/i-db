@@ -9,6 +9,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use idb_engine::{Applied, ChangeSet, Engine, EngineError, ResultSet, TablePage, TablePageRequest};
@@ -18,9 +19,7 @@ use crate::vm::edits::Edits;
 use crate::vm::grid::{Dir, Grid, NULL};
 use crate::vm::runtime::{Job, Runtime};
 use crate::vm::safety::Confirms;
-
-/// 테이블 보기 한 쪽의 행 수(엔진 상한 1,000)
-const PAGE: u64 = 500;
+use crate::vm::sqlcopy;
 
 /// 결과가 어디서 왔나. 다시 읽기·다음 쪽에 쓴다.
 #[derive(Clone)]
@@ -46,6 +45,11 @@ pub struct GridDelegate {
     more: bool,
     loading: bool,
     loader: Option<Loader>,
+    /// 테이블 보기 한 쪽의 행 수(설정, 엔진 상한 1,000)
+    page: u64,
+    /// 마지막으로 오른쪽 단추를 누른 칸(열을 고르는 데 쓴다)
+    ctx_cell: Option<(usize, usize)>,
+    owner: Option<WeakEntity<ResultsView>>,
 }
 
 impl GridDelegate {
@@ -139,6 +143,40 @@ impl TableDelegate for GridDelegate {
             .child(one_line(&text))
     }
 
+    fn context_menu(&mut self, row_ix: usize, menu: PopupMenu, _: &mut Window, _: &mut Context<TableState<Self>>) -> PopupMenu {
+        let col = self.ctx_cell.filter(|(r, _)| *r == row_ix).map_or(0, |(_, c)| c);
+        let cell = self.display(row_ix, col).0;
+        let row = self.grid.tsv([row_ix], &self.grid.all_cols(), false);
+        let table = self
+            .edits
+            .as_ref()
+            .map(|e| (e.origin.table.schema.clone(), e.origin.table.table.clone()));
+        let src = self.grid.source(self.grid.source_row(row_ix)).to_vec();
+        let insert = sqlcopy::insert_sql(table.as_ref().map(|(s, t)| (s.as_str(), t.as_str())), &self.grid.cols, &[src]);
+        let col_vals: Vec<String> = (0..self.grid.len()).map(|i| self.grid.cell(i, col).to_string()).collect();
+        let in_list = sqlcopy::in_list(&col_vals.iter().map(String::as_str).collect::<Vec<_>>());
+        let col_name = self.grid.cols.get(col).cloned().unwrap_or_default();
+        let (o1, o2) = (self.owner.clone(), self.owner.clone());
+        let copy = |label: String, text: String| {
+            PopupMenuItem::new(label).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())))
+        };
+        menu.item(copy("칸 복사".into(), cell))
+            .item(copy("행 복사 (탭 구분)".into(), row))
+            .item(copy("INSERT 문으로 복사".into(), insert))
+            .item(copy(format!("{col_name} 열을 IN 목록으로 복사"), in_list))
+            .separator()
+            .item(PopupMenuItem::new("CSV 로 저장…").on_click(move |_, _, cx| {
+                if let Some(o) = &o1 {
+                    let _ = o.update(cx, |v, cx| v.export(false, cx));
+                }
+            }))
+            .item(PopupMenuItem::new("JSON 으로 저장…").on_click(move |_, _, cx| {
+                if let Some(o) = &o2 {
+                    let _ = o.update(cx, |v, cx| v.export(true, cx));
+                }
+            }))
+    }
+
     fn cell_text(&self, row_ix: usize, col_ix: usize, _: &App) -> String {
         self.display(row_ix, col_ix).0
     }
@@ -165,7 +203,7 @@ impl TableDelegate for GridDelegate {
                 d.loading = false;
                 match r {
                     Ok(Ok(page)) => {
-                        d.more = page.result.rows.len() as u64 >= PAGE;
+                        d.more = page.result.rows.len() as u64 >= d.page;
                         d.grid.append(page.result.rows);
                     }
                     _ => d.more = false,
@@ -206,6 +244,7 @@ impl ResultsView {
         source: Source,
         rs: ResultSet,
         more: bool,
+        page: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ResultsView {
@@ -223,7 +262,7 @@ impl ResultsView {
                     table: table.clone(),
                     filter: filter.clone(),
                     order_by: order.clone(),
-                    limit: PAGE,
+                    limit: page,
                     ..Default::default()
                 };
                 Some(Rc::new(move |offset| {
@@ -242,6 +281,9 @@ impl ResultsView {
             more,
             loading: false,
             loader,
+            page,
+            ctx_cell: None,
+            owner: Some(cx.weak_entity()),
         };
         let table = cx.new(|cx| {
             TableState::new(delegate, window, cx)
@@ -260,10 +302,13 @@ impl ResultsView {
                     });
                 }
             }),
-            cx.subscribe_in(&table, window, |this, _, ev: &TableEvent, window, cx| {
-                if let TableEvent::DoubleClickedCell(row, col) = ev {
-                    this.edit_cell(*row, *col, window, cx);
+            cx.subscribe_in(&table, window, |this, _, ev: &TableEvent, window, cx| match ev {
+                TableEvent::DoubleClickedCell(row, col) => this.edit_cell(*row, *col, window, cx),
+                TableEvent::RightClickedCell(row, col) | TableEvent::SelectCell(row, col) => {
+                    let cell = (*row, *col);
+                    this.table.update(cx, |t, _| t.delegate_mut().ctx_cell = Some(cell));
                 }
+                _ => {}
             }),
         ];
         ResultsView {
@@ -281,6 +326,20 @@ impl ResultsView {
             last_applied: None,
             _subs: subs,
         }
+    }
+
+    /// 상태 줄에 보일 행 수·걸린 시간이다.
+    pub fn summary(&self, cx: &App) -> String {
+        let g = &self.table.read(cx).delegate().grid;
+        if g.cols.is_empty() {
+            return format!("{}ms", self.elapsed_ms);
+        }
+        let rows = if g.len() == g.source_len() {
+            format!("{}행", g.len())
+        } else {
+            format!("{}/{}행", g.len(), g.source_len())
+        };
+        format!("{rows} · {}ms{}", self.elapsed_ms, if self.truncated { " · 잘림" } else { "" })
     }
 
     fn pending(&self, cx: &App) -> usize {
@@ -680,6 +739,8 @@ impl Render for ResultsView {
 
         v_flex()
             .size_full()
+            // 메뉴 편집 > 복사(⌘C)가 표에 초점이 있을 때 여기로 온다
+            .on_action(cx.listener(|v, _: &gpui_component::input::Copy, _, cx| v.copy(cx)))
             .child(toolbar)
             .when(!self.note.is_empty(), |d| {
                 d.child(div().px_2().py_1().text_xs().text_color(theme.warning).child(self.note.clone()))

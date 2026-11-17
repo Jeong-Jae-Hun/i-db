@@ -1,5 +1,6 @@
 //! GPUI 화면. 무엇을 보일지는 `vm` 이 정하고 여기서는 그리고 입력을 넘긴다.
 
+mod dialogs;
 mod redis;
 mod results;
 mod sql_completion;
@@ -8,30 +9,150 @@ mod workspace;
 use std::borrow::Cow;
 use std::rc::Rc;
 
-use gpui::{App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBounds, WindowOptions, actions, px, size};
-use gpui_component::{Root, Theme};
+use gpui::{
+    Action, App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, OsAction, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, px, size,
+};
+use gpui_component::{Root, Theme, ThemeConfig, ThemeMode};
 
 use crate::vm::font::{self, FontChoice};
+use crate::vm::keymap::{Bind, Cmd, ENTRIES, EXTRA_KEYS, MenuName, entries_in};
+use crate::vm::palette;
 use crate::vm::runtime::{Prefs, Runtime, Target};
+use crate::vm::settings::ThemePref;
+use crate::vm::zoom;
 use workspace::Workspace;
 
 actions!(
     idb,
     [
         Quit,
-        RunQuery,
-        ExplainQuery,
+        About,
+        OpenSettings,
         NewTab,
-        CloseTab,
         OpenFile,
         SaveFile,
-        ToggleProdLock,
+        CloseTab,
+        SwitchConn,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+        ToggleSidebar,
+        ToggleResults,
+        RunQuery,
+        RunAll,
+        ExplainQuery,
         CancelRun,
         TxBegin,
         TxCommit,
-        TxRollback
+        TxRollback,
+        ToggleProdLock,
+        Minimize,
+        ShowShortcuts
     ]
 );
+
+/// 명령 목록(vm::keymap)의 항목을 GPUI 동작으로 바꾼다. 편집 명령은 입력칸·표가 받는 gpui-component 동작이다.
+fn action_for(cmd: Cmd) -> Box<dyn Action> {
+    use gpui_component::input as i;
+    match cmd {
+        Cmd::About => Box::new(About),
+        Cmd::Settings => Box::new(OpenSettings),
+        Cmd::Quit => Box::new(Quit),
+        Cmd::NewTab => Box::new(NewTab),
+        Cmd::OpenFile => Box::new(OpenFile),
+        Cmd::SaveFile => Box::new(SaveFile),
+        Cmd::CloseTab => Box::new(CloseTab),
+        Cmd::SwitchConn => Box::new(SwitchConn),
+        Cmd::Undo => Box::new(i::Undo),
+        Cmd::Redo => Box::new(i::Redo),
+        Cmd::Cut => Box::new(i::Cut),
+        Cmd::Copy => Box::new(i::Copy),
+        Cmd::Paste => Box::new(i::Paste),
+        Cmd::SelectAll => Box::new(i::SelectAll),
+        Cmd::Find => Box::new(i::Search),
+        Cmd::ZoomIn => Box::new(ZoomIn),
+        Cmd::ZoomOut => Box::new(ZoomOut),
+        Cmd::ZoomReset => Box::new(ZoomReset),
+        Cmd::ToggleSidebar => Box::new(ToggleSidebar),
+        Cmd::ToggleResults => Box::new(ToggleResults),
+        Cmd::Run => Box::new(RunQuery),
+        Cmd::RunAll => Box::new(RunAll),
+        Cmd::Explain => Box::new(ExplainQuery),
+        Cmd::Cancel => Box::new(CancelRun),
+        Cmd::TxBegin => Box::new(TxBegin),
+        Cmd::TxCommit => Box::new(TxCommit),
+        Cmd::TxRollback => Box::new(TxRollback),
+        Cmd::ProdLock => Box::new(ToggleProdLock),
+        Cmd::Minimize => Box::new(Minimize),
+        Cmd::Shortcuts => Box::new(ShowShortcuts),
+    }
+}
+
+fn os_action(cmd: Cmd) -> Option<OsAction> {
+    Some(match cmd {
+        Cmd::Undo => OsAction::Undo,
+        Cmd::Redo => OsAction::Redo,
+        Cmd::Cut => OsAction::Cut,
+        Cmd::Copy => OsAction::Copy,
+        Cmd::Paste => OsAction::Paste,
+        Cmd::SelectAll => OsAction::SelectAll,
+        _ => return None,
+    })
+}
+
+fn key_bindings() -> Vec<KeyBinding> {
+    let bind = |key: &str, cmd: Cmd, ctx: Option<&str>| {
+        let pred = ctx.and_then(|c| gpui::KeyBindingContextPredicate::parse(c).ok()).map(Rc::new);
+        KeyBinding::load(key, action_for(cmd), pred, false, None, &gpui::DummyKeyboardMapper)
+    };
+    let mut out = Vec::new();
+    for e in ENTRIES {
+        let Some(key) = e.key else { continue };
+        match e.bind {
+            Bind::Global => out.push(bind(key, e.cmd, None)),
+            Bind::Workspace => out.push(bind(key, e.cmd, Some("Workspace"))),
+            // 편집기(Input)가 cmd-enter 를 줄바꿈으로 먹지 않게 같은 맥락에 나중에 묶는다
+            Bind::WorkspaceOverInput => {
+                out.push(bind(key, e.cmd, Some("Input")));
+                out.push(bind(key, e.cmd, Some("Workspace")));
+            }
+            Bind::Builtin => {}
+        }
+    }
+    for (key, cmd) in EXTRA_KEYS {
+        out.push(bind(key, *cmd, None));
+    }
+    // 표에 초점이 있을 때 ⌘C 는 결과 복사다(ResultsView 가 받는다)
+    out.push(bind("cmd-c", Cmd::Copy, Some("DataTable")));
+    out.into_iter().flatten().collect()
+}
+
+fn menus() -> Vec<Menu> {
+    MenuName::ALL
+        .iter()
+        .map(|&m| {
+            let mut items = Vec::new();
+            for e in entries_in(m) {
+                if e.sep_before && !items.is_empty() {
+                    items.push(MenuItem::separator());
+                }
+                items.push(MenuItem::Action {
+                    name: e.label.into(),
+                    action: action_for(e.cmd),
+                    os_action: os_action(e.cmd),
+                    checked: false,
+                    disabled: false,
+                });
+            }
+            Menu {
+                name: m.title().into(),
+                items,
+                disabled: false,
+            }
+        })
+        .collect()
+}
 
 /// `i-db [-p 폴더 | --remote 이름]`. 인자가 없으면 고르는 화면으로 연다.
 fn initial_target() -> Result<Option<Target>, String> {
@@ -45,8 +166,7 @@ fn initial_target() -> Result<Option<Target>, String> {
 }
 
 /// gui.json 의 글꼴을 정하고, 설치돼 있지 않으면 넣어 둔 D2Coding 을 등록한다.
-fn load_font(cx: &mut App) -> FontChoice {
-    let prefs = Prefs::path().map(|p| Prefs::load(&p)).unwrap_or_default();
+fn load_font(prefs: &Prefs, cx: &mut App) -> FontChoice {
     let installed = cx.text_system().all_font_names();
     let mut choice = font::resolve(&prefs.font, prefs.font_size, &installed);
     if choice.embed {
@@ -60,16 +180,45 @@ fn load_font(cx: &mut App) -> FontChoice {
     choice
 }
 
-/// 화면 글·편집기·결과 표가 같은 글꼴을 쓰게 테마에 넣는다.
-fn apply_font(f: &FontChoice, cx: &mut App) {
+/// 화면 글·편집기·결과 표가 같은 글꼴을 쓰게 테마에 넣는다. 크기는 확대 배율을 곱한다.
+fn apply_font(f: &FontChoice, z: f32, cx: &mut App) {
+    let size = px(zoom::font_px(f.size, z));
     Theme::update(cx, |t| {
         if !f.family.is_empty() {
             t.font_family = f.family.clone().into();
             t.mono_font_family = f.family.clone().into();
         }
-        t.font_size = px(f.size);
-        t.mono_font_size = px(f.size);
+        t.font_size = size;
+        t.mono_font_size = size;
     });
+}
+
+/// Orca 토큰 색(vm::palette)을 밝은·어두운 테마로 등록한다. 구문 강조는 gpui-component 기본 것을 그대로 둔다.
+fn install_palette(cx: &mut App) {
+    let parse = |dark: bool| serde_json::from_value::<ThemeConfig>(palette::theme_config(dark)).ok();
+    let (Some(mut light), Some(mut dark)) = (parse(false), parse(true)) else {
+        return;
+    };
+    let t = Theme::global(cx);
+    light.highlight = t.light_theme.highlight.clone();
+    dark.highlight = t.dark_theme.highlight.clone();
+    Theme::update(cx, |t| {
+        t.light_theme = Rc::new(light);
+        t.dark_theme = Rc::new(dark);
+    });
+}
+
+/// 테마 모드·글꼴·확대를 한 번에 맞춘다. 설정 창·확대·macOS 밝기 바꿈이 부른다.
+fn apply_look(prefs: &Prefs, font: &FontChoice, window: &mut Window, cx: &mut App) {
+    match prefs.theme {
+        ThemePref::System => Theme::sync_system_appearance(Some(window), cx),
+        ThemePref::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+        ThemePref::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+    }
+    apply_font(font, prefs.zoom, cx);
+    // rem 을 키워 여백·높이·작은 글(text_xs)도 같은 배율로 커지게 한다
+    window.set_rem_size(px(zoom::rem_px(prefs.zoom)));
+    cx.refresh_windows();
 }
 
 pub fn run() {
@@ -91,37 +240,12 @@ pub fn run() {
         .with_assets(gpui_kit_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            let font = load_font(cx);
-            cx.bind_keys([
-                KeyBinding::new("cmd-q", Quit, None),
-                // 편집기(Input)가 cmd-enter 를 줄바꿈으로 먹지 않게 같은 맥락에 나중에 묶는다
-                KeyBinding::new("cmd-enter", RunQuery, Some("Input")),
-                KeyBinding::new("cmd-enter", RunQuery, Some("Workspace")),
-                KeyBinding::new("cmd-e", ExplainQuery, Some("Workspace")),
-                KeyBinding::new("cmd-t", NewTab, Some("Workspace")),
-                KeyBinding::new("cmd-w", CloseTab, Some("Workspace")),
-                KeyBinding::new("cmd-o", OpenFile, Some("Workspace")),
-                KeyBinding::new("cmd-s", SaveFile, Some("Workspace")),
-                KeyBinding::new("cmd-l", ToggleProdLock, Some("Workspace")),
-                KeyBinding::new("cmd-.", CancelRun, Some("Workspace")),
-            ]);
+            install_palette(cx);
+            let prefs = Prefs::path().map(|p| Prefs::load(&p)).unwrap_or_default();
+            let font = load_font(&prefs, cx);
+            cx.bind_keys(key_bindings());
             cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.set_menus([Menu {
-                name: "i-db".into(),
-                items: vec![
-                    MenuItem::action("새 탭", NewTab),
-                    MenuItem::action("열기…", OpenFile),
-                    MenuItem::action("저장", SaveFile),
-                    MenuItem::separator(),
-                    MenuItem::action("BEGIN", TxBegin),
-                    MenuItem::action("COMMIT", TxCommit),
-                    MenuItem::action("ROLLBACK", TxRollback),
-                    MenuItem::action("prod 잠금 바꾸기", ToggleProdLock),
-                    MenuItem::separator(),
-                    MenuItem::action("끝내기", Quit),
-                ],
-                disabled: false,
-            }]);
+            cx.set_menus(menus());
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -138,10 +262,9 @@ pub fn run() {
             };
             let rt = rt.clone();
             let opened = cx.open_window(opts, move |window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
-                apply_font(&font, cx);
+                apply_look(&prefs, &font, window, cx);
                 let ws = cx.new(|cx| {
-                    let mut ws = Workspace::new(rt, window, cx);
+                    let mut ws = Workspace::new(rt, font, window, cx);
                     if let Some(t) = initial {
                         ws.open_target(t, window, cx);
                     }
@@ -168,11 +291,36 @@ mod tests {
         cx.update(|cx| {
             gpui_component::init(cx);
             let f = font::resolve(font::DEFAULT_FONT, font::DEFAULT_SIZE, &[]);
-            apply_font(&f, cx);
+            apply_font(&f, zoom::DEFAULT, cx);
             let t = cx.theme();
             assert_eq!(t.font_family.as_ref(), "D2Coding");
             assert_eq!(t.mono_font_family.as_ref(), "D2Coding");
             assert_eq!((t.font_size, t.mono_font_size), (px(13.), px(13.)));
+            apply_font(&f, 1.25, cx);
+            assert_eq!(cx.theme().font_size, px(16.));
         });
+    }
+
+    #[gpui::test]
+    fn Orca_색을_어두운_테마로_등록한다(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            install_palette(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+            let t = cx.theme();
+            assert_eq!(t.background, workspace::hex("#0a0a0a"));
+            assert_eq!(t.foreground, workspace::hex("#f0f0f0"));
+            assert_eq!(t.muted_foreground, workspace::hex("#acacac"));
+            assert_eq!(t.sidebar, workspace::hex("#171717"));
+            Theme::change(ThemeMode::Light, None, cx);
+            assert_eq!(cx.theme().background, workspace::hex("#ffffff"));
+        });
+    }
+
+    #[test]
+    fn 메뉴는_일곱_개이고_묶음은_모두_읽힌다() {
+        assert_eq!(menus().len(), 7);
+        let n_keys = ENTRIES.iter().filter(|e| e.key.is_some() && e.bind != Bind::Builtin).count();
+        assert!(key_bindings().len() >= n_keys);
     }
 }

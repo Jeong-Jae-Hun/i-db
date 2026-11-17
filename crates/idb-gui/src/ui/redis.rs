@@ -125,7 +125,20 @@ impl RedisView {
 
     fn show(&mut self, rs: ResultSet, window: &mut Window, cx: &mut Context<Self>) {
         let (ws, rt, engine, conn) = (self.ws.clone(), self.rt.clone(), self.engine.clone(), self.conn.clone());
-        self.value = Some(cx.new(|cx| ResultsView::new(ws, rt, engine, conn, Source::Static, rs, false, window, cx)));
+        self.value = Some(cx.new(|cx| {
+            ResultsView::new(
+                ws,
+                rt,
+                engine,
+                conn,
+                Source::Static,
+                rs,
+                false,
+                crate::vm::settings::DEFAULT_ROW_LIMIT,
+                window,
+                cx,
+            )
+        }));
         cx.notify();
     }
 
