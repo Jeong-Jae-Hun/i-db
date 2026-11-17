@@ -1,0 +1,5 @@
+args: ["board","-p","{P}","a","b"]
+exit: 2
+--- stdout
+--- stderr
+db board: 보드 이름은 하나만

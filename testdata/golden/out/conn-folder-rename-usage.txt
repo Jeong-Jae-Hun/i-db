@@ -1,0 +1,5 @@
+args: ["conn","folder","--rename","grp","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn folder: --rename <옛 폴더> <새 폴더>

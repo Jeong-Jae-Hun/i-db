@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","ddb-stg"]
+exit: 2
+--- stdout
+--- stderr
+실행할 글이 없음 (인자, -f 파일, 표준 입력)

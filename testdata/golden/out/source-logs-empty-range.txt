@@ -1,0 +1,5 @@
+args: ["logs","-p","{P}","-c","logs-stg","--since","1h","--until","1h","{a=\"1\"}"]
+exit: 1
+--- stdout
+--- stderr
+empty range: until 1h0m0s must be shorter than since 1h0m0s

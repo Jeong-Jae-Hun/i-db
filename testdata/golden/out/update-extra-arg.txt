@@ -1,0 +1,5 @@
+args: ["update","foo"]
+exit: 2
+--- stdout
+--- stderr
+db update: 모르는 인자 "foo"

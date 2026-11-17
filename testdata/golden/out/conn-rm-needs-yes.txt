@@ -1,0 +1,5 @@
+args: ["conn","rm","logs-stg","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn rm: --yes 가 필요함 (표준 입력이 터미널이 아님)

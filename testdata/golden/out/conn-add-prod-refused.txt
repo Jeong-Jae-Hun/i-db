@@ -1,0 +1,5 @@
+args: ["conn","add","x-prod","--url","postgres://u:sekrit@h/d","-p","{P}"]
+exit: 3
+--- stdout
+--- stderr
+db conn add: prod 접속은 --prod 가 필요함

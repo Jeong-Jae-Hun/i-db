@@ -1,0 +1,21 @@
+args: ["conns","-p","{P}","--format","tsv","--prod=maybe"]
+exit: 2
+--- stdout
+--- stderr
+invalid boolean value "maybe" for -prod: parse error
+사용법: db conns [-p 경로]
+  접속 목록(이름·그룹·종류·환경·호스트·DB, 비밀번호 없음)
+
+플래그:
+  -c string
+    	접속 이름(db conns)
+  -format string
+    	출력 형식 table|tsv|csv|json (기본: 터미널이면 table, 아니면 tsv)
+  -max-rows int
+    	최대 행 수(상한 10000) (default 200)
+  -p string
+    	DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더 (default "/golden/project")
+  -prod
+    	prod 접속 허용(읽기만)
+  -timeout duration
+    	전체 시간 제한 (default 30s)
