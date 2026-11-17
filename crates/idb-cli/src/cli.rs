@@ -459,10 +459,6 @@ pub fn run_cli(args: &[String], stdin: Option<Box<dyn Read + Send>>, stdout: &mu
     if o.cmd == "conns" {
         return output::write_results(stdout, stderr, &o, vec![conns_result(&proj, &o)]);
     }
-    if matches!(o.cmd.as_str(), "status" | "flows" | "board") || source && o.cmd != "user360" {
-        stderr.push_str(&format!("db {cmd}: not yet ported to db-rs\n"));
-        return EXIT_ERR;
-    }
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
@@ -476,6 +472,16 @@ pub fn run_cli(args: &[String], stdin: Option<Box<dyn Read + Send>>, stdout: &mu
         clients: Arc::new(Clients::new()),
         deadline: Instant::now() + Duration::from_nanos(o.timeout_ns as u64),
     };
+    let sub = match o.cmd.as_str() {
+        "status" => Some(rt.block_on(crate::status_cmd::run_status(&env, stdout, stderr))),
+        "flows" => Some(rt.block_on(crate::flows_cmd::run_flows(&env, stdout, stderr))),
+        "board" => Some(rt.block_on(crate::board_cmd::run_board(&env, stdout, stderr))),
+        _ => None,
+    };
+    if let Some(code) = sub {
+        rt.block_on(env.clients.close());
+        return code;
+    }
     let start = std::time::Instant::now();
     let results = rt.block_on(command::run_command(&env, stdin, stderr));
     let elapsed = start.elapsed();

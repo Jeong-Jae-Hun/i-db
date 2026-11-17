@@ -73,11 +73,11 @@ impl From<Error> for CmdError {
     }
 }
 
-fn usage(s: impl Into<String>) -> CmdError {
+pub(crate) fn usage(s: impl Into<String>) -> CmdError {
     CmdError::Usage(s.into())
 }
 
-fn refused(s: impl Into<String>) -> CmdError {
+pub(crate) fn refused(s: impl Into<String>) -> CmdError {
     CmdError::Refused(s.into())
 }
 
@@ -96,7 +96,7 @@ impl Env<'_> {
         self.err_msg(&err.text(), matches!(err, CmdError::Run(Error::Deadline)), conns)
     }
 
-    fn err_msg(&self, msg: &str, deadline: bool, conns: &[&str]) -> String {
+    pub(crate) fn err_msg(&self, msg: &str, deadline: bool, conns: &[&str]) -> String {
         let mut msg = msg.to_string();
         if deadline || Instant::now() >= self.deadline {
             msg = format!("시간 초과(--timeout {}): {msg}", duration_string(self.o.timeout_ns));
@@ -115,6 +115,11 @@ impl Env<'_> {
 pub async fn run_command(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>, stderr: &mut String) -> Result<Vec<CliResult>, CmdError> {
     let o = env.o;
     let proj = env.proj;
+    if let Some(k) = proj.conn_by_name(&o.conn).and_then(|c| c.kind).filter(|k| k.is_source())
+        && o.cmd != "user360"
+    {
+        return crate::source_cmd::run_source_command(env, k, stdin).await;
+    }
     // --force 는 PostgreSQL·Redis 에서는 --write 와 함께만 쓴다(R58.1)
     if o.force && !o.write {
         return Err(usage("--force 는 --write 와 함께 씀"));
@@ -220,7 +225,7 @@ fn names_result(col: &str, names: Vec<String>) -> QueryResult {
 }
 
 /// -c(또는 --to) 이름의 접속을 찾고 prod 허용을 확인한다. 접속을 열기 전에 거절해야 prod 에 연결 자체를 하지 않는다.
-fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind) -> Result<&'a Conn, CmdError> {
+pub(crate) fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind) -> Result<&'a Conn, CmdError> {
     if name.is_empty() {
         return Err(usage(format!("{flag} <접속 이름> 이 필요함 (db conns)")));
     }
@@ -241,7 +246,7 @@ fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind
 
 /// 위치 인자, -f 파일, 표준 입력 순으로 SQL·명령 글을 읽는다.
 /// 표준 입력은 닫히지 않는 파이프에서도 --timeout 에 끝나게 따로 읽고, CLI_MAX_STDIN 을 넘으면 오류다.
-async fn read_input(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<String, CmdError> {
+pub(crate) async fn read_input(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<String, CmdError> {
     let o = env.o;
     let text = if !o.args.is_empty() {
         o.args.join(" ")
