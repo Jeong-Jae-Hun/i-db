@@ -21,7 +21,9 @@ use crate::schemadiff::{SnapColumn, SnapTable, Snapshot, column_def};
 use crate::{Error, redis};
 pub use edit::{Applied, Change, ChangeOp, ChangeSet, Origin, changes_sql, undo_changes};
 pub use meta::TableRef;
-pub use ops::{Catalog, CatalogColumn, CatalogSchema, CatalogTable, ERR_NOT_FOUND, Fk, Object, fk_where};
+pub use ops::{
+    Catalog, CatalogColumn, CatalogSchema, CatalogTable, ERR_EXPORT_NOT_SELECT, ERR_NOT_FOUND, EXPORT_CHUNK, Fk, Object, fk_where,
+};
 pub use session::{Ran, Session};
 use wire::{Config, Rows};
 

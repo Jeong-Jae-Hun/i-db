@@ -11,6 +11,7 @@ publish = false
 idb-core = { path = "crates/idb-core" }
 idb-sources = { path = "crates/idb-sources" }
 idb-engine = { path = "crates/idb-engine" }
+idb-tui = { path = "crates/idb-tui" }
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -56,3 +57,9 @@ aws-sigv4 = "1"
 [profile.release]
 strip = true
 lto = "thin"
+
+# i-db.app 릴리스. 패닉 백트레이스(~/Library/Logs/i-db/crash.log)에 함수·파일·줄이 남게 줄 표만 두고 벗기지 않는다
+[profile.release-gui]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"

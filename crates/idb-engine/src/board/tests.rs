@@ -76,6 +76,8 @@ fn refresh_는_최소_10초이고_깨진_JSON_은_패널_없이_오류다() {
     let p = proj(dir.path());
     write_board(dir.path(), "fast", r#"{"refresh":"5s","panels":[]}"#);
     assert_eq!(load_board(&p, "fast").ok().unwrap().err, "refresh must be at least 10s: 5s");
+    write_board(dir.path(), "ok", r#"{"refresh":"30s","panels":[]}"#);
+    assert_eq!(load_board(&p, "ok").ok().unwrap().every_ns, 30_000_000_000);
     write_board(dir.path(), "bad", r#"{"refresh":"soon"}"#);
     assert_eq!(load_board(&p, "bad").ok().unwrap().err, r#"refresh: invalid duration "soon""#);
     write_board(dir.path(), "broken", "{");
@@ -83,7 +85,7 @@ fn refresh_는_최소_10초이고_깨진_JSON_은_패널_없이_오류다() {
     assert!(b.err.starts_with(".dbtui/boards/broken.json: ") && b.panels.is_empty(), "{}", b.err);
     assert!(matches!(load_board(&p, "none"), Err(LoadErr::NotFound)));
     assert!(matches!(load_board(&p, "../x"), Err(LoadErr::Other(_))));
-    assert_eq!(list_boards(dir.path()), ["bad", "broken", "fast"]);
+    assert_eq!(list_boards(dir.path()), ["bad", "broken", "fast", "ok"]);
 }
 
 #[test]

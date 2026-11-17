@@ -22,6 +22,15 @@ pub use local::{CliHandler, LocalEngine};
 pub use protocol::*;
 pub use remote::{RemoteEngine, RemoteSpec};
 
+/// 묶음의 미리 보기 문장이다(`changes_sql` op 와 같은 글). applied 가 있으면 되돌리기 묶음의 문장이다.
+/// 접속을 쓰지 않는 계산이라 화면이 원격에서도 요청 없이 바로 부른다(fk_where 와 같다).
+pub fn changes_preview(cs: &ChangeSet, applied: Option<&Applied>) -> Result<Vec<String>, String> {
+    match applied {
+        Some(a) => idb_sources::undo_changes(cs, a).map(|u| idb_sources::changes_sql(&u)),
+        None => Ok(idb_sources::changes_sql(cs)),
+    }
+}
+
 #[derive(Clone)]
 pub enum Engine {
     Local(Arc<LocalEngine>),
@@ -421,9 +430,15 @@ impl Engine {
     }
 
     pub async fn source_open(&self, conn: &str, path: &str) -> Result<ResultSet, EngineError> {
+        self.source_open_rows(conn, path, 0).await
+    }
+
+    /// limit 행까지의 미리 보기다. 0 이면 source_open 과 같다
+    pub async fn source_open_rows(&self, conn: &str, path: &str, limit: usize) -> Result<ResultSet, EngineError> {
         self.typed(Request::SourceOpen {
             conn: conn.into(),
             path: path.into(),
+            limit,
         })
         .await
     }
@@ -444,7 +459,94 @@ impl Engine {
         self.typed(Request::BoardList).await
     }
 
+    /// 흐름 아웃박스 한도 소진 수(대시보드 카드, R64)
+    pub async fn outbox_exhausted(&self) -> Result<Vec<OutboxExhausted>, EngineError> {
+        self.typed(Request::OutboxExhausted).await
+    }
+
     pub async fn board_run(&self, name: &str, prod: bool) -> Result<BoardResult, EngineError> {
         self.typed(Request::BoardRun { name: name.into(), prod }).await
+    }
+
+    // ─── 복호화·전체 내보내기·접속 편집 ───
+
+    /// 칸들 중 staticEncrypt 꼴을 그 접속 그룹 키로 serve 에서 푼다(R37). 화면은 `idb_core::statcrypt::looks_encrypted` 로
+    /// 고른 칸만 보내면 된다. 키가 없거나 그룹을 모르면 code 2 이고 글은 상태 줄 글 그대로다.
+    pub async fn decrypt(&self, conn: &str, cells: Vec<String>) -> Result<Decrypted, EngineError> {
+        self.typed(Request::Decrypt { conn: conn.into(), cells }).await
+    }
+
+    /// 전체 내보내기(R33.1)를 시작한다. 파일은 화면 쪽이 쓴다(원격이어도 받은 바이트를 이 기계에 쓴다).
+    pub async fn export_start(&self, conn: &str, sql: &str) -> Result<ExportStarted, EngineError> {
+        self.typed(Request::ExportStart {
+            conn: conn.into(),
+            sql: sql.into(),
+        })
+        .await
+    }
+
+    /// 다음 조각이다. done 이 올 때까지 부른다. 퓨처를 버려도 조각은 잃지 않고 내보내기도 이어진다(멈추려면 export_cancel).
+    pub async fn export_read(&self, export: u64) -> Result<ExportChunk, EngineError> {
+        self.typed(Request::ExportRead { export }).await
+    }
+
+    pub async fn export_cancel(&self, export: u64) -> Result<bool, EngineError> {
+        self.typed::<Canceled>(Request::ExportCancel { export }).await.map(|c| c.canceled)
+    }
+
+    /// db 전용 접속의 고칠 값이다(비밀번호 없음). 원격이면 code 3 remote_conn_edit 다.
+    pub async fn conn_get(&self, name: &str) -> Result<ConnFields, EngineError> {
+        self.typed(Request::ConnGet { name: name.into() }).await
+    }
+
+    /// 저장된 접속 name 을 시험한다.
+    pub async fn conn_test_saved(&self, name: &str) -> Result<ConnTested, EngineError> {
+        self.typed(Request::ConnTest {
+            name: name.into(),
+            conn: None,
+            old_name: String::new(),
+        })
+        .await
+    }
+
+    /// 창의 값으로 시험한다. 비밀번호가 비면 old_name(없으면 conn.name)의 저장된 비밀번호를 쓴다.
+    pub async fn conn_test(&self, conn: ConnFields, old_name: &str) -> Result<ConnTested, EngineError> {
+        self.typed(Request::ConnTest {
+            name: String::new(),
+            conn: Some(conn),
+            old_name: old_name.into(),
+        })
+        .await
+    }
+
+    /// old_name 이 비면 더하고 아니면 고친다. 성공하면 엔진의 접속 목록이 바뀌므로 화면은 project 를 다시 읽는다.
+    pub async fn conn_save(&self, old_name: &str, conn: ConnFields) -> Result<ConnSaved, EngineError> {
+        self.typed(Request::ConnSave {
+            old_name: old_name.into(),
+            conn,
+        })
+        .await
+    }
+
+    pub async fn conn_delete(&self, name: &str) -> Result<(), EngineError> {
+        self.call(Request::ConnDelete { name: name.into() }).await.map(|_| ())
+    }
+
+    pub async fn conn_folder(&self, names: Vec<String>, folder: &str) -> Result<(), EngineError> {
+        self.call(Request::ConnFolder {
+            names,
+            folder: folder.into(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn read_query(&self, conn: &str, sql: &str, limit: usize) -> Result<ResultSet, EngineError> {
+        self.typed(Request::ReadQuery {
+            conn: conn.into(),
+            sql: sql.into(),
+            limit,
+        })
+        .await
     }
 }

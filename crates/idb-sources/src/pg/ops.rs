@@ -102,6 +102,13 @@ const CATALOG_FUNCTION_LIMIT: usize = 2000;
 const MAX_IMPORT_ROWS: usize = 100_000;
 const MAX_IMPORT_BYTES: usize = 50 << 20;
 
+/// 전체 내보내기 조각 크기. 받는 쪽은 조각을 몇 개까지만 쌓아 두어(채널 크기) 메모리가 행 수와 상관없다
+pub const EXPORT_CHUNK: usize = 1 << 20;
+/// 받는 쪽이 이만큼 읽지 않으면 버려진 내보내기로 보고 연결을 닫는다(풀 연결 하나를 붙잡지 않게)
+const EXPORT_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+/// 읽기 문장이지만 COPY (…) 안에 넣을 수 없는 문장(SHOW·EXPLAIN)이다(Go `ErrExportNotSelect`)
+pub const ERR_EXPORT_NOT_SELECT: &str = "only select, with, values and table statements can be exported";
+
 /// 정의를 찾지 못한 오류 글의 머리다. 화면은 이 글로 `정의를 찾지 못함: <이름>` 을 보인다.
 pub const ERR_NOT_FOUND: &str = "definition not found";
 
@@ -452,6 +459,52 @@ impl Pg {
         p.release();
         Ok(tag.rsplit(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0))
     }
+
+    /// 읽기 문장 하나를 1,000행 제한 없이 `COPY (…) TO STDOUT WITH (FORMAT csv, HEADER)` 로 받아 out 에 조각으로 보낸다(R33.1).
+    /// 돌려주는 값은 COPY 가 보낸 행 수다. Go `PGConn.CopyOut` 과 같다: 편집기 세션을 오래 붙잡지 않도록 풀 연결의
+    /// READ ONLY 트랜잭션에서 돌고, 첫 단어 판정이 놓치는 CTE 안 쓰기는 서버의 READ ONLY 가 막는다. 고른 search_path 는
+    /// 트랜잭션 안의 SET 이라 ROLLBACK 이 되돌린다(R27.2). 중간에 멈추면(out 닫힘·실패) 연결은 풀에 돌아가지 않고 닫힌다.
+    pub async fn copy_out(&self, sql: &str, search_path: &str, out: &tokio::sync::mpsc::Sender<Vec<u8>>) -> Result<i64, Error> {
+        let stmt = trim_statement(sql);
+        match split_statements(stmt).len() {
+            0 => return Err(Error::msg("empty statement")),
+            1 => {}
+            _ => return Err(Error::msg("only one statement can be exported")),
+        }
+        // 부수 효과 함수(pg_terminate_backend 등)는 READ ONLY 트랜잭션에서도 돌아 read_query 와 같은 검사로 막는다
+        idb_core::sqlsafe::check_read_only_sql(stmt).map_err(|e| Error::msg(e.to_string()))?;
+        if !matches!(first_sql_word(stmt).as_str(), "select" | "with" | "values" | "table") {
+            return Err(Error::msg(ERR_EXPORT_NOT_SELECT));
+        }
+        // simple protocol 이라 문장을 감싸는 괄호가 어긋나면 ") TO ... (" 사이로 다른 COPY 옵션을 끼울 수 있다
+        let mut depth = 0i64;
+        for b in mask_sql(stmt).bytes() {
+            match b {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                break;
+            }
+        }
+        if depth != 0 {
+            return Err(Error::msg("unbalanced parentheses"));
+        }
+        let mut p = self.acquire().await?;
+        let c = p.conn();
+        c.exec("BEGIN READ ONLY").await?;
+        if !search_path.is_empty() {
+            c.exec(&format!("SET LOCAL search_path TO {}, public", quote_ident(search_path)))
+                .await?;
+        }
+        // 문장이 줄 주석으로 끝나도 닫는 괄호가 주석에 먹히지 않게 줄을 바꾼다
+        let copy = format!("COPY ({stmt}\n) TO STDOUT WITH (FORMAT csv, HEADER)");
+        let tag = c.copy_out(&copy, EXPORT_CHUNK, out, EXPORT_IDLE).await?;
+        c.exec("ROLLBACK").await?;
+        p.release();
+        Ok(tag.rsplit(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0))
+    }
 }
 
 /// `a."B c".d` 를 [a, B c, d] 로 나눈다. 따옴표 밖 ASCII 는 소문자로 접는다.
@@ -514,6 +567,25 @@ pub fn fk_where(cols: &[String], vals: &[String]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn 전체_내보내기는_접속하기_전에_문장을_거른다() {
+        // 열지 않은 풀이라 검사를 지나면 접속 오류가 난다
+        let pg = Pg::unopened("127.0.0.1", 1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let err = |sql: &'static str| {
+            let (pg, tx) = (pg.clone(), tx.clone());
+            async move { pg.copy_out(sql, "", &tx).await.unwrap_err().to_string() }
+        };
+        assert_eq!(err(" ; ").await, "empty statement");
+        assert_eq!(err("select 1; select 2").await, "only one statement can be exported");
+        assert!(err("delete from t").await.starts_with("only read-only statements"));
+        assert_eq!(err("show search_path").await, ERR_EXPORT_NOT_SELECT);
+        assert!(err("select pg_terminate_backend(1)").await.contains("is not allowed"));
+        assert_eq!(err("select 1) to stdout (format text").await, "unbalanced parentheses");
+        assert_eq!(err("select (1").await, "unbalanced parentheses");
+        assert!(err("select ')' from t;").await.starts_with("failed to connect"));
+    }
 
     #[test]
     fn 이름은_따옴표를_풀고_밖은_소문자로_접는다() {

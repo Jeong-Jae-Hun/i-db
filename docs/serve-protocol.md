@@ -6,7 +6,7 @@
 
 한 줄에 JSON 하나다. 요청은 `{"id":N,"op":"…",…}`이고 응답은 `{"id":N,"ok":true,"result":…}` 또는 `{"id":N,"ok":false,"code":3,"error":"…","reason":"…"}`이다. id 는 클라이언트가 고르는 양의 정수이고 진행 중인 요청끼리 겹치면 안 된다. 요청은 동시에 돌고 응답은 끝난 순서로 온다. 모르는 필드는 무시한다.
 
-code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`), `confirm`(백엔드 신호·패턴 일괄 삭제처럼 환경과 상관없이 늘 묻는 것, `confirm:true`), `confirm_analyze`(읽기 전용이 아닌 문장의 EXPLAIN ANALYZE, R9.2, `confirm_analyze:true`)이다. Redis `KEYS`는 접속하기 전에 `keys`로 거절한다(확인으로 풀리지 않음, SCAN 을 쓴다). 저장소 op 는 `read_only`(쓰기로 보이는 질의, 다시 보낼 길 없음), `confirm_expensive`(전체 스캔·7일 넘는 범위 같은 비싼 질의 R60.2, 확인 후 `force:true`), `billed`(요청마다 요금이 붙는 AWS 조회 R72, serve 쪽 `DB_ALLOW_BILLED=1` 없이는 확인으로도 풀리지 않음)를 쓴다. error 글은 그대로 확인 창에 보일 수 있는 질문(`prod(app-prod)에 제출 2건: y/N`)이다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
+code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`), `confirm`(백엔드 신호·패턴 일괄 삭제처럼 환경과 상관없이 늘 묻는 것, `confirm:true`), `confirm_analyze`(읽기 전용이 아닌 문장의 EXPLAIN ANALYZE, R9.2, `confirm_analyze:true`)이다. Redis `KEYS`는 접속하기 전에 `keys`로 거절한다(확인으로 풀리지 않음, SCAN 을 쓴다). 저장소 op 는 `read_only`(쓰기로 보이는 질의, 다시 보낼 길 없음), `confirm_expensive`(전체 스캔·7일 넘는 범위 같은 비싼 질의 R60.2, 확인 후 `force:true`), `billed`(요청마다 요금이 붙는 AWS 조회 R72, serve 쪽 `DB_ALLOW_BILLED=1` 없이는 확인으로도 풀리지 않음)를 쓴다. 접속 편집 op 는 `remote_conn_edit`(serve 는 접속 파일을 쓰지 않고 비밀번호를 받지 않음, 아래 「접속 편집」)를 쓴다. error 글은 그대로 확인 창에 보일 수 있는 질문(`prod(app-prod)에 제출 2건: y/N`)이다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
 
 어느 메시지에도 비밀번호·AES 키를 싣지 않는다. 오류 글은 serve 가 그 접속의 비밀번호와 모든 AES 키·IV 를 지우고 제어 문자를 바꾼 것이다. 단, staticEncrypt 암호문은 형식상 앞에 IV 를 싣는다(`IV^|^…`).
 
@@ -24,7 +24,7 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 
 | op | 필드 | result |
 | --- | --- | --- |
-| `project` | | `{dir, conns:[{name,group,folder,kind,env,host,db,source}], warnings}` |
+| `project` | | `{dir, conns:[{name,group,folder,kind,env,host,db,source,uuid,region?,profile?}], warnings}`(region·profile 은 빈 값이면 없다) |
 | `schemas` | conn | `["public",…]` |
 | `tables` | conn, schema(기본 public) | `["t",…]` |
 | `describe`·`ddl` | conn, schema, table(`스키마.테이블` 꼴도) | ResultSet · CREATE 글 |
@@ -63,16 +63,49 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 | `redis_pattern_keys` | conn, pattern | `{keys, truncated}`(R42, 100,000개까지) |
 | `redis_unlink` | conn, keys, confirm, confirm_prod | `{rows}`(지운 수) |
 | `source_children` | conn, path(기본 맨 위 "") | `[{name, path, info, has_children, openable, warn}]`(R60~R68) |
-| `source_open` | conn, path | ResultSet(트리 Enter 미리 보기, Loki 100줄·나머지 50행) |
+| `source_open` | conn, path, limit(0 이면 Loki 100줄·나머지 50행, 상한 1,000) | ResultSet(트리 Enter 미리 보기) |
 | `source_run` | conn, text, since_ns, until_ns, limit(기본 1,000), direction(Loki `forward`·`backward`), force | ResultSet. aws 접속은 code 2 |
 | `health` | conn(모든 종류) | `{ok, latency_ms, version, metrics:[{name,value,warn}], summary, err}`(R64.2) |
-| `flows` | names(비면 모두), prod | `[{flow, boxes:[{stage, name, metrics, warn, idle, err, note, conn}]}]`(R69) |
+| `flows` | names(비면 모두), prod | `[{flow, boxes:[{stage, name, metrics, warn, idle, err, note, conn}], opens?:[{path?, sql?}]}]`(R69). opens[i] 는 boxes[i] 상세를 여는 길이다: path 는 `source_open` 길, sql 은 아웃박스·종류 줄 상세 읽기 문장(`run` 으로 보냄). 화면이 원격에서도 flows.json 없이 연다 |
+| `outbox_exhausted` | | `[{flow, conn, exhausted}]`(R64 카드). 재시도 열이 있는 아웃박스만, 세지 못하면 -1. AWS 를 부르지 않는다 |
 | `board_list` | | `[{name, title, panels, error?}]` |
-| `board_run` | name, prod | `{title, error?, panels:[{title, conn, flow, view, prod, value?, warn, result?, boxes?, error?, note?}]}`(R70) |
+| `board_run` | name, prod | `{title, error?, every_secs?, panels:[{title, conn, flow, view, prod, value?, warn, result?, boxes?, error?, note?, query?, since?}]}`(R70). every_secs 는 refresh 간격(없으면 60초), query·since 는 Enter 로 쿼리 탭에 열 패널 질의다 |
+| `decrypt` | conn(모든 종류), cells | `{values:[글\|null], failed}`(R37). 암호문 꼴(`<32 hex>^\|^<hex>`)이 아니거나 풀지 못한 칸은 null 이고 failed 는 꼴인데 못 푼 수다. 그룹이 없거나 `.env`에 키가 없으면 code 2 |
+| `export_start` | conn, sql | `{export, note?}`(R33.1, 아래 「전체 내보내기」) |
+| `export_read` | export | `{data, done, bytes, rows}`. data 는 CSV 바이트의 base64 |
+| `export_cancel` | export | `{canceled}` |
+| `conn_get` | name | `{name, group, kind, host, port, db, user, url, auth, region, profile, workgroup, output, sslmode, has_password}`(db 전용 접속만, 비밀번호 없음) |
+| `conn_test` | name 또는 conn(conn_get 칸 + password), old_name | `{version, warning}`(R59.2). 실패는 code 1 `접속 실패: …` |
+| `conn_save` | old_name(비면 더하기), conn | `{conn:ConnSummary, warning, env_error}`(R59.2·R59.3) |
+| `conn_delete` | name | `{}` |
+| `conn_folder` | names, folder(비면 그룹으로) | `{}`(R66.2) |
+| `read_query` | conn, sql(문장 하나), limit(0 이면 1,000) | ResultSet. `db mcp` 의 query 다. 버리는 연결의 READ ONLY 트랜잭션(30초)에서 돌고, 쓰기·여러 문장·부수 효과 함수는 접속 전에 code 3 `read_only` 다 |
 
 저장소 op 의 prod 는 화면처럼 읽기를 막지 않는다. `flows`·`board_run` 은 `prod:false` 면 prod 접속을 묻지 않고 그 자리에 note `--prod 로 확인`을 둔다. 저장소 접속은 serve 안에서 접속마다 한 번 열어 다시 쓴다.
 
 ResultSet 은 `{cols, types?, rows, text, truncated, elapsed_ms, in_tx?, note?, origin?}`다. NULL 칸은 `"NULL"`, 64KiB 넘는 칸은 `…(N바이트)`로 잘린다. origin 은 편집기 결과가 한 테이블에서 왔고 PK 열이 모두 있을 때만 있다(`{table:{schema,table}, pk, cols, always}`, cols[i] 는 결과 i 열의 테이블 열 이름이고 식·생성 열은 빈 글). 같은 열이 두 번 나오거나 시스템 열이 섞이면 없다.
+
+## 복호화 보기
+
+`decrypt`는 화면이 보이는 칸을 보내면 serve 가 그 접속 그룹의 `<그룹>_AES_KEY`로 풀어 돌려준다. 키는 serve 밖으로 나가지 않는다. 화면은 `idb_core::statcrypt::looks_encrypted`로 고른 칸만 보내면 줄이 짧다. 푼 값은 화면에만 두고 기록·내보내기·IN 목록·비교는 원래 값을 쓴다(R37). 오류 글은 상태 줄 글 그대로다(`접속 그룹을 몰라 복호화 키를 고를 수 없음`, `APP_AES_KEY 가 .env 에 없음`).
+
+## 전체 내보내기
+
+`export_start`는 문장을 거른 뒤 COPY 를 serve 안의 따로 도는 작업으로 띄우고 id 를 돌려준다. 거절은 code 2 이고 글은 화면 글이다: 문장이 둘 이상이면 `문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)`, 읽기 문장(R6.1)이 아니면 `읽기 문장만 전체 내보내기`, `select`·`with`·`values`·`table`로 시작하지 않으면 `SELECT 문만 전체 내보내기`, `:이름` 파라미터가 있으면 `파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음`이다. 부수 효과 함수(`pg_terminate_backend` 등, `read_query`와 같은 목록)는 READ ONLY 트랜잭션 안에서도 돌아 code 3 `read_only`로 거절하고, 위험 문장(R25)도 내보내지 않는다. prod 잠금(R54)과 상관없이 같다. enc()는 serve 가 바꾸고 알림은 note 다(R52).
+
+COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN READ ONLY` 트랜잭션에서 `COPY (<문장>\n) TO STDOUT WITH (FORMAT csv, HEADER)`로 돈다. 편집기에서 고른 데이터베이스(R27.1)와 `search_path`(R27.2, `SET LOCAL`)를 따르고, 편집기의 열린 트랜잭션을 기다리거나 막지 않는다. 읽기만 하는 트랜잭션이라 prod 도 묻지 않고 잠금(R54)에 걸리지 않는다. 첫 단어 판정이 놓친 CTE 안 쓰기는 서버의 READ ONLY 가 거절한다.
+
+클라이언트는 `done`이 올 때까지 `export_read`를 부른다. 조각은 1MiB 안팎이고 serve 는 조각 4개까지만 쌓는다. 클라이언트가 읽지 않으면 COPY 가 멈추고, 5분 넘게 읽지 않으면 버린 것으로 보고 연결을 닫는다. data 는 CSV 바이트를 글자 경계와 상관없이 자른 것이라 base64 다. bytes 는 지금까지 받은 합, done 일 때 rows 는 COPY 행 수다. done·오류 뒤 그 id 는 사라진다. 파일은 클라이언트가 쓴다(`~/Downloads`, 없으면 임시 폴더, 새 파일만, R14). serve 쪽에 파일을 만들지 않아 원격도 같다.
+
+멈추려면 `export_cancel`을 보낸다. 그 id 의 작업을 멈추고 COPY 연결은 풀에 돌려주지 않고 닫는다. 기다리던 `export_read`를 `cancel`로 끊는 것은 그 기다림만 끊고 내보내기는 이어지며 조각도 잃지 않는다. 접속을 고치거나 지우면(아래) 그 접속의 내보내기도 멈춘다.
+
+## 접속 편집
+
+`conn_get`·`conn_save`·`conn_delete`와 비밀번호가 실린 `conn_test`는 화면이 그 기계의 프로젝트를 쓸 때(`Engine::Local`)만 받는다. `db serve`는 code 3 `remote_conn_edit`(`원격 serve 에서는 접속을 고치지 않음 (그 기계에서 db conn 으로 고침)`)로 거절하고 확인으로도 풀리지 않는다. 까닭은 둘이다. 이 프로토콜은 어느 줄에도 비밀번호를 싣지 않는다는 약속을 지켜야 하고, 원격 프로젝트는 그 기계의 CLI·다른 클라이언트가 같이 쓰는 원본이라 Mac 화면에서 고칠 곳이 아니다. 원격 접속은 그 기계에서 `db conn add|edit|rm`(R59.4)으로 고친다. 클라이언트(`RemoteEngine`)도 이 요청들을 줄로 만들기 전에 같은 사유로 거절해, 사용자가 친 비밀번호가 ssh 너머로 나가지 않는다. 화면은 `--remote`에서 접속 창을 열지 않는다. 저장된 접속을 이름으로 시험하는 `conn_test {name}`와 비밀값이 없는 `conn_folder`만 원격에서도 받는다. 창의 값으로 시험하는 `conn_test {conn}`은 비밀번호 칸이 비어도 원격에서 거절한다. 빈 비밀번호와 저장된 이름, 고른 호스트를 함께 보내 저장된 비밀번호를 다른 호스트로 흘릴 수 있어서다.
+
+`conn_save`는 `db conn add|edit`와 같은 파일 쓰기다(`.dbtui/connections.json`을 쓰고 `.env`에 `PG_<이름>_PASSWORD` 등을 URL 인코딩해 둔다, R59.1). 시험은 하지 않는다. 화면은 `conn_test`를 먼저 부르고 실패하면 `저장할까요? y/N`을 묻는다(R59.2). 이름은 영숫자·`-`·`_`만, DataGrip 접속은 `DataGrip 접속은 DataGrip 에서 고침`으로 code 2 다. 고칠 때 비밀번호가 비면 그대로 두고, 이름이 바뀌면 `.env` 키를 옮긴다. `.env`를 고치지 못하면 접속은 저장된 채 env_error 에 `connection saved but .env was not updated: …`가 온다. URL 붙여 넣기는 화면이 `idb_core::connstore::parse_conn_url`·`parse_http_url`로 칸을 채운다. 평문·AWS 밖 서명 경고는 warning 이다.
+
+저장·삭제·폴더 옮기기 뒤 엔진은 접속 파일을 다시 읽어 `project`가 바로 바뀐다. 고치거나 지운 접속의 세션·풀·Redis·저장소 연결과 내보내기는 닫는다(R59.3, 열린 트랜잭션은 서버가 되돌린다). 파일의 DB 를 고쳤으면 `switch_db`로 고른 데이터베이스를 풀고, 그대로면 지킨다. 폴더만 옮기면 연결을 닫지 않는다(R66.3). 오류 글에서는 받은 비밀번호와 프로젝트의 모든 비밀번호·AES 키를 지운다.
 
 ## 결과 표 편집
 

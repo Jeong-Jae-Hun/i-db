@@ -10,6 +10,8 @@ idb-sources.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+# export_read 조각(CSV 바이트)을 줄 JSON 에 싣는다
+base64 = "0.22"
 # serve: op 처리기 패닉을 응답으로 바꾼다
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # process: 원격 ssh 자식 프로세스, io-std: serve 의 표준 입출력
