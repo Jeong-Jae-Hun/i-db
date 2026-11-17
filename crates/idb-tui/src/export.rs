@@ -284,11 +284,7 @@ impl App {
             self.status = "열 목록을 읽는 중 — 잠시 뒤 다시 I".into();
             return;
         };
-        let base = if self.files.is_some() {
-            format!("{}/", self.dir)
-        } else {
-            String::new()
-        };
+        let base = if !self.remote { format!("{}/", self.dir) } else { String::new() };
         let table = TableRef { schema, table: name };
         self.prompt("CSV 경로: ", &base, move |a, path| {
             a.csv_preview(conn, table, cols, path.trim().to_string())

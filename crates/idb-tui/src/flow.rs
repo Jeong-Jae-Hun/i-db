@@ -551,7 +551,7 @@ impl App {
         let conf = self.flow_conf(flow);
         if matches!(b.stage.as_str(), "outbox" | STAGE_TYPE) {
             let Some(o) = conf.as_ref().and_then(|f| f.outbox.clone()) else {
-                self.status = if self.files.is_none() {
+                self.status = if self.remote {
                     "원격 접속에서는 아웃박스 상세를 열지 않음".into()
                 } else {
                     format!("열 상세가 없음: {}", printable(&b.name, false))
@@ -628,7 +628,9 @@ impl App {
 
     /// 로컬 프로젝트의 flows.json 에서 이름이 name 인 흐름 설정이다. 원격(파일 없음)·없음·깨짐이면 None 이다.
     fn flow_conf(&self, name: &str) -> Option<Flow> {
-        self.files.as_ref()?;
+        if self.remote {
+            return None;
+        }
         let data = std::fs::read(std::path::Path::new(&self.dir).join(idb_core::flows::FILE)).ok()?;
         let list: Vec<Flow> = serde_json::from_slice::<Option<Vec<Flow>>>(&data).ok()??;
         list.into_iter().find(|f| f.name == name)

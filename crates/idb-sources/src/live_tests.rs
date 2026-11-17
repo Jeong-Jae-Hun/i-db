@@ -675,7 +675,8 @@ async fn 연결된_곳은_이름_규칙_타입_인덱스로_후보를_고르고_
     assert_eq!(n, 2);
     let start = Instant::now();
     let err = pg.count_one("select count(*) from (select pg_sleep(5)) s").await.unwrap_err();
-    assert!(err.is_statement_timeout() && start.elapsed() < Duration::from_secs(4), "{err}");
+    // 시간은 넉넉히 본다: 시험을 함께 돌리면 2초 제한이 몇백 ms 늦게 끊길 수 있다. 제한이 없으면 5초 넘게 걸린다
+    assert!(err.is_statement_timeout() && start.elapsed() < Duration::from_millis(4900), "{err}");
     let err = pg
         .count_one("with x as (insert into rs_lnk.lnk_members values (9) returning 1) select count(*) from x")
         .await

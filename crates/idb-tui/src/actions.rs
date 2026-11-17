@@ -108,6 +108,7 @@ impl App {
 
     pub(crate) fn handle(&mut self, id: u64, p: Pend, res: Result<Value, EngineError>) {
         match p {
+            Pend::File(job) => self.file_done(*job, res),
             Pend::Schemas { conn, node } => match res.and_then(decode::<Vec<String>>) {
                 Ok(list) => {
                     let kids = list
@@ -669,9 +670,7 @@ impl App {
     }
 
     pub(crate) fn refresh_node(&mut self, n: usize) {
-        if let Some(f) = &mut self.files {
-            f.reload();
-        }
+        self.reload_files();
         let node = self.tree.node(n).clone();
         // 접속 줄 r 은 자동완성 목록도 다시 읽는다(R8.1)
         let target = match &node.kind {

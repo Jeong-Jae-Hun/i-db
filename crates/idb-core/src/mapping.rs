@@ -113,6 +113,8 @@ pub fn add_mapping(project: &Path, rel: &str, uuid: &str) -> io::Result<()> {
     if out == text {
         return Ok(());
     }
+    // 바꾼 글이 XML 로 읽히지 않으면 다음 프로젝트 읽기가 깨지므로 바꿔 끼우지 않는다
+    roxmltree::Document::parse(&out).map_err(|e| io::Error::other(format!("{}: new mapping is not valid XML: {e}", file.display())))?;
     atomicfile::write(&file, ".data_source_mapping-*.xml", out.as_bytes(), perm)
 }
 
@@ -369,5 +371,15 @@ mod tests {
             format!("queries/a/b-conflict-{ts}.sql")
         );
         assert!(add_mapping(dir.path(), "../x.sql", "u").is_err());
+    }
+
+    #[test]
+    fn 읽히지_않는_XML_이_되는_매핑은_쓰지_않는다() {
+        let dir = tempfile::tempdir().unwrap();
+        add_mapping(dir.path(), "queries/a.sql", "u1").unwrap();
+        let file = dir.path().join(".idea/data_source_mapping.xml");
+        let before = fs::read_to_string(&file).unwrap();
+        assert!(add_mapping(dir.path(), "queries/a\u{1}.sql", "u1").is_err());
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
     }
 }

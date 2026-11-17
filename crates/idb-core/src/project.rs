@@ -237,6 +237,7 @@ pub fn query_unescape(s: &str) -> Option<String> {
 
 // ─── 프로젝트 ───
 
+#[derive(Clone)]
 pub struct Project {
     pub dir: PathBuf,
     pub conns: Vec<Conn>,

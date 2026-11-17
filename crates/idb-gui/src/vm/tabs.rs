@@ -5,11 +5,36 @@ use std::path::PathBuf;
 
 use idb_core::sqlsafe::statement_at;
 
+/// 탭에 붙은 파일이다. 프로젝트 `queries/` 파일은 엔진 op 로만 읽고 쓰고(로컬·원격 같다), ⌘O 로 고른 이 Mac 의
+/// 파일만 직접 쓴다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TabFile {
+    /// 프로젝트 상대 경로(`queries/app/a.sql`)
+    Query(String),
+    Local(PathBuf),
+}
+
+impl TabFile {
+    pub fn query(&self) -> Option<&str> {
+        match self {
+            TabFile::Query(r) => Some(r),
+            TabFile::Local(_) => None,
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self {
+            TabFile::Query(r) => r.clone(),
+            TabFile::Local(p) => p.display().to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tab {
     pub id: u64,
     pub conn: Option<String>,
-    pub path: Option<PathBuf>,
+    pub file: Option<TabFile>,
     pub dirty: bool,
     /// 파일이 없는 탭의 이름(테이블 보기·Redis). 없으면 `쿼리 N`
     pub name: Option<String>,
@@ -18,8 +43,9 @@ pub struct Tab {
 
 impl Tab {
     pub fn title(&self) -> String {
-        let base = match &self.path {
-            Some(p) => p
+        let base = match &self.file {
+            Some(TabFile::Query(r)) => r.rsplit('/').next().unwrap_or(r).to_string(),
+            Some(TabFile::Local(p)) => p
                 .file_name()
                 .map_or_else(|| p.display().to_string(), |f| f.to_string_lossy().into_owned()),
             None => self.name.clone().unwrap_or_else(|| format!("쿼리 {}", self.n)),
@@ -37,20 +63,20 @@ pub struct Tabs {
 
 impl Tabs {
     /// 새 탭을 열고 고른다. 그 id 를 돌려준다.
-    pub fn open(&mut self, conn: Option<String>, path: Option<PathBuf>) -> u64 {
-        self.open_tab(conn, path, None)
+    pub fn open(&mut self, conn: Option<String>, file: Option<TabFile>) -> u64 {
+        self.open_tab(conn, file, None)
     }
 
     pub fn open_named(&mut self, conn: Option<String>, name: String) -> u64 {
         self.open_tab(conn, None, Some(name))
     }
 
-    fn open_tab(&mut self, conn: Option<String>, path: Option<PathBuf>, name: Option<String>) -> u64 {
+    fn open_tab(&mut self, conn: Option<String>, file: Option<TabFile>, name: Option<String>) -> u64 {
         self.next += 1;
         self.tabs.push(Tab {
             id: self.next,
             conn,
-            path,
+            file,
             dirty: false,
             name,
             n: self.next,
@@ -116,13 +142,15 @@ mod tests {
     fn 탭_제목은_파일_이름이고_고치면_별표가_붙는다() {
         let mut t = Tabs::default();
         t.open(Some("a".into()), None);
-        t.open(None, Some("/q/report.sql".into()));
+        t.open(None, Some(TabFile::Local("/q/report.sql".into())));
         assert_eq!(t.tabs[0].title(), "쿼리 1");
         assert_eq!(t.active().unwrap().title(), "report.sql");
         t.active_mut().unwrap().dirty = true;
         assert_eq!(t.active().unwrap().title(), "report.sql *");
         t.open_named(Some("a".into()), "public.users".into());
         assert_eq!(t.active().unwrap().title(), "public.users");
+        t.open(None, Some(TabFile::Query("queries/app/a.sql".into())));
+        assert_eq!(t.active().unwrap().title(), "a.sql");
     }
 
     #[test]

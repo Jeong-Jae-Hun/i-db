@@ -123,7 +123,9 @@ impl App {
 
     /// 로컬 보드 파일의 refresh 간격과 패널 질의다. 원격·없음·깨짐이면 None 이다.
     fn board_conf(&self, name: &str) -> Option<(Duration, Vec<PanelConf>)> {
-        self.files.as_ref()?;
+        if self.remote {
+            return None;
+        }
         let data = std::fs::read(std::path::Path::new(&self.dir).join(BOARD_DIR).join(format!("{name}.json"))).ok()?;
         let c: BoardConf = serde_json::from_slice::<Option<BoardConf>>(&data).ok()?.unwrap_or_default();
         let every = match parse_day_duration(&c.refresh) {
@@ -239,7 +241,7 @@ impl App {
             return;
         }
         let Some(conf) = conf.filter(|c| c.conn == p.conn && !c.query.is_empty()) else {
-            self.status = if self.files.is_none() {
+            self.status = if self.remote {
                 "원격 접속에서는 패널 질의를 열지 않음".into()
             } else {
                 "패널 질의를 읽지 못함 (r 로 보드 파일을 다시 읽기)".into()

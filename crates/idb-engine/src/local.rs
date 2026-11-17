@@ -104,6 +104,13 @@ struct ExportRx {
     bytes: u64,
 }
 
+/// 파일 일을 blocking 풀에서 돌린다.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, EngineError> + Send + 'static) -> Result<T, EngineError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|e| Err(EngineError::run(format!("쿼리 파일 작업이 멈춤: {e}"))))
+}
+
 impl LocalEngine {
     pub fn new(proj: Project, cli: Option<CliHandler>) -> LocalEngine {
         LocalEngine {
@@ -597,6 +604,55 @@ impl LocalEngine {
                 self.conn_folder(&names, &folder).await?;
                 json(serde_json::json!({}))
             }
+            // 쿼리 파일·즐겨찾기는 사용자 자신의 프로젝트 파일이라 serve 에서도 쓰기를 받는다(경계는 queries.rs).
+            // 잠금을 기다리는 파일 일이라 blocking 풀에서 돌려, 부른 쪽의 시간 제한이 이 일을 기다리지 않게 한다
+            Request::QueryList => {
+                let p = self.proj();
+                json(blocking(move || Ok(crate::queries::list(&p))).await?)
+            }
+            Request::QueryRead { path } => {
+                let p = self.proj();
+                json(blocking(move || crate::queries::read(&p, &path)).await?)
+            }
+            Request::QueryWrite {
+                path,
+                content,
+                base_hash,
+                force,
+            } => {
+                let p = self.proj();
+                json(blocking(move || crate::queries::write(&p, &path, &content, &base_hash, force)).await?)
+            }
+            Request::QueryNew { conn, content } => {
+                let p = self.proj();
+                let w = blocking(move || crate::queries::new_file(&p, &conn, &content)).await?;
+                self.remember_mapping(&w);
+                json(w)
+            }
+            Request::QueryConflict { path, content, conn } => {
+                let p = self.proj();
+                let w = blocking(move || crate::queries::conflict_copy(&p, &path, &content, &conn)).await?;
+                self.remember_mapping(&w);
+                json(w)
+            }
+            Request::FavoritesList => {
+                let dir = self.proj().dir.clone();
+                json(blocking(move || crate::queries::favorites(&dir)).await?)
+            }
+            Request::FavoriteAdd {
+                name,
+                conn,
+                sql,
+                overwrite,
+            } => {
+                let dir = self.proj().dir.clone();
+                json(blocking(move || crate::queries::favorite_add(&dir, &name, &conn, &sql, overwrite)).await?)
+            }
+            Request::FavoriteRemove { name } => {
+                let dir = self.proj().dir.clone();
+                blocking(move || crate::queries::favorite_remove(&dir, &name)).await?;
+                json(serde_json::json!({}))
+            }
             Request::ReadQuery { conn, sql, limit } => {
                 let c = self.conn(&conn, Kind::Pg)?;
                 // 접속을 열기 전에 거른다. 놓친 쓰기는 run_read_only_rows 의 READ ONLY 트랜잭션이 막는다
@@ -895,6 +951,16 @@ impl LocalEngine {
     }
 
     /// 접속 파일을 다시 읽어 바꾼다. 진행 중인 요청은 옛 사본으로 끝난다.
+    /// 붙인 매핑을 프로젝트 사본에도 남겨 다음 query_list 가 그 접속으로 보인다.
+    fn remember_mapping(&self, w: &QueryWritten) {
+        if w.uuid.is_empty() || !w.mapping_error.is_empty() {
+            return;
+        }
+        let mut p = (*self.proj()).clone();
+        p.mapping.insert(w.path.clone(), w.uuid.clone());
+        *self.proj.write().unwrap() = Arc::new(p);
+    }
+
     fn reload(&self) -> Result<(), EngineError> {
         let dir = self.proj().dir.clone();
         let p = idb_core::project::load_project(&dir)

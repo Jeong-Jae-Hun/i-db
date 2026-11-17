@@ -80,6 +80,14 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 | `conn_delete` | name | `{}` |
 | `conn_folder` | names, folder(비면 그룹으로) | `{}`(R66.2) |
 | `read_query` | conn, sql(문장 하나), limit(0 이면 1,000) | ResultSet. `db mcp` 의 query 다. 버리는 연결의 READ ONLY 트랜잭션(30초)에서 돌고, 쓰기·여러 문장·부수 효과 함수는 접속 전에 code 3 `read_only` 다 |
+| `query_list` | | `[{path, conn_uuid, conn, mtime, size}]`(아래 「쿼리 파일」). 최근 수정 순, conn 은 매핑된 접속 이름(없으면 빈 글) |
+| `query_read` | path | `{content, hash}`. hash 는 내용의 sha256 hex 다 |
+| `query_write` | path, content, base_hash(비면 없던 파일), force | `{path, hash, conflict, created}`. 지금 해시가 base_hash 와 다르면 쓰지 않고 conflict 와 지금 해시(지워졌으면 빈 글)다 |
+| `query_new` | conn, content | `{path, hash, created, uuid, mapping_error?}`. serve 가 `queries/<그룹>/<접속>-<YYYYMMDD-HHmmss>.sql` 을 정하고 매핑을 붙인다 |
+| `query_conflict` | path, content, conn | query_new 와 같은 답. `<이름>-conflict-<시각>.sql` 사본에 원래 파일의 접속(없으면 conn)을 붙인다(R45.3) |
+| `favorites_list` | | `[{name, conn, sql, saved}]`(R29) |
+| `favorite_add` | name, conn, sql, overwrite | `{saved, exists}`. 같은 이름이 있고 overwrite 가 아니면 쓰지 않고 exists |
+| `favorite_remove` | name | `{}` |
 
 저장소 op 의 prod 는 화면처럼 읽기를 막지 않는다. `flows`·`board_run` 은 `prod:false` 면 prod 접속을 묻지 않고 그 자리에 note `--prod 로 확인`을 둔다. 저장소 접속은 serve 안에서 접속마다 한 번 열어 다시 쓴다.
 
@@ -98,6 +106,20 @@ COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN R
 클라이언트는 `done`이 올 때까지 `export_read`를 부른다. 조각은 1MiB 안팎이고 serve 는 조각 4개까지만 쌓는다. 클라이언트가 읽지 않으면 COPY 가 멈추고, 5분 넘게 읽지 않으면 버린 것으로 보고 연결을 닫는다. data 는 CSV 바이트를 글자 경계와 상관없이 자른 것이라 base64 다. bytes 는 지금까지 받은 합, done 일 때 rows 는 COPY 행 수다. done·오류 뒤 그 id 는 사라진다. 파일은 클라이언트가 쓴다(`~/Downloads`, 없으면 임시 폴더, 새 파일만, R14). serve 쪽에 파일을 만들지 않아 원격도 같다.
 
 멈추려면 `export_cancel`을 보낸다. 그 id 의 작업을 멈추고 COPY 연결은 풀에 돌려주지 않고 닫는다. 기다리던 `export_read`를 `cancel`로 끊는 것은 그 기다림만 끊고 내보내기는 이어지며 조각도 잃지 않는다. 접속을 고치거나 지우면(아래) 그 접속의 내보내기도 멈춘다.
+
+## 쿼리 파일
+
+쿼리 파일(`queries/`, R5·R43·R45)과 즐겨찾기(R29)는 serve 쪽 프로젝트에 있다. 화면은 로컬이든 `--remote`든 이 op 로만 목록을 보고 열고 저장한다. `--remote` 에서 Ctrl+S·자동 저장·첫 실행 저장은 그 기계의 파일을 고친다. DB 쓰기가 아니라 사용자 자신의 쿼리 파일이라 원격에서도 쓰기를 받는다. 대신 경계를 serve 가 지킨다.
+
+- path 는 `queries/` 로 시작하고 `.sql` 로 끝나는 상대 경로만 받는다. 절대 경로, 빈 마디, `.`·`..`, 역슬래시, 제어 문자, U+FFFE·U+FFFF 는 code 2 `쿼리 파일 경로가 아님`이다. 매핑 XML 에 넣을 수 없는 글자라서다. 매핑을 고친 글이 XML 로 읽히지 않으면 매핑 파일을 바꾸지 않는다.
+- 읽기·쓰기 전마다 링크를 따라간 실제 경로가 프로젝트 `queries/` 의 실제 경로 안인지 본다. 밖이면 code 2 `쿼리 파일의 실제 경로가 queries 밖`이고, 쓴 뒤에도 한 번 더 본다. `query_list` 는 밖을 가리키는 링크를 빼고 보여 준다.
+- 한 파일은 1MiB 까지다. 읽기는 일반 파일만 받는다.
+- 쓰기는 같은 폴더 임시 파일에 쓰고 rename 한다. 원래 파일의 권한을 따른다.
+- 해시 확인과 쓰기, 새 이름 고르기, 매핑 고치기는 `queries/` 폴더의 flock 하나로 줄 세운다. 같은 serve 의 동시 요청도 프로세스끼리도 이것을 기다린다. 10초 안에 못 얻으면 code 1 이고, 기다리는 일은 serve 의 다른 요청을 막지 않는다. 새 파일은 create_new 로 먼저 잡아 같은 이름을 둘이 쓰지 않는다.
+- 즐겨찾기는 `.dbtui/favorites.json` 이다. `.dbtui` 나 그 파일이 링크이거나 실제 경로가 프로젝트 밖이면 읽지도 쓰지도 않는다(code 2). SQL 한 개는 256KiB, 수는 1,000개, 파일은 4MiB 까지이고 넘으면 code 2 다. 파일 크기는 실제로 쓸 JSON 바이트로 재며, 넘으면 원본을 그대로 둔다. 목록도 1,000개까지만 돌려준다.
+- 프로젝트가 디스크에서 읽기 전용이거나 권한이 없으면 code 1 `쿼리 파일을 쓰지 못함: …`이다. 화면은 이 글을 상태 줄에 띄우고 편집 내용은 버리지 않는다.
+
+`query_write` 는 화면이 마지막으로 읽거나 쓴 내용의 해시를 base_hash 로 보낸다. 그사이 다른 곳(그 기계의 편집기, 다른 클라이언트)이 파일을 바꿨으면 쓰지 않고 conflict 를 돌려준다. 자동 저장은 여기서 멈추고 `query_conflict` 로 사본을 남긴다. Ctrl+S 는 force 로 덮는다. 내용이 이미 같으면 쓰지 않는다. `query_new`·`query_conflict` 가 붙인 매핑은 serve 의 `project`·`query_list` 에 바로 보인다. 매핑을 쓰지 못하면 파일은 남기고 mapping_error 에 `saved <path> but mapping failed: …`가 온다.
 
 ## 접속 편집
 

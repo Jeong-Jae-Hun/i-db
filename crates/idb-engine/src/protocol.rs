@@ -390,6 +390,46 @@ pub enum Request {
         #[serde(default)]
         folder: String,
     },
+    // ─── 쿼리 파일·즐겨찾기(프로젝트 파일, 원격이면 serve 쪽) ───
+    /// queries/ 아래 .sql 목록(최근 수정 순)과 붙은 접속
+    QueryList,
+    QueryRead {
+        path: String,
+    },
+    /// base_hash 가 지금 내용의 해시와 다르면 쓰지 않고 conflict 다. force 면 그래도 덮는다(Ctrl+S)
+    QueryWrite {
+        path: String,
+        content: String,
+        #[serde(default)]
+        base_hash: String,
+        #[serde(default)]
+        force: bool,
+    },
+    /// serve 가 `queries/<그룹>/<접속>-<시각>.sql` 을 잡아 쓰고 매핑을 붙인다(R45.1)
+    QueryNew {
+        conn: String,
+        content: String,
+    },
+    /// path 옆 충돌 사본(R45.3). 원래 파일의 접속(없으면 conn)을 붙인다
+    QueryConflict {
+        path: String,
+        content: String,
+        #[serde(default)]
+        conn: String,
+    },
+    FavoritesList,
+    /// overwrite 가 아니면 같은 이름이 있을 때 쓰지 않고 exists 다
+    FavoriteAdd {
+        name: String,
+        #[serde(default)]
+        conn: String,
+        sql: String,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    FavoriteRemove {
+        name: String,
+    },
     /// 사람이 확인하지 않는 읽기(MCP query). 문장 하나를 버리는 연결의 READ ONLY 트랜잭션에서 limit 행까지 돌린다.
     /// 쓰기·여러 문장·부수 효과 함수는 접속 전에 거절한다(code 3 read_only)
     ReadQuery {
@@ -790,6 +830,48 @@ pub struct PanelOut {
     pub query: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub since: String,
+}
+
+/// query_list 의 한 줄이다. mtime 은 유닉스 초, conn 은 붙은 접속 이름(없으면 빈 글)이다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryFile {
+    pub path: String,
+    #[serde(default)]
+    pub conn_uuid: String,
+    #[serde(default)]
+    pub conn: String,
+    pub mtime: i64,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryText {
+    pub content: String,
+    pub hash: String,
+}
+
+/// query_write·query_new·query_conflict 의 답이다. conflict 면 쓰지 않았고 hash 는 지금 내용의 해시(지워졌으면 빈 글)다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueryWritten {
+    pub path: String,
+    pub hash: String,
+    #[serde(default)]
+    pub conflict: bool,
+    /// 없던 파일을 만들었다(지워진 파일을 Ctrl+S 로 다시 만든 것 포함)
+    #[serde(default)]
+    pub created: bool,
+    /// 매핑을 붙이지 못한 까닭(파일은 남는다)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mapping_error: String,
+    /// 붙인 접속 uuid
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uuid: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FavoriteSaved {
+    pub saved: bool,
+    pub exists: bool,
 }
 
 /// decrypt 의 답이다. values[i] 는 cells[i] 를 푼 값이고, 암호문 꼴이 아니거나 풀지 못한 칸은 null(원래 값 그대로)이다.
