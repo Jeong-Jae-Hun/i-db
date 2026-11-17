@@ -163,6 +163,23 @@ pub fn ttl_label(secs: i64) -> String {
     }
 }
 
+/// 늦게 온 값 읽기 답을 받을지다. 그사이 다른 키를 골랐거나 다시 읽었으면 버린다.
+pub fn accept_response(current_gen: u64, selected: Option<&str>, resp_gen: u64, resp_key: &str) -> bool {
+    current_gen == resp_gen && selected == Some(resp_key)
+}
+
+/// 편집을 보낼 키가 사용자가 확인한 키(pinned)이고 지금 읽어 둔 값의 키인지 본다.
+pub fn check_target(raw_key: Option<&str>, selected: Option<&str>, pinned: &str) -> Result<(), String> {
+    if raw_key == Some(pinned) && selected == Some(pinned) {
+        Ok(())
+    } else {
+        Err("고른 키가 바뀌어 보내지 않는다 (키를 다시 고른다)".into())
+    }
+}
+
+/// R42.1: 맞는 키가 상한(100,000)을 넘으면 지우지 않는다.
+pub const UNLINK_OVER_LIMIT: &str = "키가 100,000개를 넘어 지우지 않음 (패턴을 좁히세요)";
+
 /// 패턴 일괄 삭제(R42) 확인 글이다.
 pub fn unlink_question(pattern: &str, n: usize, truncated: bool) -> String {
     if truncated {
@@ -272,6 +289,23 @@ mod tests {
         assert_eq!(build(&raw("string"), Action::Ttl("".into())).unwrap().op, "ttl");
         assert!(build(&raw("string"), Action::Rename(" ".into())).is_err());
         assert_eq!(build(&raw("hash"), Action::DeleteKey).unwrap().op, "delete_key");
+    }
+
+    #[test]
+    fn 늦은_답과_바뀐_키는_받지도_보내지도_않는다() {
+        assert!(accept_response(2, Some("b"), 2, "b"));
+        assert!(!accept_response(2, Some("b"), 1, "a"), "A 의 늦은 답");
+        assert!(!accept_response(2, Some("b"), 2, "a"));
+        assert!(check_target(Some("b"), Some("b"), "b").is_ok());
+        assert!(check_target(Some("a"), Some("b"), "b").is_err(), "값은 A 인데 B 를 고른 상태");
+        assert!(check_target(Some("a"), Some("a"), "b").is_err(), "확인한 키와 다르다");
+        assert!(check_target(None, Some("a"), "a").is_err());
+    }
+
+    #[test]
+    fn 상한을_넘는_패턴_삭제_글은_TUI_와_같다() {
+        // R42.1: 넘으면 묻지 않고 이 글만 보인다(crates/idb-tui/src/ops.rs 와 같은 글)
+        assert_eq!(UNLINK_OVER_LIMIT, "키가 100,000개를 넘어 지우지 않음 (패턴을 좁히세요)");
     }
 
     #[test]

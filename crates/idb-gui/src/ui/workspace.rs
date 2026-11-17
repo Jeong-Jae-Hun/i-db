@@ -2815,8 +2815,9 @@ mod tests {
         .unwrap();
         cx.update(|window, cx| {
             view.update(cx, |v, cx| {
+                v.selected = Some("k".into());
                 v.raw = Some(raw);
-                v.apply_edit(crate::vm::redisedit::Action::SetString("x".into()), window, cx);
+                assert!(!v.apply_edit("k", crate::vm::redisedit::Action::SetString("x".into()), window, cx));
             })
         });
         draw(cx);
@@ -2833,6 +2834,45 @@ mod tests {
         });
         draw(cx);
         cx.update(|_, cx| assert!(ws.read(cx).status.0.contains("패턴을 좁힌다"), "{:?}", ws.read(cx).status));
+    }
+
+    /// 리뷰: A 를 고르고 곧 B 를 고르면 A 의 늦은 답이 B 자리에 앉아, B 로 보이는 창에서 A 를 지웠다.
+    #[gpui::test]
+    fn Redis_늦은_답은_버리고_다른_키_편집은_보내지_않는다(cx: &mut TestAppContext) {
+        let dir = redis_project();
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("cache-local".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        let view = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            match w.tabs.active().and_then(|t| w.bodies.get(&t.id)) {
+                Some(Body::Redis { view }) => view.clone(),
+                _ => panic!("Redis 탭이 아니다"),
+            }
+        });
+        let raw = |k: &str| -> idb_engine::RawValue {
+            serde_json::from_value(serde_json::json!({"key": k, "type": "string", "ttl_secs": -1, "string": "v"})).unwrap()
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.open_key("a".into(), window, cx);
+                v.open_key("b".into(), window, cx);
+                // A 를 고를 때의 세대(1)로 A 의 답이 늦게 온다
+                v.on_raw(1, raw("a"), cx);
+                assert!(v.raw.is_none(), "늦은 A 답은 버린다");
+                v.on_raw(2, raw("b"), cx);
+                assert_eq!(v.raw.as_ref().map(|r| r.key.as_str()), Some("b"));
+                // 창은 a 로 열렸는데 그사이 b 를 골랐다면 보내지 않는다
+                assert!(!v.apply_edit("a", crate::vm::redisedit::Action::DeleteKey, window, cx));
+                assert!(
+                    v.apply_edit("b", crate::vm::redisedit::Action::DeleteKey, window, cx),
+                    "확인한 키는 보낸다"
+                );
+            })
+        });
     }
 
     fn edited_result(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<ResultsView> {

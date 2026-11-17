@@ -28,7 +28,9 @@ pub struct RedisView {
     command: Entity<InputState>,
     keys: Vec<String>,
     more: bool,
-    selected: Option<String>,
+    pub(super) selected: Option<String>,
+    /// 키를 고를 때마다 오른다. 값 읽기 답은 이 값과 키가 맞을 때만 받는다
+    load_gen: u64,
     value: Option<Entity<ResultsView>>,
     /// 고른 키의 원값(편집에 쓴다)
     pub(super) raw: Option<RawValue>,
@@ -84,6 +86,7 @@ impl RedisView {
             selected: None,
             value: None,
             raw: None,
+            load_gen: 0,
             _subs: subs,
         };
         // 작업 공간의 select_conn 안에서 만들어진다. 지금 scan 하면 작업 공간을 두 번 빌려 패닉한다
@@ -120,10 +123,14 @@ impl RedisView {
         });
     }
 
-    fn open_key(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_key(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(key.clone());
+        self.load_gen += 1;
+        self.raw = None;
+        let req_gen = self.load_gen;
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
+        let k2 = key.clone();
         self.with_ws(window, cx, move |ws, window, cx| {
             ws.guarded(
                 "값 읽기",
@@ -132,7 +139,11 @@ impl RedisView {
                     async move { e.redis_value(&conn, &key).await }
                 }),
                 Rc::new(move |_: &mut Workspace, rs: ResultSet, window, cx| {
-                    let _ = this.update(cx, |v, cx| v.show(rs, window, cx));
+                    let _ = this.update(cx, |v, cx| {
+                        if redisedit::accept_response(v.load_gen, v.selected.as_deref(), req_gen, &k2) {
+                            v.show(rs, window, cx)
+                        }
+                    });
                 }),
                 Confirms::default(),
                 window,
@@ -148,6 +159,7 @@ impl RedisView {
         let Some(key) = self.selected.clone() else { return };
         let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
         self.raw = None;
+        let req_gen = self.load_gen;
         self.with_ws(window, cx, move |ws, window, cx| {
             ws.guarded(
                 "값 읽기",
@@ -156,10 +168,7 @@ impl RedisView {
                     async move { e.redis_raw_value(&conn, &key).await }
                 }),
                 Rc::new(move |_: &mut Workspace, raw: RawValue, _, cx| {
-                    let _ = this.update(cx, |v, cx| {
-                        v.raw = Some(raw);
-                        cx.notify();
-                    });
+                    let _ = this.update(cx, |v, cx| v.on_raw(req_gen, raw, cx));
                 }),
                 Confirms::default(),
                 window,
@@ -168,19 +177,34 @@ impl RedisView {
         });
     }
 
+    /// 창을 여는 지금 보이는 값의 키다(편집 창이 이 키에 묶인다).
+    fn raw_key(&self) -> String {
+        self.raw.as_ref().map(|r| r.key.clone()).unwrap_or_default()
+    }
+
+    /// 원값 답을 받는다. 그사이 다른 키를 골랐으면 버린다(늦게 온 A 가 B 자리에 앉지 않게).
+    pub(super) fn on_raw(&mut self, resp_gen: u64, raw: RawValue, cx: &mut Context<Self>) {
+        if redisedit::accept_response(self.load_gen, self.selected.as_deref(), resp_gen, &raw.key) {
+            self.raw = Some(raw);
+            cx.notify();
+        }
+    }
+
     // ─── 편집(R34)·일괄 삭제(R42) ───
 
     /// 편집 하나를 보낸다. prod·위험이면 엔진이 거절하고 확인 창을 거쳐 다시 보낸다.
-    pub(super) fn apply_edit(&mut self, action: redisedit::Action, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(raw) = &self.raw else {
-            self.status("값을 아직 읽지 못했다", true, cx);
-            return;
-        };
+    /// key 는 사용자가 창에서 본(확인한) 키다. 지금 읽어 둔 값과 고른 키가 그 키일 때만 보낸다.
+    pub(super) fn apply_edit(&mut self, key: &str, action: redisedit::Action, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Err(msg) = redisedit::check_target(self.raw.as_ref().map(|r| r.key.as_str()), self.selected.as_deref(), key) {
+            self.status(&msg, true, cx);
+            return false;
+        }
+        let Some(raw) = &self.raw else { return false };
         let edit = match redisedit::build(raw, action) {
             Ok(e) => e,
             Err(msg) => {
                 self.status(&msg, true, cx);
-                return;
+                return false;
             }
         };
         let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
@@ -221,6 +245,7 @@ impl RedisView {
                 cx,
             )
         });
+        true
     }
 
     fn status(&self, msg: &str, error: bool, cx: &mut Context<Self>) {
@@ -233,6 +258,7 @@ impl RedisView {
     /// 입력칸 몇 개를 받는 창을 띄우고 확인하면 동작으로 바꿔 보낸다.
     fn open_form(
         &mut self,
+        key: String,
         title: &str,
         fields: Vec<(&'static str, String)>,
         make: Rc<dyn Fn(Vec<String>) -> redisedit::Action>,
@@ -251,7 +277,7 @@ impl RedisView {
             {
                 i.update(cx, |i, cx| i.focus(window, cx));
             }
-            let mut d = dialog.title(title.clone()).w(px(480.));
+            let mut d = dialog.title(format!("{title} — {key}")).w(px(480.));
             for (label, i) in &inputs {
                 d = d.child(
                     h_flex()
@@ -261,11 +287,11 @@ impl RedisView {
                         .child(div().flex_1().child(Input::new(i))),
                 );
             }
-            let (this, inputs, make) = (this.clone(), inputs.clone(), make.clone());
+            let (this, inputs, make, key) = (this.clone(), inputs.clone(), make.clone(), key.clone());
             let ok = Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
                 let vals: Vec<String> = inputs.iter().map(|(_, i)| i.read(cx).value().to_string()).collect();
                 let action = make(vals);
-                let _ = this.update(cx, |v, cx| v.apply_edit(action, window, cx));
+                let _ = this.update(cx, |v, cx| v.apply_edit(&key, action, window, cx));
             });
             let ok2 = ok.clone();
             d.child(
@@ -298,10 +324,13 @@ impl RedisView {
     }
 
     fn confirm_delete_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.selected.clone() else { return };
+        // 창에 보이는 키 = 읽어 둔 값의 키 = 보낼 키
+        let Some(key) = self.raw.as_ref().map(|r| r.key.clone()) else {
+            return;
+        };
         let this = cx.entity().downgrade();
         window.open_alert_dialog(cx, move |alert, _, _| {
-            let this = this.clone();
+            let (this, key2) = (this.clone(), key.clone());
             alert
                 .title("키 지우기")
                 .description(format!("{key} 를 지울까?"))
@@ -309,7 +338,8 @@ impl RedisView {
                 .ok_variant(gpui_component::button::ButtonVariant::Danger)
                 .show_cancel(true)
                 .on_ok(move |_, window, cx| {
-                    let _ = this.update(cx, |v, cx| v.apply_edit(redisedit::Action::DeleteKey, window, cx));
+                    let k = key2.clone();
+                    let _ = this.update(cx, |v, cx| v.apply_edit(&k, redisedit::Action::DeleteKey, window, cx));
                     true
                 })
         });
@@ -334,6 +364,10 @@ impl RedisView {
                 Rc::new(move |ws: &mut Workspace, pk: PatternKeys, window, cx| {
                     if pk.keys.is_empty() {
                         ws.set_status(format!("{pat} 에 맞는 키가 없다"), false, cx);
+                        return;
+                    }
+                    if pk.truncated {
+                        ws.set_status(redisedit::UNLINK_OVER_LIMIT, true, cx);
                         return;
                     }
                     let q = redisedit::unlink_question(&pat, pk.keys.len(), pk.truncated);
@@ -411,6 +445,7 @@ impl RedisView {
         bar = match typ.as_str() {
             "string" => bar.child(btn("r-edit", "값 고치기").on_click(cx.listener(move |v, _, w, cx| {
                 v.open_form(
+                    v.raw_key(),
                     "값 고치기",
                     vec![("값", cur.clone())],
                     Rc::new(|x| A::SetString(x[0].clone())),
@@ -421,6 +456,7 @@ impl RedisView {
             "hash" => bar
                 .child(btn("r-hset", "필드 설정").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "필드 설정",
                         vec![("필드", String::new()), ("값", String::new())],
                         Rc::new(|x| A::HashSet {
@@ -433,6 +469,7 @@ impl RedisView {
                 })))
                 .child(btn("r-hdel", "필드 지우기").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "필드 지우기",
                         vec![("필드", String::new())],
                         Rc::new(|x| A::HashDel(x[0].clone())),
@@ -443,6 +480,7 @@ impl RedisView {
             "list" => bar
                 .child(btn("r-lpush", "끝에 추가").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "끝에 추가",
                         vec![("값", String::new())],
                         Rc::new(|x| A::ListPush(x[0].clone())),
@@ -452,6 +490,7 @@ impl RedisView {
                 })))
                 .child(btn("r-lset", "칸 고치기").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "칸 고치기",
                         vec![("번호(0부터)", String::new()), ("값", String::new())],
                         Rc::new(|x| A::ListSet {
@@ -464,6 +503,7 @@ impl RedisView {
                 })))
                 .child(btn("r-ldel", "칸 지우기").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "칸 지우기",
                         vec![("번호(0부터)", String::new())],
                         Rc::new(|x| A::ListDel(x[0].trim().parse().unwrap_or(usize::MAX))),
@@ -474,6 +514,7 @@ impl RedisView {
             "set" => bar
                 .child(btn("r-sadd", "멤버 추가").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "멤버 추가",
                         vec![("멤버", String::new())],
                         Rc::new(|x| A::SetAdd(x[0].clone())),
@@ -483,6 +524,7 @@ impl RedisView {
                 })))
                 .child(btn("r-srem", "멤버 지우기").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "멤버 지우기",
                         vec![("멤버", String::new())],
                         Rc::new(|x| A::SetDel(x[0].clone())),
@@ -493,6 +535,7 @@ impl RedisView {
             "zset" => bar
                 .child(btn("r-zadd", "점수 설정").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "점수 설정",
                         vec![("멤버", String::new()), ("점수", String::new())],
                         Rc::new(|x| A::ZSet {
@@ -505,6 +548,7 @@ impl RedisView {
                 })))
                 .child(btn("r-zrem", "멤버 지우기").on_click(cx.listener(|v, _, w, cx| {
                     v.open_form(
+                        v.raw_key(),
                         "멤버 지우기",
                         vec![("멤버", String::new())],
                         Rc::new(|x| A::ZDel(x[0].clone())),
@@ -523,6 +567,7 @@ impl RedisView {
         Some(
             bar.child(btn("r-ttl", "TTL").on_click(cx.listener(move |v, _, w, cx| {
                 v.open_form(
+                    v.raw_key(),
                     "TTL (초, 비우면 만료 없음)",
                     vec![("초", ttl.clone())],
                     Rc::new(|x| A::Ttl(x[0].clone())),
@@ -532,6 +577,7 @@ impl RedisView {
             })))
             .child(btn("r-rename", "이름 바꾸기").on_click(cx.listener(move |v, _, w, cx| {
                 v.open_form(
+                    v.raw_key(),
                     "이름 바꾸기",
                     vec![("새 이름", key.clone())],
                     Rc::new(|x| A::Rename(x[0].clone())),
