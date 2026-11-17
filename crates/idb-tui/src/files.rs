@@ -129,6 +129,13 @@ impl Files {
 
 /// ~/Downloads(없으면 임시 폴더)에 새 파일(0600)로 쓴다(R14.2).
 pub fn export_file(title: &str, ext: &str, body: &[u8]) -> Result<String, String> {
+    let (path, mut f) = create_export(title, ext)?;
+    f.write_all(body).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// 내보내기 파일을 새로 만든다(~/Downloads, 없으면 임시 폴더, 0600, 새 파일만, R14.2·R33.1).
+pub fn create_export(title: &str, ext: &str) -> Result<(String, fs::File), String> {
     let dir = std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join("Downloads"))
         .filter(|d| d.is_dir())
@@ -137,14 +144,13 @@ pub fn export_file(title: &str, ext: &str, body: &[u8]) -> Result<String, String
     let name = format!("db-{safe}-{}.{ext}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
     let path = dir.join(name);
     use std::os::unix::fs::OpenOptionsExt;
-    let mut f = fs::OpenOptions::new()
+    let f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&path)
         .map_err(|e| e.to_string())?;
-    f.write_all(body).map_err(|e| e.to_string())?;
-    Ok(path.display().to_string())
+    Ok((path.display().to_string(), f))
 }
 
 /// 긴 실행 알림(R30). OSC 9 에 SQL·값을 넣지 않는다. stdout 이 터미널일 때만 보낸다.

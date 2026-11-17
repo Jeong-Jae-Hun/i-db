@@ -89,6 +89,8 @@ pub struct Grid {
     pub server: bool,
     json: Option<crate::jsontree::JsonTree>,
     json_raw: bool,
+    /// 복호화 보기(R37): (결과 행, 열) → 푼 값. 화면과 y·Y 복사에만 쓰고 내보내기·IN·편집은 원래 값이다
+    pub dec: Option<std::collections::HashMap<(usize, usize), String>>,
     h: usize,
     /// 원래 PK 열 자리(origin.pk 순서). 결과에 PK 가 모두 없으면 None
     pk_cols: Option<Vec<usize>>,
@@ -234,6 +236,7 @@ impl Grid {
             server: false,
             json: None,
             json_raw: false,
+            dec: None,
             h: 10,
             pk_cols: None,
         };
@@ -406,6 +409,27 @@ impl Grid {
         Some(self.current(self.cur_index()?))
     }
 
+    /// 화면에 보이는 칸 값이다(복호화 보기면 푼 값).
+    fn shown_cell(&self, i: usize, c: usize, raw: &str) -> String {
+        self.dec
+            .as_ref()
+            .and_then(|d| d.get(&(i, c)).cloned())
+            .unwrap_or_else(|| raw.to_string())
+    }
+
+    /// 복호화할 칸(보이는 행의 암호문 꼴)이다.
+    pub fn enc_cells(&self) -> Vec<(usize, usize, String)> {
+        let mut out = Vec::new();
+        for &i in self.view.iter().filter(|&&i| i < self.res.rows.len()) {
+            for (c, v) in self.res.rows[i].iter().enumerate() {
+                if idb_core::statcrypt::looks_encrypted(v) {
+                    out.push((i, c, v.clone()));
+                }
+            }
+        }
+        out
+    }
+
     pub fn set_sort(&mut self, sort: Option<(usize, bool)>) {
         self.sort = sort;
         self.rebuild();
@@ -536,6 +560,10 @@ impl Grid {
             return Some("편집할 행 없음 (a 로 행 추가)");
         };
         let o = self.res.origin.as_ref()?;
+        // 푼 값을 보이며 고치면 무엇을 고치는지 헷갈리고 푼 값을 그대로 저장할 위험이 있다
+        if self.dec.is_some() {
+            return Some("편집할 수 없음: 복호화 보기 중 (D 로 원래 값)");
+        }
         if o.cols.get(self.col).is_none_or(String::is_empty) {
             return Some("편집할 수 없음: 식·계산 열");
         }
@@ -779,6 +807,9 @@ impl Grid {
     pub fn paste(&mut self, text: &str) -> Act {
         if let Some(w) = self.edit_block() {
             return Act::Status(w.into());
+        }
+        if self.dec.is_some() {
+            return Act::Status("복호화 보기 중에는 붙여넣지 않음 (D 로 원래 값)".into());
         }
         let rows = parse_tsv(text);
         let total: usize = rows.iter().map(Vec::len).sum();
@@ -1126,7 +1157,8 @@ impl Grid {
                     "up" | "k" => self.scroll = self.scroll.saturating_sub(1),
                     "y" => {
                         let row = self.row_values().unwrap_or_default();
-                        return Act::Copy(cell(&row, self.scroll).to_string(), "값".into());
+                        let i = self.cur_index().unwrap_or(0);
+                        return Act::Copy(self.shown_cell(i, self.scroll, cell(&row, self.scroll)), "값".into());
                     }
                     "Y" => return self.copy_row(),
                     _ => {}
@@ -1247,7 +1279,7 @@ impl Grid {
             "u" => return self.revert_row(),
             "y" => {
                 return match self.cur_value() {
-                    Some(v) => Act::Copy(v, "칸".into()),
+                    Some(v) => Act::Copy(self.shown_cell(self.cur_index().unwrap_or(0), self.col, &v), "칸".into()),
                     None => Act::None,
                 };
             }
@@ -1274,8 +1306,16 @@ impl Grid {
     }
 
     fn copy_row(&self) -> Act {
+        let i = self.cur_index().unwrap_or(0);
         match self.row_values() {
-            Some(r) => Act::Copy(r.iter().map(|v| tsv_cell(v)).collect::<Vec<_>>().join("\t"), "행".into()),
+            Some(r) => Act::Copy(
+                r.iter()
+                    .enumerate()
+                    .map(|(c, v)| tsv_cell(&self.shown_cell(i, c, v)))
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+                "행".into(),
+            ),
             None => Act::None,
         }
     }
@@ -1381,6 +1421,10 @@ impl Grid {
                 let mut text = display(self.kind(c), raw);
                 if is_null(raw) {
                     st = theme::dim();
+                }
+                if let Some(v) = self.dec.as_ref().and_then(|d| d.get(&(i, c))) {
+                    text = printable(v, false);
+                    st = st.fg(Color::Indexed(141));
                 }
                 if let Some(e) = e {
                     if e.inserted {

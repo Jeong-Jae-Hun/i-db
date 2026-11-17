@@ -1219,3 +1219,132 @@ fn 원격에서도_serve_가_보낸_상세_길과_패널_질의로_연다() {
     keys(&mut b, &["l", "enter"]);
     assert_eq!(b.cur().editor.value(), "select now()");
 }
+
+#[test]
+fn F7_은_마지막_성공한_문장을_조각으로_받아_파일에_쓰고_esc_로_멈춘다() {
+    let mut a = app();
+    a.on_key("f7");
+    assert_eq!(a.status, "전체 내보낼 표 결과가 없음 (성공한 SELECT 문 결과에서)");
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select a from t");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(rs(&["a"], &[&["1"]])));
+    a.on_key("f7");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["sql"].as_str()),
+        (Some("export_start"), Some("select a from t"))
+    );
+    let path = a.exporting.as_ref().unwrap().path.clone();
+    a.on_done(id, Ok(json!({"export": 7})));
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req, json!({"op": "export_read", "export": 7}));
+    // "a\n1\n" base64
+    a.on_done(id, Ok(json!({"data": "YQoxCg==", "done": false, "bytes": 4})));
+    assert!(a.status.starts_with("전체 내보내기 4 B 받음"));
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(json!({"data": "", "done": true, "bytes": 4, "rows": 1})));
+    assert_eq!(a.status, format!("1행 내보냄: {path}"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\n1\n");
+    let _ = std::fs::remove_file(&path);
+    // esc 는 멈추고 쓰던 파일을 지운다
+    a.set_focus(Focus::Result);
+    a.on_key("f7");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let path = a.exporting.as_ref().unwrap().path.clone();
+    a.on_done(id, Ok(json!({"export": 8})));
+    a.take_jobs();
+    a.on_key("esc");
+    assert_eq!(a.status, "전체 내보내기 취소함");
+    assert_eq!(jobs(&mut a).pop().unwrap().1, json!({"op": "export_cancel", "export": 8}));
+    assert!(!std::path::Path::new(&path).exists());
+}
+
+#[test]
+fn D_는_암호문_칸을_serve_에서_풀어_보이고_편집을_막는다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select e from t");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let enc = "0123456789abcdef0123456789abcdef^|^00112233445566778899aabbccddeeff";
+    let mut r = rs(&["id", "e"], &[&["1", enc], &["2", "plain"]]);
+    r["origin"] = json!({"table": {"schema": "public", "table": "t"}, "pk": ["id"], "cols": ["id", "e"]});
+    a.on_done(id, Ok(r));
+    a.set_focus(Focus::Result);
+    a.on_key("D");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!((req["op"].as_str(), req["cells"].clone()), (Some("decrypt"), json!([enc])));
+    a.on_done(id, Ok(json!({"values": ["secret@x"], "failed": 0})));
+    assert!(screen(&mut a).contains("secret@x"));
+    keys(&mut a, &["l", "y"]);
+    assert_eq!(a.clips.pop().unwrap(), "secret@x", "복사는 보이는 값");
+    a.on_key("enter");
+    assert_eq!(a.cur().grid.as_ref().unwrap().screen, crate::grid::Screen::Value);
+    a.on_key("esc");
+    a.on_key("f2");
+    assert_eq!(a.status, "편집할 수 없음: 복호화 보기 중 (D 로 원래 값)");
+    a.on_key("D");
+    assert!(!screen(&mut a).contains("secret@x"));
+}
+
+#[test]
+fn I_는_CSV_머리를_열에_맞춰_미리_보이고_import_csv_로_보낸다() {
+    let mut a = app();
+    a.catalogs.insert(
+        0,
+        serde_json::from_value(json!({"schemas":[{"name":"public","tables":[{"name":"t","view":false,
+            "columns":[{"name":"id","type":"int4"},{"name":"Name","type":"text"}]}]}],"functions":[]}))
+        .unwrap(),
+    );
+    let n = a.tree.conn_node(0).unwrap();
+    a.tree.set_children(
+        n,
+        vec![(
+            crate::tree::NodeKind::Schema {
+                conn: 0,
+                name: "public".into(),
+            },
+            "public".into(),
+        )],
+    );
+    let sn = a.tree.nodes[n].children[0];
+    a.tree.set_children(
+        sn,
+        vec![(
+            crate::tree::NodeKind::Table {
+                conn: 0,
+                schema: "public".into(),
+                name: "t".into(),
+            },
+            "t".into(),
+        )],
+    );
+    let tn = a.tree.nodes[sn].children[0];
+    a.tree.select(tn);
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("x.csv");
+    std::fs::write(&csv, "NAME,extra,id\nalice,z,1\n,y,2\n").unwrap();
+    a.on_key("I");
+    a.on_key("ctrl+u");
+    a.on_paste(csv.to_str().unwrap());
+    a.on_key("enter");
+    let s = screen(&mut a);
+    assert!(
+        s.contains("열: NAME → Name, extra (버림), id → id") && s.contains("alice | 1"),
+        "{s}"
+    );
+    assert!(s.lines().last().unwrap().contains("\"public\".\"t\" 에 2행 가져오기: y/N"));
+    a.on_key("y");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "import_csv");
+    assert_eq!(req["columns"], json!(["Name", "id"]));
+    assert_eq!(req["rows"], json!([["alice", "1"], [null, "2"]]));
+    a.on_done(id, Ok(json!({"rows": 2})));
+    assert_eq!(a.status, "2행 가져옴");
+}

@@ -8,6 +8,7 @@ mod board;
 mod complete;
 mod dash;
 pub mod editor;
+mod export;
 mod files;
 mod finder;
 mod flow;

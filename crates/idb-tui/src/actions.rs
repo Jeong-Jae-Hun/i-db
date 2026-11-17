@@ -426,6 +426,11 @@ impl App {
             Pend::Source(job) => self.source_done(id, *job, res),
             Pend::Health { tab, round, conn } => self.health_done(id, tab, round, conn, res),
             Pend::Outbox { tab, round } => self.outbox_done(tab, round, res),
+            Pend::ExportStart => self.export_started(res),
+            Pend::ExportRead => self.export_read(res),
+            Pend::Ignore => {}
+            Pend::Decrypt { tab, at } => self.decrypted(tab, at, res),
+            Pend::Import { conn, table, file } => self.imported(conn, table, file, res),
             Pend::Estimate => {
                 if let Some((job, _, parts, then)) = self.estimating.take() {
                     if job != id {
@@ -794,6 +799,21 @@ impl App {
                 t.text.clear();
                 t.snapshot = false;
                 t.last_sql = p.sql.clone();
+                t.export_sql = {
+                    let v = t.view.as_ref().unwrap();
+                    let mut q = format!("SELECT * FROM {}", v.table.quoted());
+                    if !v.where_.is_empty() {
+                        q.push_str(&format!(" WHERE {}", v.where_));
+                        if v.where_.contains("--") {
+                            q.push('\n');
+                        }
+                    }
+                    let o = v.order_sql();
+                    if !o.is_empty() {
+                        q.push_str(&format!(" ORDER BY {o}"));
+                    }
+                    q
+                };
                 if let Some(c) = conn {
                     self.record(c, &p.sql, p.result.elapsed_ms, Some(&p.result), "");
                 }
@@ -1121,7 +1141,8 @@ impl App {
             "+" | "-" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.cell_where(k == "-"),
             "ctrl+b" => return self.find_linked(),
             "ctrl+k" => return self.copy_menu(),
-            "c" | "D" | "t" | "=" | "r" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => {
+            "D" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.toggle_decrypt(),
+            "c" | "t" | "=" | "r" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => {
                 self.status = format!("{k} 는 Rust 화면에 아직 옮기지 않음");
                 return;
             }
@@ -1943,6 +1964,7 @@ impl App {
                     msg = format!("statement {} of {}: {msg}", s.idx + 1, s.stmts.len());
                 }
                 t.err = msg.clone();
+                t.export_sql.clear();
                 t.grid = None;
                 t.text.clear();
                 t.summary = if t.cancelled { "취소됨".into() } else { "실패".into() };
@@ -2004,6 +2026,8 @@ impl App {
                 let mut g = Grid::new(last.clone());
                 g.adopt(*sort, filter, *col);
                 t.grid = Some(g);
+                // F7·기록은 감싼 SQL 을 쓴다(R14.5)
+                t.export_sql = s.stmts[0].clone();
             }
             _ if last.cols.is_empty() => {
                 t.grid = None;
@@ -2030,6 +2054,11 @@ impl App {
                 if !s.redis && s.explain.is_none() && s.stmts.len() == 1 {
                     t.last_sql = s.stmts[0].clone();
                 }
+                t.export_sql = if !s.redis && s.explain.is_none() && s.stmts.len() == 1 {
+                    s.stmts[0].clone()
+                } else {
+                    String::new()
+                };
             }
         }
         if multi {

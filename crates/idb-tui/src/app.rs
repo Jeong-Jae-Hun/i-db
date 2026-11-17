@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use idb_engine::{Catalog, ConnSummary, EngineError, LockState, ProjectInfo, Request};
+use idb_engine::{Catalog, ConnSummary, EngineError, LockState, ProjectInfo, Request, TableRef};
 use serde_json::Value;
 
 use crate::editor::Editor;
@@ -160,6 +160,19 @@ pub enum Pend {
         round: u64,
     },
     Estimate,
+    ExportStart,
+    ExportRead,
+    /// 답을 쓰지 않는 요청
+    Ignore,
+    Decrypt {
+        tab: u64,
+        at: Vec<(usize, usize)>,
+    },
+    Import {
+        conn: usize,
+        table: TableRef,
+        file: String,
+    },
     Health {
         tab: u64,
         round: u64,
@@ -274,6 +287,8 @@ pub struct Tab {
     pub result_conn: Option<usize>,
     /// 표 결과를 만든 마지막 읽기 문장(R33.1·R14.5)
     pub last_sql: String,
+    /// F7 이 내보낼 문장이다(지금 표를 만든 성공한 문장, 테이블 보기는 LIMIT 없는 SELECT). 비면 없다
+    pub export_sql: String,
     pub undo: Vec<UndoEntry>,
     pub redis: Option<RedisView>,
     pub subs: Vec<Pin>,
@@ -313,6 +328,7 @@ impl Tab {
             view: None,
             result_conn: None,
             last_sql: String::new(),
+            export_sql: String::new(),
             undo: Vec::new(),
             redis: None,
             subs: Vec::new(),
@@ -434,6 +450,7 @@ pub struct App {
     pub last_copy_fmt: &'static str,
     /// 확인 창 전에 기다리는 예상 행 수(R39): 요청 id·시작·질문·확인하면 할 일
     pub estimating: Option<(u64, Instant, crate::actions::ConfirmParts, After)>,
+    pub exporting: Option<crate::export::Exporting>,
 }
 
 impl App {
@@ -484,6 +501,7 @@ impl App {
             deleting: None,
             last_copy_fmt: "tsv",
             estimating: None,
+            exporting: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -752,6 +770,9 @@ impl App {
         if self.history_view.is_some() {
             return self.history_key(k);
         }
+        if k == "esc" && self.exporting.is_some() && self.tree_filtering.is_none() && !self.esc_busy() {
+            return self.export_cancel();
+        }
         if let Some(input) = &mut self.tree_filtering {
             match k {
                 "enter" => {
@@ -788,6 +809,21 @@ impl App {
             Focus::Editor => self.editor_key(k),
             Focus::Result => self.result_key(k),
             Focus::Keep => {}
+        }
+    }
+
+    /// esc 가 다른 일(자동완성·선택·템플릿·값 보기·표 선택·입력·트리 거르기)을 하는지다. 그러면 내보내기는 이어진다(R33.1 단).
+    fn esc_busy(&self) -> bool {
+        let t = self.cur();
+        match self.focus {
+            Focus::Editor => t.editor.popup_open() || t.editor.selection().is_some() || t.editor.wants_tab(),
+            Focus::Tree => !self.tree.filter.is_empty(),
+            _ => {
+                self.typing_in_result()
+                    || t.redis.is_some()
+                    || t.shown().is_some_and(|g| g.screen != crate::grid::Screen::Table)
+                    || t.view.as_ref().is_some_and(|v| v.typing.is_some())
+            }
         }
     }
 
@@ -872,7 +908,8 @@ impl App {
             "alt+b" => self.pick_board(),
             "ctrl+]" => self.cycle_range(),
             "?" if self.focus != Focus::Tree && self.cur().pane.is_some() => self.open_keys(),
-            "alt+c" | "f7" => {
+            "f7" => self.full_export(),
+            "alt+c" => {
                 self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", self.label(&key_label(k)));
             }
             _ => {
@@ -1189,7 +1226,8 @@ impl App {
                 }
             }
             "=" => self.schema_compare(n),
-            "I" | "N" | "E" | "M" | "alt+X" => {
+            "I" => self.csv_import(n),
+            "N" | "E" | "M" | "alt+X" => {
                 self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", key_label(k));
             }
             _ => {}
