@@ -412,6 +412,65 @@ impl Conn {
         }
     }
 
+    /// simple protocol 로 `COPY … TO STDOUT` 을 보내고 받는 데이터를 chunk 바이트씩 모아 out 으로 보낸다. 돌려주는 것은 명령 태그다.
+    /// out 이 꽉 차면 받는 쪽이 읽을 때까지 서버에서 읽지 않는다(TCP 가 서버를 멈춘다). 받는 쪽이 그만뒀거나(out 닫힘)
+    /// idle 동안 읽지 않으면 COPY 중간이라 다시 쓸 수 없는 연결로 표시하고 멈춘다. 서버 오류면 모은 나머지는 보내지 않는다.
+    pub async fn copy_out(
+        &mut self,
+        sql: &str,
+        chunk: usize,
+        out: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        idle: Duration,
+    ) -> Result<String, Error> {
+        let mut buf = BytesMut::new();
+        frontend::query(sql, &mut buf).map_err(|e| Error::msg(e.to_string()))?;
+        self.send_or_break(&buf).await?;
+        let (mut first, mut tag): (Option<Error>, String) = (None, String::new());
+        let mut data: Vec<u8> = Vec::new();
+        loop {
+            let full = match self.read_or_break().await? {
+                Message::CopyData(body) => {
+                    data.extend_from_slice(body.data());
+                    data.len() >= chunk
+                }
+                Message::CopyDone => !data.is_empty(),
+                Message::CommandComplete(body) => {
+                    tag = body.tag().unwrap_or_default().to_string();
+                    false
+                }
+                Message::ErrorResponse(body) => {
+                    first.get_or_insert(Error::Pg(pg_error(&body)));
+                    false
+                }
+                Message::CopyInResponse(_) => {
+                    let mut b = BytesMut::new();
+                    let _ = frontend::copy_fail("COPY is not supported", &mut b);
+                    self.send_or_break(&b).await?;
+                    false
+                }
+                Message::ReadyForQuery(body) => {
+                    self.tx_status = body.status();
+                    return first.map_or(Ok(tag), Err);
+                }
+                _ => false,
+            };
+            if full {
+                let sent = tokio::time::timeout(idle, out.send(std::mem::take(&mut data))).await;
+                match sent {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        self.broken = true;
+                        return Err(Error::msg("export canceled"));
+                    }
+                    Err(_) => {
+                        self.broken = true;
+                        return Err(Error::msg(format!("export abandoned: not read for {}s", idle.as_secs())));
+                    }
+                }
+            }
+        }
+    }
+
     /// 연결을 정중히 닫는다(Terminate). 실패해도 할 일이 없다.
     pub async fn close(mut self) {
         let mut buf = BytesMut::new();
@@ -575,6 +634,53 @@ mod tests {
         // AuthenticationOk 없이 ReadyForQuery 만 와도 받지 않는다
         let err = connect_err(vec![ready]).await;
         assert!(err.ends_with("received unexpected message"), "{err}");
+    }
+
+    fn copy_reply(rows: &[&[u8]], tag: &str) -> Vec<u8> {
+        let mut out = msg(b'H', &[0, 0, 0]);
+        for r in rows {
+            out.extend(msg(b'd', r));
+        }
+        out.extend(msg(b'c', b""));
+        out.extend(msg(b'C', format!("{tag}\0").as_bytes()));
+        out.extend(msg(b'Z', b"T"));
+        out
+    }
+
+    #[tokio::test]
+    async fn COPY_OUT_은_조각_크기만큼_모아_보내고_태그를_돌려준다() {
+        let ok = [msg(b'R', &0u32.to_be_bytes()), msg(b'Z', b"T")].concat();
+        let port = fake_server(vec![ok, copy_reply(&[b"id,name\n", b"1,a\n", b"2,b\n"], "COPY 2")]).await;
+        let mut c = Conn::connect(&cfg(port)).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let tag = c
+            .copy_out("COPY (select 1) TO STDOUT", 10, &tx, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(tag, "COPY 2");
+        drop(tx);
+        let mut got = Vec::new();
+        while let Some(b) = rx.recv().await {
+            got.push(String::from_utf8(b).unwrap());
+        }
+        // 10바이트를 넘긴 순간 한 조각, 남은 것은 CopyDone 에서 한 조각이다
+        assert_eq!(got, ["id,name\n1,a\n", "2,b\n"]);
+        assert!(c.in_tx() && !c.is_broken());
+    }
+
+    #[tokio::test]
+    async fn COPY_OUT_받는_쪽이_닫히면_연결을_버린다() {
+        let ok = [msg(b'R', &0u32.to_be_bytes()), msg(b'Z', b"I")].concat();
+        let port = fake_server(vec![ok, copy_reply(&[b"0123456789", b"x"], "COPY 2")]).await;
+        let mut c = Conn::connect(&cfg(port)).await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let err = c
+            .copy_out("COPY (select 1) TO STDOUT", 4, &tx, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "export canceled");
+        assert!(c.is_broken());
     }
 
     #[tokio::test]
