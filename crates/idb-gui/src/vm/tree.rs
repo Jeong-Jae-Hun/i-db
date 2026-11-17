@@ -138,6 +138,7 @@ mod tests {
             host: "h".into(),
             db: "d".into(),
             source: "db".into(),
+            uuid: String::new(),
         }
     }
 
