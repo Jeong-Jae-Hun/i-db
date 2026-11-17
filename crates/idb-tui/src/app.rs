@@ -310,6 +310,9 @@ pub struct Tab {
     pub snapshot: bool,
     /// 실행 계획 나무(R22.2). 있으면 결과 영역이 나무다(esc 로 닫으면 표)
     pub plan: Option<crate::plan::PlanView>,
+    /// 차트(R28)·비교(R31.2) 화면. 있으면 결과 영역이 그것이다
+    pub chart: Option<crate::viz::Chart>,
+    pub diff: Option<crate::viz::DiffView>,
     /// 서버로 다시 읽을 원래 문장(R14.5). 없으면 base_why 가 까닭이다
     pub base: Option<String>,
     pub base_why: &'static str,
@@ -349,6 +352,8 @@ impl Tab {
             text_top: 0,
             snapshot: false,
             plan: None,
+            chart: None,
+            diff: None,
             base: None,
             base_why: "편집기 실행 결과가 아님",
             since: 0,

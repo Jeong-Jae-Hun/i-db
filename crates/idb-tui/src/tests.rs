@@ -1426,3 +1426,38 @@ fn Ctrl_E_는_JSON_계획을_나무로_보이고_t_는_원문_esc_는_닫기다(
     assert!(a.cur().plan.is_none());
     assert!(screen(&mut a).contains("QUERY PLAN"));
 }
+
+#[test]
+fn c_는_차트_등호는_고정_결과와_비교다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select ch, n from t");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let mut r = rs(&["ch", "n"], &[&["web", "3"], &["app", "5"]]);
+    r["types"] = json!(["text", "int8"]);
+    a.on_done(id, Ok(r.clone()));
+    a.set_focus(Focus::Result);
+    a.on_key("c");
+    let s = screen(&mut a);
+    assert!(s.contains("막대 · n") && s.contains("web") && s.contains('█'), "{s}");
+    a.on_key("c");
+    a.on_key("=");
+    assert_eq!(a.status, "비교할 고정 결과가 없음 (p 로 고정)");
+    a.on_key("p");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    r["rows"] = json!([["web", "3"], ["app", "6"], ["new", "1"]]);
+    a.on_done(id, Ok(r));
+    a.on_key("=");
+    a.on_key("enter");
+    let s = screen(&mut a);
+    assert!(
+        s.contains("+2 −1 ~0") && s.contains("+ new"),
+        "PK 가 없으면 행 전체로 짝짓는다\n{s}"
+    );
+    a.on_key("esc");
+    assert!(a.cur().diff.is_none());
+}

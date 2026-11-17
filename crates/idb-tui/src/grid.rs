@@ -855,7 +855,7 @@ impl Grid {
 
     // ─── 복사 ───
 
-    fn visible_values(&self) -> Vec<Vec<String>> {
+    pub fn visible_values(&self) -> Vec<Vec<String>> {
         self.view.iter().map(|&i| self.current(i)).collect()
     }
 

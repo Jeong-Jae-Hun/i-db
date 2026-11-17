@@ -1122,6 +1122,23 @@ impl App {
                 return;
             }
         }
+        if self.tabs[ti].chart.is_some() {
+            if matches!(k, "c" | "esc") {
+                self.tabs[ti].chart = None;
+            } else if k == "?" {
+                self.open_keys();
+            }
+            return;
+        }
+        if let Some(d) = &mut self.tabs[ti].diff {
+            match k {
+                "esc" => self.tabs[ti].diff = None,
+                "down" | "j" => d.top = (d.top + 1).min(d.lines.len().saturating_sub(1)),
+                "up" | "k" => d.top = d.top.saturating_sub(1),
+                _ => {}
+            }
+            return;
+        }
         if let Some(p) = &mut self.tabs[ti].plan {
             match k {
                 "esc" => self.tabs[ti].plan = None,
@@ -1158,7 +1175,9 @@ impl App {
             "ctrl+b" => return self.find_linked(),
             "ctrl+k" => return self.copy_menu(),
             "D" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.toggle_decrypt(),
-            "c" | "t" | "=" | "r" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => {
+            "c" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.toggle_chart(),
+            "=" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.compare_pinned(),
+            "t" | "r" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => {
                 self.status = format!("{k} 는 Rust 화면에 아직 옮기지 않음");
                 return;
             }
@@ -2029,6 +2048,8 @@ impl App {
             }
         }
         let mut summary = summary_of(&last);
+        t.chart = None;
+        t.diff = None;
         t.plan = if s.explain.is_some() && last.rows.len() == 1 && last.cols.len() == 1 {
             crate::plan::PlanView::parse(&last.rows[0][0])
         } else {

@@ -476,6 +476,12 @@ impl App {
         let body = Rect::new(r.x, y, r.width, r.height.saturating_sub(lines.len() as u16));
         let focused = self.focus == Focus::Result;
         let t = &mut self.tabs[self.tab];
+        if let Some(c) = &t.chart {
+            return c.render(buf, body);
+        }
+        if let Some(d) = &t.diff {
+            return App::draw_diff(d, buf, body);
+        }
         if let Some(p) = &mut t.plan {
             let h = body.height as usize;
             if p.show_raw {
@@ -754,6 +760,12 @@ impl App {
         }
         if t.plan.is_some() {
             return s(&["Enter 접기·펴기", "t JSON", "esc 닫기", "? 키"]);
+        }
+        if t.chart.is_some() {
+            return s(&["c 표로", "esc 표로"]);
+        }
+        if t.diff.is_some() {
+            return s(&["↑↓ 줄", "esc 닫기"]);
         }
         let Some(g) = t.shown() else {
             if !t.text.is_empty() {

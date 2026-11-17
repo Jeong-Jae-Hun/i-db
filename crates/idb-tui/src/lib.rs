@@ -27,6 +27,7 @@ mod state;
 pub mod tableview;
 mod theme;
 pub mod tree;
+mod viz;
 
 #[cfg(test)]
 mod tests;
