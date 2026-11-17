@@ -4,6 +4,7 @@
 
 mod actions;
 pub mod app;
+mod banner;
 mod board;
 mod clipboard;
 mod complete;
