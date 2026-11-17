@@ -722,3 +722,17 @@ fn live_편집_반영의_PK_는_세션_트랜잭션_안에서_찾는다() {
     ok(&s.call(json!({"op": "tx_rollback", "conn": conn})));
     s.finish(&[]);
 }
+
+#[test]
+fn 잘못된_퍼센트_뒤_한글이_있는_저장소_질의도_오류로_답한다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let r = s.call(json!({"op": "source_run", "conn": "search-stg", "text": "GET logs/_search?x=%한"}));
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(r["error"].as_str().unwrap().contains(r#"invalid URL escape "%\xed\x95""#), "{r}");
+    // 같은 serve 가 다음 요청에도 답한다
+    let r = s.call(json!({"op": "project"}));
+    assert_eq!(r["ok"], true, "{r}");
+    s.finish(&secrets(tmp.path()));
+}

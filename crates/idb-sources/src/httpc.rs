@@ -228,8 +228,8 @@ fn query_unescape(s: &str) -> Result<String, String> {
         match b[i] {
             b'%' => {
                 if i + 2 >= b.len() || !b[i + 1].is_ascii_hexdigit() || !b[i + 2].is_ascii_hexdigit() {
-                    let bad = &s[i..s.len().min(i + 3)];
-                    return Err(format!("invalid URL escape {}", go_quote(bad)));
+                    // Go 처럼 바이트 3개로 자른다. 글자 중간에서 잘릴 수 있어 남은 바이트는 \xNN 으로 적는다(strconv.Quote)
+                    return Err(format!("invalid URL escape {}", go_quote_bytes(&b[i..b.len().min(i + 3)])));
                 }
                 let hex = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
                 out.push(hex(b[i + 1]) << 4 | hex(b[i + 2]));
@@ -246,6 +246,20 @@ fn query_unescape(s: &str) -> Result<String, String> {
         }
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Go `strconv.Quote(string(b))` 다. 깨진 UTF-8 바이트는 `\xNN` 이다.
+fn go_quote_bytes(b: &[u8]) -> String {
+    let mut out = String::from("\"");
+    for chunk in b.utf8_chunks() {
+        let q = go_quote(chunk.valid());
+        out.push_str(&q[1..q.len() - 1]);
+        for x in chunk.invalid() {
+            out.push_str(&format!("\\x{x:02x}"));
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Go `strings.ToValidUTF8(s[:n], "")` 꼴로 앞 n 바이트만 남긴다.
@@ -271,5 +285,11 @@ mod tests {
         assert_eq!(parse_query("a=%zz&b=1").1.as_deref(), Some(r#"invalid URL escape "%zz""#));
         assert_eq!(parse_query("a=1;b=2").1.as_deref(), Some("invalid semicolon separator in query"));
         assert_eq!(url_error_op("POST"), "Post");
+    }
+
+    #[test]
+    fn 잘못된_퍼센트_뒤_여러_바이트_글자도_Go_처럼_바이트로_자른다() {
+        assert_eq!(parse_query("x=%한").1.as_deref(), Some(r#"invalid URL escape "%\xed\x95""#));
+        assert_eq!(parse_query("x=%a한").1.as_deref(), Some(r#"invalid URL escape "%a\xed""#));
     }
 }
