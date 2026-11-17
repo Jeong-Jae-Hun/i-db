@@ -49,11 +49,16 @@ use serde_json::Value;
 
 pub use app::App;
 
+/// 켤 때 새 판을 묻는 일이다(R65.2). 화면 밖 스레드에서 부르고 새 판이면 그 태그를 돌려준다.
+pub type UpdateNotice = Box<dyn FnOnce() -> Option<String> + Send>;
+
 pub struct Options {
     /// -p 프로젝트 폴더(비면 현재 폴더)
     pub project: Option<String>,
     /// --remote 이름(~/.config/db/remote.json)
     pub remote: Option<String>,
+    /// 하루 한 번 새 판 확인(끄였거나 소스 빌드면 None)
+    pub update_notice: Option<UpdateNotice>,
 }
 
 /// 끝난 Engine 요청이다.
@@ -179,7 +184,16 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("{e}");
         return 1;
     }
-    let res = event_loop(&mut app, &mut runner);
+    // 새 판 확인은 화면 밖에서 하고 켜기를 막지 않는다. 네트워크 오류는 알리지 않는다(R65.2)
+    let (notice_tx, notice_rx) = mpsc::channel::<String>();
+    if let Some(check) = opts.update_notice {
+        std::thread::spawn(move || {
+            if let Some(tag) = check() {
+                let _ = notice_tx.send(tag);
+            }
+        });
+    }
+    let res = event_loop(&mut app, &mut runner, notice_rx);
     let saved = app.save_session();
     let _ = restore_terminal(kitty);
     runner.rt.block_on(engine.close());
@@ -243,7 +257,7 @@ fn copy_out(s: &str, tx: &mpsc::Sender<String>, app: &mut App) {
     });
 }
 
-fn event_loop(app: &mut App, runner: &mut Runner) -> std::io::Result<()> {
+fn event_loop(app: &mut App, runner: &mut Runner, notice: mpsc::Receiver<String>) -> std::io::Result<()> {
     let (clip_tx, clip_rx) = mpsc::channel::<String>();
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let mut last_tick = Instant::now();
@@ -275,6 +289,10 @@ fn event_loop(app: &mut App, runner: &mut Runner) -> std::io::Result<()> {
             copy_out(&c, &clip_tx, app);
         }
         // 시스템 클립보드 명령의 결과는 화면 밖 스레드에서 온다. 실패면 상태 줄에 알린다(R71.4)
+        if let Ok(tag) = notice.try_recv() {
+            app.update_available(&tag);
+            dirty = true;
+        }
         while let Ok(e) = clip_rx.try_recv() {
             app.clip_failed(&e);
             dirty = true;

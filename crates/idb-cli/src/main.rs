@@ -22,6 +22,7 @@ fn tui_options(args: &[String]) -> Result<idb_tui::Options, String> {
     let mut o = idb_tui::Options {
         project: None,
         remote: None,
+        update_notice: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -85,7 +86,17 @@ fn main() {
     // 하위 명령이 없으면 화면이다: `db`, `db -p 폴더`, `db --remote 이름`
     if args.first().is_none_or(|a| a.starts_with('-')) {
         std::process::exit(match tui_options(&args) {
-            Ok(o) => idb_tui::run(o),
+            Ok(mut o) => {
+                let u = update_cmd::default_updater();
+                let (src, repo) = (u.src.clone(), u.repo.clone());
+                o.update_notice = update_cmd::update_notice(
+                    |k| std::env::var(k).ok(),
+                    &u.current,
+                    update_cmd::update_check_path(),
+                    Box::new(move || update_cmd::fetch_latest_tag(src, repo)),
+                );
+                idb_tui::run(o)
+            }
             Err(e) => {
                 eprintln!("{e}");
                 cli::EXIT_USAGE

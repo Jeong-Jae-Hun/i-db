@@ -1808,3 +1808,14 @@ fn 클립보드_복사가_실패하면_복사함_대신_까닭을_보인다() {
     a.clip_failed("no system clipboard command");
     assert_eq!(a.status, "클립보드 복사 실패: no system clipboard command");
 }
+
+#[test]
+fn 새_판_알림은_상태_글_뒤에_잇는다() {
+    let mut a = app();
+    a.status = "탭 1개 되살림".into();
+    a.update_available("v0.13.0");
+    assert_eq!(a.status, "탭 1개 되살림 · 새 판 v0.13.0 — db update");
+    a.status.clear();
+    a.update_available("v1.0.1");
+    assert_eq!(a.status, "새 판 v1.0.1 — db update");
+}
