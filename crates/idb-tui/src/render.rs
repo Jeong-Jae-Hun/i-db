@@ -753,14 +753,17 @@ impl App {
         let Some(n) = self.tree.current() else { return out };
         let node = self.tree.node(n);
         let list: Vec<&str> = match &node.kind {
+            NodeKind::Group if self.remote => vec!["Enter 펼치기", "/ 거르기", "? 키"],
             NodeKind::Group => vec!["Enter 펼치기", "N 새 접속", "/ 거르기", "? 키"],
             NodeKind::Conn(c) => {
-                let db = self.conns[*c].source == "db";
+                let db = self.conns[*c].source == "db" && !self.remote;
                 let mut v = vec!["Enter 펼치기"];
                 if db {
                     v.push("E 고치기");
                 }
-                v.push("N 새 접속");
+                if !self.remote {
+                    v.push("N 새 접속");
+                }
                 if db && !self.is_redis(*c) {
                     v.push("X 지우기");
                 }

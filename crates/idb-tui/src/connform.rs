@@ -104,9 +104,22 @@ impl ConnForm {
     }
 }
 
+pub const REMOTE_REFUSAL: &str = "원격 접속에서는 접속을 고치지 않음 (그 기계에서 db conn 으로 고침)";
+
 impl App {
+    /// 원격이면 창을 열지 않고 알린다. 친 비밀번호가 ssh 너머로 나가지 않게 창 자체를 막는다.
+    fn conn_edit_blocked(&mut self) -> bool {
+        if self.remote {
+            self.status = REMOTE_REFUSAL.into();
+        }
+        self.remote
+    }
+
     /// 트리 N: 새 접속 창(고른 줄의 폴더를 그룹으로 채움).
     pub(crate) fn conn_new(&mut self, n: usize) {
+        if self.conn_edit_blocked() {
+            return;
+        }
         let node = self.tree.node(n);
         let group = match &node.kind {
             NodeKind::Group => node.label.clone(),
@@ -117,6 +130,9 @@ impl App {
 
     /// 트리 E: db 전용 접속만 고친다.
     pub(crate) fn conn_edit(&mut self, n: usize) {
+        if self.conn_edit_blocked() {
+            return;
+        }
         let NodeKind::Conn(c) = self.tree.node(n).kind else { return };
         if self.conns[c].source != "db" {
             self.status = "DataGrip 접속은 DataGrip 에서 고침".into();
@@ -135,6 +151,9 @@ impl App {
 
     /// 트리 X(PostgreSQL·저장소)·Alt+X: db 전용 접속을 묻고 지운다.
     pub(crate) fn conn_remove(&mut self, n: usize) {
+        if self.conn_edit_blocked() {
+            return;
+        }
         let NodeKind::Conn(c) = self.tree.node(n).kind else { return };
         if self.conns[c].source != "db" {
             self.status = "DataGrip 접속은 DataGrip 에서 고침".into();

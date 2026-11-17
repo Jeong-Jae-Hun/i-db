@@ -1717,3 +1717,14 @@ fn 접속_URL_을_붙이면_다음_그림_전에_비밀번호를_가린_칸으�
     let s = screen(&mut a);
     assert!(!s.contains("s3cret") && s.contains("db.local") && s.contains("••••••"), "{s}");
 }
+
+#[test]
+fn 원격에서는_접속_창을_열지_않고_까닭을_알린다() {
+    let mut a = app();
+    a.remote = true;
+    a.on_key("N");
+    assert!(a.conn_form.is_none());
+    assert_eq!(a.status, "원격 접속에서는 접속을 고치지 않음 (그 기계에서 db conn 으로 고침)");
+    assert!(jobs(&mut a).is_empty());
+    assert!(!screen(&mut a).contains("N 새 접속"));
+}

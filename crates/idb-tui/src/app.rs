@@ -504,6 +504,8 @@ pub struct App {
     pub tip: Option<String>,
     /// 이번 실행에서 펼침을 되살린 접속 uuid(R75.6)
     pub tree_restored: HashSet<String>,
+    /// `--remote` 로 켰다. 접속 편집 창을 열지 않는다(R59, 원격 serve 는 접속 파일을 고치지 않음)
+    pub remote: bool,
 }
 
 impl App {
@@ -563,6 +565,7 @@ impl App {
             history_seed: Vec::new(),
             tip: None,
             tree_restored: HashSet::new(),
+            remote: false,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));

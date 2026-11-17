@@ -149,6 +149,7 @@ pub fn run(opts: Options) -> i32 {
     let session = state::SessionCtx::load(std::path::Path::new(&info.dir));
     let kitty = keys::kitty_wanted() && std::io::IsTerminal::is_terminal(&std::io::stdin());
     let mut app = App::new(info, files, keys::mac_style(kitty), session);
+    app.remote = opts.remote.is_some();
     match history::History::open() {
         Ok(h) => app.history = Some(h),
         Err(e) => {

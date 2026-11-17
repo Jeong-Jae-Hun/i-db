@@ -241,6 +241,9 @@ impl RemoteEngine {
 
     /// 요청 하나를 보내고 응답을 기다린다. 기다리는 퓨처를 버리면 원격에 cancel 을 보낸다.
     pub async fn call(&self, req: Request) -> Reply {
+        if let Some(e) = local_only_refusal(&req) {
+            return Err(e);
+        }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (wtx, wrx) = oneshot::channel();
         {
@@ -303,9 +306,56 @@ impl Drop for CancelOnDrop<'_> {
     }
 }
 
+/// serve 가 늘 거절하는 접속 편집 요청이면 줄로 만들기 전에 여기서 거절한다. 사용자가 친 비밀번호가 ssh 너머로
+/// 나가지 않게 하려는 것이다(serve 의 거절은 그대로 둔다). 저장된 이름으로 하는 시험과 폴더 옮기기만 보낸다.
+pub fn local_only_refusal(req: &Request) -> Option<EngineError> {
+    let refuse = matches!(
+        req,
+        Request::ConnGet { .. } | Request::ConnSave { .. } | Request::ConnDelete { .. } | Request::ConnTest { conn: Some(_), .. }
+    );
+    refuse.then(|| {
+        EngineError::refused(
+            REASON_REMOTE_CONN_EDIT,
+            "원격 serve 에서는 접속을 고치지 않음 (그 기계에서 db conn 으로 고침)",
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 접속_편집_요청은_원격에_보내기_전에_거절한다() {
+        let save = Request::ConnSave {
+            old_name: String::new(),
+            conn: ConnFields {
+                name: "x".into(),
+                password: "typed-secret".into(),
+                ..Default::default()
+            },
+        };
+        assert_eq!(local_only_refusal(&save).unwrap().reason.as_deref(), Some(REASON_REMOTE_CONN_EDIT));
+        let test_fields = Request::ConnTest {
+            name: String::new(),
+            conn: Some(ConnFields::default()),
+            old_name: String::new(),
+        };
+        assert!(local_only_refusal(&test_fields).is_some());
+        let by_name = Request::ConnTest {
+            name: "a".into(),
+            conn: None,
+            old_name: String::new(),
+        };
+        assert!(local_only_refusal(&by_name).is_none());
+        assert!(
+            local_only_refusal(&Request::ConnFolder {
+                names: vec![],
+                folder: String::new()
+            })
+            .is_none()
+        );
+    }
 
     #[test]
     fn 원격_셸_낱말은_물결표를_펼치고_나머지는_따옴표로_싼다() {
