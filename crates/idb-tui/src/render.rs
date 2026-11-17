@@ -97,6 +97,26 @@ impl App {
             buf.set_stringn(0, 0, msg, self.w as usize, Style::new());
             return;
         }
+        if let Some((ed, json, _)) = &mut self.big_edit {
+            let title = if *json { "칸 값 편집 (JSON)" } else { "칸 값 편집" };
+            let r = Rect::new(0, 0, self.w, self.h.saturating_sub(1));
+            pane(buf, r, title, "", true, false);
+            ed.render(inner(r), buf, true, "");
+            let hint = if *json {
+                "Ctrl+S 저장 · F8 JSON 정렬 · esc 버림"
+            } else {
+                "Ctrl+S 저장 · esc 버림"
+            };
+            let st = format!(" {} ", printable(&self.status, false));
+            bar_line(
+                buf,
+                self.h - 1,
+                self.w,
+                &[(st, theme::bar())],
+                &[(format!("{} ", self.label(hint)), theme::hint())],
+            );
+            return;
+        }
         if self.history_view.is_some() && self.overlay.is_none() {
             return self.draw_history(buf);
         }

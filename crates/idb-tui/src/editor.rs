@@ -762,6 +762,22 @@ impl Editor {
         self.pop = Popup::default();
     }
 
+    /// 커서 자리 낱말을 고른다(더블클릭, R13.2).
+    pub fn select_word(&mut self) {
+        let s = prefix_start(&self.text, self.cur);
+        let mut e = self.cur;
+        while let Some(c) = self.text[e..].chars().next() {
+            if !is_word(c) {
+                break;
+            }
+            e += c.len_utf8();
+        }
+        if s < e {
+            self.anchor = Some(s);
+            self.cur = e;
+        }
+    }
+
     pub fn scroll(&mut self, d: isize) {
         let max = self.row_count().saturating_sub(1) as isize;
         self.top = (self.top as isize + d).clamp(0, max) as usize;

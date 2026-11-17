@@ -1545,3 +1545,53 @@ fn 되돌리기는_데이터베이스를_바꾼_뒤의_묶음을_건너뛴다() 
     a.on_key("ctrl+z");
     assert!(matches!(&a.overlay, Overlay::Confirm { q, .. } if q.ends_with("그 묶음 1개 버리기")));
 }
+
+#[test]
+fn 칸_고치는_중_Ctrl_O_는_큰_편집기이고_JSON_열은_검사한다() {
+    let mut a = app();
+    a.open_table(
+        0,
+        idb_engine::TableRef {
+            schema: "public".into(),
+            table: "t".into(),
+        },
+        String::new(),
+    );
+    let (pid, _) = jobs(&mut a).into_iter().find(|(_, r)| r["op"] == "table_page").unwrap();
+    let mut page = rs(&["id", "doc"], &[&["1", "{\"a\":1}"]]);
+    page["types"] = json!(["int4", "jsonb"]);
+    page["origin"] = json!({"table": {"schema": "public", "table": "t"}, "pk": ["id"], "cols": ["id", "doc"]});
+    a.on_done(pid, Ok(json!({"result": page, "sql": ""})));
+    keys(&mut a, &["l", "enter", "ctrl+o"]);
+    assert!(screen(&mut a).contains("칸 값 편집 (JSON)"));
+    a.on_key("f8");
+    assert_eq!(a.big_edit.as_ref().unwrap().0.value(), "{\n  \"a\": 1\n}");
+    // 정렬만 하고 값이 같아도 글이 다르면 바꿈이다. JSON 이 아니면 남긴다
+    keys(&mut a, &["ctrl+a", "x", "ctrl+s"]);
+    assert!(a.big_edit.is_some() && a.status.starts_with("JSON 이 아님"));
+    keys(&mut a, &["ctrl+a"]);
+    a.on_paste("[1]");
+    a.on_key("ctrl+s");
+    assert!(a.big_edit.is_none());
+    assert_eq!(
+        a.cur().grid.as_ref().unwrap().change_set().unwrap().changes[0].values["doc"],
+        Some("[1]".into())
+    );
+}
+
+#[test]
+fn 편집기_더블클릭은_낱말을_고른다() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let mut a = app();
+    a.cur_mut().editor.set_value("select name from t");
+    let x = a.layout().tree_w + 3 + 4 + 8;
+    let ev = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: x,
+        row: 3,
+        modifiers: KeyModifiers::NONE,
+    };
+    a.on_mouse(ev);
+    a.on_mouse(ev);
+    assert_eq!(a.cur().editor.selected_text(), Some("name"));
+}

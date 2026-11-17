@@ -61,6 +61,8 @@ pub enum Act {
     FilterDone(String),
     /// 칸 고치기를 시작하려는데 열이 enum 이다(R49.2)
     EnumPick(usize),
+    /// 칸 고치는 중 Ctrl+O: 전체 화면 편집기(R49.3). 글과 json 열인지다
+    BigEdit(String, bool),
 }
 
 pub struct Grid {
@@ -650,8 +652,23 @@ impl Grid {
         self.screen = Screen::Table;
     }
 
+    /// 큰 편집기에서 저장한 글로 칸 고치기를 끝낸다(None 은 버림). 원래 칸 값 그대로면 바꿈을 두지 않는다(NULL 칸이 빈 글이 되지 않게).
+    pub fn finish_big_edit(&mut self, text: Option<String>) {
+        let (i, c) = self.edit_at;
+        let orig = self.current(i).get(c).cloned().unwrap_or_default();
+        match text {
+            Some(t) if !(t == orig && !is_null(&orig) || t.is_empty() && is_null(&orig)) => {
+                self.input.set(&t);
+                self.edit_null = false;
+                self.commit_edit();
+            }
+            _ => self.screen = Screen::Table,
+        }
+    }
+
     fn edit_key(&mut self, k: &str) -> Act {
         match k {
+            "ctrl+o" => return Act::BigEdit(self.input.text.clone(), self.kind(self.edit_at.1) == Kind::Json),
             "enter" => self.commit_edit(),
             "esc" => self.screen = Screen::Table,
             "ctrl+n" => {

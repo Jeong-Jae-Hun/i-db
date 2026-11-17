@@ -486,6 +486,8 @@ pub struct App {
     pub lock_at: HashMap<usize, Instant>,
     /// 화면을 닫은 뒤 터미널에 알릴 글(R45.3 충돌 사본 등)
     pub quit_notes: Vec<String>,
+    /// 칸 값 큰 편집기(R49.3): 편집기·json 열인지·고친 결과 탭
+    pub big_edit: Option<(Editor, bool, u64)>,
 }
 
 impl App {
@@ -540,6 +542,7 @@ impl App {
             conn_form: None,
             lock_at: HashMap::new(),
             quit_notes: Vec::new(),
+            big_edit: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -735,6 +738,42 @@ impl App {
         self.status = status;
     }
 
+    /// 큰 편집기 키: Ctrl+S 바꿈으로 두기(json 열은 JSON 검사), esc 버림, F8 JSON 정렬(R49.3).
+    fn big_edit_key(&mut self, k: &str) {
+        let Some((ed, json, tab)) = &mut self.big_edit else { return };
+        let (json, tab) = (*json, *tab);
+        match k {
+            "ctrl+s" => {
+                let text = ed.value().to_string();
+                if json && let Err(e) = serde_json::from_str::<serde_json::Value>(&text) {
+                    self.status = format!("JSON 이 아님: {e}");
+                    return;
+                }
+                self.big_edit = None;
+                if let Some(g) = self.tab_by_id(tab).and_then(|t| t.grid.as_mut()) {
+                    g.finish_big_edit(Some(text));
+                }
+            }
+            "esc" => {
+                self.big_edit = None;
+                if let Some(g) = self.tab_by_id(tab).and_then(|t| t.grid.as_mut()) {
+                    g.finish_big_edit(None);
+                }
+            }
+            "f8" if json => match serde_json::from_str::<serde_json::Value>(ed.value()) {
+                Ok(v) => {
+                    let pretty = serde_json::to_string_pretty(&v).unwrap_or_default();
+                    let len = ed.value().len();
+                    ed.replace_range(0, len, &pretty);
+                }
+                Err(e) => self.status = format!("JSON 이 아님: {e}"),
+            },
+            _ => {
+                ed.key(k);
+            }
+        }
+    }
+
     pub fn label(&self, s: &str) -> String {
         crate::keys::label(s, self.mac)
     }
@@ -743,6 +782,10 @@ impl App {
 
     /// 붙여넣기(bracketed paste)다. 입력 줄·편집기·결과 표(R48) 순으로 받는다.
     pub fn on_paste(&mut self, s: &str) {
+        if let Some((ed, _, _)) = &mut self.big_edit {
+            ed.paste(s);
+            return;
+        }
         if let Some(f) = &mut self.conn_form {
             let at = f.at;
             f.fields[at].insert(s);
@@ -804,6 +847,9 @@ impl App {
         }
         if self.conn_form.is_some() {
             return self.conn_form_key(k);
+        }
+        if self.big_edit.is_some() {
+            return self.big_edit_key(k);
         }
         // 키를 지우는 동안은 esc 로 멈추고, 종료는 멈춘 뒤에 한다(R42.1)
         if let Some(d) = &mut self.deleting {
@@ -1453,6 +1499,9 @@ impl App {
         if y >= 3 && y < 3 + l.ed_h {
             self.set_focus(Focus::Editor);
             self.cur_mut().editor.click(rx.saturating_sub(1) as usize, (y - 3) as usize, false);
+            if double {
+                self.cur_mut().editor.select_word();
+            }
             return;
         }
         let res_top = 3 + l.ed_h + 2;

@@ -1413,6 +1413,13 @@ impl App {
                 }
             }
             Act::EnumPick(c) => self.enum_pick(c),
+            Act::BigEdit(text, json) => {
+                let mut ed = crate::editor::Editor::new();
+                ed.set_value(&text);
+                ed.set_cursor(text.len());
+                let tab = self.cur().id;
+                self.big_edit = Some((ed, json, tab));
+            }
         }
     }
 
