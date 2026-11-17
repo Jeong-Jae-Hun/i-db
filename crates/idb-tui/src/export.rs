@@ -26,12 +26,36 @@ fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, EngineError> {
 }
 
 /// CSV 를 칸으로 읽는다(RFC 4180: 따옴표 칸 안의 쉼표·줄바꿈은 값, 따옴표 두 개는 따옴표). 빈 줄은 건너뛴다.
+#[cfg(test)]
 pub fn parse_csv(s: &str) -> Vec<Vec<String>> {
+    parse_csv_with(s, usize::MAX, usize::MAX, usize::MAX).unwrap_or_default()
+}
+
+/// 가져오기 상한(머리 줄 + 10만 행, 줄마다 MAX_CSV_COLS 칸, 모두 MAX_CSV_CELLS 칸)에서 풀기를 멈춘다.
+/// 50MiB 안에 아주 작은 줄이 수천만 개여도 다 풀기 전에 거절해 큰 Vec·String 을 만들지 않는다.
+pub fn parse_csv_limited(s: &str) -> Result<Vec<Vec<String>>, String> {
+    parse_csv_with(s, MAX_IMPORT_ROWS + 1, MAX_CSV_COLS, MAX_CSV_CELLS)
+}
+
+fn parse_csv_with(s: &str, max_rows: usize, max_cols: usize, max_cells: usize) -> Result<Vec<Vec<String>>, String> {
+    let too_many_rows = || format!("CSV 가 {MAX_IMPORT_ROWS}행을 넘어 가져오지 않음");
     let s = s.strip_prefix('\u{feff}').unwrap_or(s);
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut row: Vec<String> = Vec::new();
     let mut cur = String::new();
     let (mut quoted, mut started) = (false, false);
+    let mut cells = 0usize;
+    let mut push_cell = |row: &mut Vec<String>, cur: &mut String| -> Result<(), String> {
+        if row.len() >= max_cols {
+            return Err(format!("CSV 한 줄이 {MAX_CSV_COLS}칸을 넘어 가져오지 않음"));
+        }
+        cells += 1;
+        if cells > max_cells {
+            return Err(format!("CSV 칸이 {MAX_CSV_CELLS}개를 넘어 가져오지 않음"));
+        }
+        row.push(std::mem::take(cur));
+        Ok(())
+    };
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
         if quoted {
@@ -51,13 +75,16 @@ pub fn parse_csv(s: &str) -> Vec<Vec<String>> {
                 started = true;
             }
             ',' => {
-                row.push(std::mem::take(&mut cur));
+                push_cell(&mut row, &mut cur)?;
                 started = true;
             }
             '\r' => {}
             '\n' => {
                 if started || !cur.is_empty() {
-                    row.push(std::mem::take(&mut cur));
+                    push_cell(&mut row, &mut cur)?;
+                    if rows.len() >= max_rows {
+                        return Err(too_many_rows());
+                    }
                     rows.push(std::mem::take(&mut row));
                 }
                 started = false;
@@ -69,10 +96,13 @@ pub fn parse_csv(s: &str) -> Vec<Vec<String>> {
         }
     }
     if started || !cur.is_empty() {
-        row.push(cur);
+        push_cell(&mut row, &mut cur)?;
+        if rows.len() >= max_rows {
+            return Err(too_many_rows());
+        }
         rows.push(row);
     }
-    rows
+    Ok(rows)
 }
 
 impl App {
@@ -341,6 +371,9 @@ impl App {
 /// serve 가 한 번에 받는 가져오기 상한과 같다(idb-sources import_csv: 10만 행·50MiB). 넘는 파일은 읽기 전에 막는다
 pub const MAX_IMPORT_BYTES: u64 = 50 << 20;
 pub const MAX_IMPORT_ROWS: usize = 100_000;
+/// 한 줄 칸 수 상한(PostgreSQL 테이블 열 상한 1,600)과 전체 칸 수 상한이다
+pub const MAX_CSV_COLS: usize = 1_600;
+pub const MAX_CSV_CELLS: usize = 5_000_000;
 
 /// 화면 밖 스레드의 CSV 준비 일감이다.
 pub struct CsvJob {
@@ -374,13 +407,10 @@ pub fn prepare_csv(path: &str, cols: &[String]) -> Result<CsvPrep, String> {
     if bytes.len() as u64 > MAX_IMPORT_BYTES {
         return Err(format!("CSV 가 {}MiB 를 넘어 가져오지 않음", MAX_IMPORT_BYTES >> 20));
     }
-    let mut rows = parse_csv(&String::from_utf8_lossy(&bytes));
+    let mut rows = parse_csv_limited(&String::from_utf8_lossy(&bytes))?;
     drop(bytes);
     if rows.is_empty() {
         return Err("CSV 가 비어 있음".into());
-    }
-    if rows.len() - 1 > MAX_IMPORT_ROWS {
-        return Err(format!("CSV 가 {MAX_IMPORT_ROWS}행을 넘어 가져오지 않음"));
     }
     let head = rows.remove(0);
     // 머리 줄을 테이블 열 이름에 대소문자 없이 맞추고 맞지 않는 열은 버린다
@@ -442,6 +472,19 @@ mod tests {
             [vec!["a", "b"], vec!["x,1", "q\"\n2"], vec!["3", ""]]
         );
         assert_eq!(human_bytes(2 << 20), "2.0 MB");
+    }
+
+    #[test]
+    fn CSV_는_행_열_칸_상한에서_다_풀기_전에_멈춘다() {
+        let rows = "a\n".repeat(MAX_IMPORT_ROWS + 5);
+        let err = parse_csv_limited(&format!("id\n{rows}")).unwrap_err();
+        assert_eq!(err, format!("CSV 가 {MAX_IMPORT_ROWS}행을 넘어 가져오지 않음"));
+        let wide = vec!["x"; MAX_CSV_COLS + 1].join(",");
+        assert_eq!(
+            parse_csv_limited(&wide).unwrap_err(),
+            format!("CSV 한 줄이 {MAX_CSV_COLS}칸을 넘어 가져오지 않음")
+        );
+        assert_eq!(parse_csv_limited("a,b\n1,2\n").unwrap().len(), 2);
     }
 
     #[test]
