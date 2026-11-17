@@ -11,6 +11,8 @@ pub enum Ask {
     Danger,
     /// 환경과 상관없이 늘 묻는 것(백엔드 신호, 패턴 일괄 삭제)
     Always,
+    /// R9.2: 읽기 전용이 아닌 문장의 EXPLAIN ANALYZE(문장을 실제로 실행한다)
+    Analyze,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub struct Confirms {
     pub prod: bool,
     pub danger: bool,
     pub always: bool,
+    pub analyze: bool,
 }
 
 impl Confirms {
@@ -37,6 +40,7 @@ impl Confirms {
             Ask::Prod => self.prod,
             Ask::Danger => self.danger,
             Ask::Always => self.always,
+            Ask::Analyze => self.analyze,
         }
     }
 
@@ -45,6 +49,7 @@ impl Confirms {
             Ask::Prod => self.prod = true,
             Ask::Danger => self.danger = true,
             Ask::Always => self.always = true,
+            Ask::Analyze => self.analyze = true,
         }
     }
 
@@ -58,6 +63,9 @@ impl Confirms {
             Some("confirm_prod") => Ask::Prod,
             Some("confirm_danger") => Ask::Danger,
             Some("confirm") => Ask::Always,
+            Some("confirm_analyze") => Ask::Analyze,
+            // KEYS(서버를 멈춤)와 원격 접속 편집은 확인으로 풀리지 않는다. 엔진 글을 그대로 보인다
+            Some("keys" | "remote_conn_edit") => return Gate::Fail(e.error.clone()),
             _ => return Gate::Fail(e.error.clone()),
         };
         if self.has(ask) {
@@ -77,6 +85,7 @@ impl Ask {
             Ask::Prod => "운영(prod) 접속에 쓰기",
             Ask::Danger => "위험한 문장",
             Ask::Always => "확인",
+            Ask::Analyze => "EXPLAIN ANALYZE",
         }
     }
 
@@ -85,6 +94,7 @@ impl Ask {
             Ask::Prod => "prod 에 실행",
             Ask::Danger => "그래도 실행",
             Ask::Always => "실행",
+            Ask::Analyze => "실제로 실행",
         }
     }
 }
@@ -142,6 +152,7 @@ mod tests {
             ("confirm_prod", Ask::Prod),
             ("confirm_danger", Ask::Danger),
             ("confirm", Ask::Always),
+            ("confirm_analyze", Ask::Analyze),
         ] {
             match c.gate(&refused(reason)) {
                 Gate::Ask { ask: a, question } => {
@@ -157,7 +168,8 @@ mod tests {
             Confirms {
                 prod: true,
                 danger: true,
-                always: true
+                always: true,
+                analyze: true,
             }
         );
     }
@@ -176,6 +188,8 @@ mod tests {
         let c = Confirms::default();
         assert_eq!(c.gate(&EngineError::run("boom")), Gate::Fail("boom".into()));
         assert!(matches!(c.gate(&refused("new_reason")), Gate::Fail(_)));
+        assert!(matches!(c.gate(&refused("keys")), Gate::Fail(_)));
+        assert!(matches!(c.gate(&refused("remote_conn_edit")), Gate::Fail(_)));
         let mut e = EngineError::run("tx");
         e.reason = Some("in_tx".into());
         assert!(matches!(c.gate(&e), Gate::Fail(_)));

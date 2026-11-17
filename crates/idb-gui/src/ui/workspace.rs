@@ -598,6 +598,7 @@ impl Workspace {
                     params: params.clone(),
                     confirm_prod: c.prod,
                     confirm_danger: c.danger,
+                    confirm_analyze: c.analyze,
                 };
                 async move {
                     if explain {
