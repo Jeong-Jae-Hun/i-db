@@ -8,6 +8,35 @@ mod usage_text;
 
 use std::io::{IsTerminal, Write};
 
+/// 화면 플래그는 `-p 폴더`·`--remote 이름`(`=` 꼴과 대시 하나도)뿐이다.
+fn tui_options(args: &[String]) -> Result<idb_tui::Options, String> {
+    let mut o = idb_tui::Options {
+        project: None,
+        remote: None,
+    };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) => (f, Some(v.to_string())),
+            None => (a.as_str(), None),
+        };
+        let slot = match flag {
+            "-p" | "--p" => &mut o.project,
+            "-remote" | "--remote" => &mut o.remote,
+            _ => return Err(format!("db-rs: unknown flag {a} (db-rs [-p 폴더] [--remote 이름])")),
+        };
+        let v = match inline {
+            Some(v) => v,
+            None => it.next().cloned().ok_or_else(|| format!("db-rs: flag needs an argument: {flag}"))?,
+        };
+        if v.is_empty() {
+            return Err(format!("db-rs: flag needs an argument: {flag}"));
+        }
+        *slot = Some(v);
+    }
+    Ok(o)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "serve") {
@@ -15,8 +44,18 @@ fn main() {
         std::panic::set_hook(Box::new(|_| {}));
         std::process::exit(cli::run_serve(&args[1..]));
     }
+    // 하위 명령이 없으면 화면이다: `db-rs`, `db-rs -p 폴더`, `db-rs --remote 이름`
+    if args.first().is_none_or(|a| a.starts_with('-')) {
+        std::process::exit(match tui_options(&args) {
+            Ok(o) => idb_tui::run(o),
+            Err(e) => {
+                eprintln!("{e}");
+                cli::EXIT_USAGE
+            }
+        });
+    }
     if args.first().is_none_or(|a| !cli::is_cli_command(a)) {
-        eprintln!("db-rs: only CLI commands are ported yet (db-rs help)");
+        eprintln!("db-rs: unknown command {:?} (db-rs help)", args[0]);
         std::process::exit(cli::EXIT_USAGE);
     }
     let stdin_tty = std::io::stdin().is_terminal();
