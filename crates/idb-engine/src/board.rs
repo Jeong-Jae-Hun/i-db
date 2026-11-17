@@ -65,6 +65,8 @@ pub struct Board {
     pub title: String,
     pub panels: Vec<Panel>,
     pub err: String,
+    /// refresh 간격(나노초). 0 이면 화면 기본(60초)이다
+    pub every_ns: i64,
 }
 
 #[derive(Deserialize, Default)]
@@ -192,6 +194,7 @@ pub fn load_board(proj: &Project, name: &str) -> Result<Board, LoadErr> {
         title: name.into(),
         panels: Vec::new(),
         err: String::new(),
+        every_ns: 0,
     };
     let f: BoardFile = match serde_json::from_slice::<Option<BoardFile>>(&data) {
         Ok(f) => f.unwrap_or_default(),
@@ -208,7 +211,7 @@ pub fn load_board(proj: &Project, name: &str) -> Result<Board, LoadErr> {
             None => b.err = format!("refresh: invalid duration {}", go_quote(&f.refresh)),
             // 접속마다 질의를 보내므로 너무 잦게 돌지 않게 10초로 올린다
             Some(d) if d < BOARD_MIN_EVERY_NS => b.err = format!("refresh must be at least 10s: {}", f.refresh),
-            Some(_) => {}
+            Some(d) => b.every_ns = d,
         }
     }
     let fs = flows::load(&proj.dir, &proj.conns);

@@ -269,5 +269,73 @@ pub async fn resolve_flows(clients: &Arc<Clients>, conns: &[Conn], list: &[Flow]
     list.iter().zip(&snaps).map(|(f, s)| flow_boxes(f, s)).collect()
 }
 
+// ─── 화면이 여는 상세 (R69.4·R64) ───
+
+/// 상자마다 상세를 여는 길이다(boxes 와 같은 길이). 아웃박스는 종류별 수 문장, 종류 줄은 그 종류의 재시도·한도 소진 행 문장,
+/// Lambda 는 매핑, SNS 는 ARN 토픽(이름만 준 토픽은 없음), 큐는 이름, DLQ 는 ARN(다른 계정일 수 있어 이름으로 열지 않음)이다.
+/// 큐 자리는 sqs 상자가 나온 차례로 센다(dlq·lambda 는 바로 앞 큐 것이다).
+pub fn box_opens(f: &Flow, boxes: &[FlowBox]) -> Vec<crate::protocol::BoxOpen> {
+    use crate::protocol::BoxOpen;
+    let mut sub: isize = -1;
+    boxes
+        .iter()
+        .map(|b| {
+            if b.stage == "sqs" {
+                sub += 1;
+            }
+            let q = usize::try_from(sub).ok().and_then(|i| f.queues.get(i));
+            let path = match b.stage.as_str() {
+                "lambda" => format!("lambda/{}", b.name),
+                "sns" if f.topic.starts_with("arn:") => format!("sns/{}", f.topic),
+                "sqs" => q.map(|q| format!("sqs/{}", q.name)).unwrap_or_default(),
+                "dlq" => q
+                    .filter(|q| q.dlq.starts_with("arn:"))
+                    .map(|q| format!("sqs/{}", q.dlq))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            let sql = match (b.stage.as_str(), &f.outbox) {
+                ("outbox", Some(o)) => flows::count_sql(o),
+                ("outbox-type", Some(o)) => {
+                    let null = b.name == "(NULL)";
+                    let t = TypeStat {
+                        name: if null { String::new() } else { b.name.clone() },
+                        null,
+                        ..Default::default()
+                    };
+                    flows::retry_sql(o, &t)
+                }
+                _ => String::new(),
+            };
+            BoxOpen { path, sql }
+        })
+        .collect()
+}
+
+/// 재시도 열이 있는 흐름 아웃박스의 한도 소진 수다(대시보드 카드 R64). 대시보드 확인과 같은 시간 제한이고 AWS 는 부르지 않는다.
+pub async fn outbox_exhausted(
+    clients: &Clients,
+    conns: &[Conn],
+    list: &[Flow],
+    deadline: Instant,
+) -> Vec<crate::protocol::OutboxExhausted> {
+    let mut out = Vec::new();
+    for f in list {
+        let Some(o) = f.outbox.as_ref().filter(|o| f.err.is_empty() && !o.retry.is_empty()) else {
+            continue;
+        };
+        let Some(c) = conns.iter().find(|c| c.name == o.conn) else {
+            continue;
+        };
+        let exhausted = outbox_count(clients, c, o, deadline).await.map_or(-1, |s| s.exhausted);
+        out.push(crate::protocol::OutboxExhausted {
+            flow: f.name.clone(),
+            conn: o.conn.clone(),
+            exhausted,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;

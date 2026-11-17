@@ -334,6 +334,8 @@ pub enum Request {
     },
     /// .dbtui/boards 의 보드 목록
     BoardList,
+    /// 흐름 아웃박스 가운데 재시도 열이 있는 것의 한도 소진 수(R64 카드). AWS 를 부르지 않는 싼 확인이다
+    OutboxExhausted,
     /// 보드 하나를 한 번 돌린다(R70). prod 가 거짓이면 prod 패널은 묻지 않는다
     BoardRun {
         name: String,
@@ -716,6 +718,26 @@ pub struct HealthInfo {
 pub struct FlowResult {
     pub flow: String,
     pub boxes: Vec<FlowBox>,
+    /// boxes[i] 를 열 길이다(같은 길이, R69.4). 화면이 원격에서도 flows.json 없이 상세를 열게 한다. 옛 serve 는 비어 있다
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opens: Vec<BoxOpen>,
+}
+
+/// 상자 상세를 여는 길이다. path 는 source_open 길(lambda/·sns/·sqs/), sql 은 아웃박스 상세 읽기 문장이다. 둘 다 비면 상세가 없다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoxOpen {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sql: String,
+}
+
+/// outbox_exhausted 의 한 줄이다(R64 카드). exhausted 가 -1 이면 세지 못했다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutboxExhausted {
+    pub flow: String,
+    pub conn: String,
+    pub exhausted: i64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -734,6 +756,13 @@ pub struct BoardResult {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
     pub panels: Vec<PanelOut>,
+    /// refresh 간격(초). 0 이면 화면 기본(60초)이다
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub every_secs: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 /// 패널 한 칸이다. 숫자 패널은 value·warn, 표·차트는 result, 흐름은 boxes 다.
@@ -756,6 +785,11 @@ pub struct PanelOut {
     pub error: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// 패널 질의와 범위(Enter 로 쿼리 탭에 열 때). 흐름 패널은 비어 있다
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub query: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub since: String,
 }
 
 /// decrypt 의 답이다. values[i] 는 cells[i] 를 푼 값이고, 암호문 꼴이 아니거나 풀지 못한 칸은 null(원래 값 그대로)이다.

@@ -298,3 +298,38 @@ fn NULL_종류는_괄호_NULL_로_보이고_설정_소비자는_글자_NULL_종�
     assert_eq!(boxes[2].name, "NULL");
     assert!(boxes[2].metrics.ends_with("→ consume-null"));
 }
+
+#[test]
+fn 상자_상세_길은_큐_차례와_아웃박스_문장으로_만든다() {
+    let mut f = hub_flow();
+    f.topic = "arn:aws:sns:ap-northeast-2:111:stg-hub".into();
+    f.queues[0].dlq = "arn:aws:sqs:ap-northeast-2:111:q1-dlq".into();
+    let b = |stage: &str, name: &str| FlowBox {
+        stage: stage.into(),
+        name: name.into(),
+        ..Default::default()
+    };
+    let boxes = [
+        b("outbox", "t_outbox"),
+        b("sns", "stg-hub"),
+        b("sqs", "q1"),
+        b("dlq", "q1-dlq"),
+        b("lambda", "fn1"),
+        b("sqs", "q2"),
+        b("outbox-type", "(NULL)"),
+    ];
+    let o = box_opens(&f, &boxes);
+    assert_eq!(o.len(), boxes.len());
+    assert_eq!(o[0].sql, flows::count_sql(f.outbox.as_ref().unwrap()));
+    assert_eq!(o[1].path, "sns/arn:aws:sns:ap-northeast-2:111:stg-hub");
+    assert_eq!(
+        (o[2].path.as_str(), o[3].path.as_str()),
+        ("sqs/q1", "sqs/arn:aws:sqs:ap-northeast-2:111:q1-dlq")
+    );
+    assert_eq!((o[4].path.as_str(), o[5].path.as_str()), ("lambda/fn1", "sqs/q2"));
+    assert!(o[6].sql.contains("is null"), "{}", o[6].sql);
+    // 이름만 준 토픽·이름 DLQ 는 열지 않는다
+    let h = hub_flow();
+    let o = box_opens(&h, &boxes[..4]);
+    assert!(o[1].path.is_empty() && o[3].path.is_empty());
+}

@@ -459,6 +459,11 @@ impl Engine {
         self.typed(Request::BoardList).await
     }
 
+    /// 흐름 아웃박스 한도 소진 수(대시보드 카드, R64)
+    pub async fn outbox_exhausted(&self) -> Result<Vec<OutboxExhausted>, EngineError> {
+        self.typed(Request::OutboxExhausted).await
+    }
+
     pub async fn board_run(&self, name: &str, prod: bool) -> Result<BoardResult, EngineError> {
         self.typed(Request::BoardRun { name: name.into(), prod }).await
     }

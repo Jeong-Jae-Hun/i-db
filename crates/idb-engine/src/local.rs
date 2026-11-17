@@ -539,6 +539,7 @@ impl LocalEngine {
                         .zip(boxes)
                         .map(|(f, bs)| FlowResult {
                             flow: f.name.clone(),
+                            opens: crate::flows::box_opens(f, &bs),
                             boxes: bs.into_iter().map(|b| self.clean_box(b)).collect(),
                         })
                         .collect::<Vec<_>>(),
@@ -570,6 +571,11 @@ impl LocalEngine {
                 json(items)
             }
             Request::BoardRun { name, prod } => json(self.board_run(&name, prod).await?),
+            Request::OutboxExhausted => {
+                let all = idb_core::flows::load(&self.proj().dir, &self.proj().conns).map_err(|e| EngineError::run(self.clean_all(&e)))?;
+                let deadline = tokio::time::Instant::now() + DASH_TIMEOUT;
+                json(crate::flows::outbox_exhausted(&self.clients, &self.proj().conns, &all, deadline).await)
+            }
             Request::Decrypt { conn, cells } => json(self.decrypt(&conn, cells)?),
             Request::ExportStart { conn, sql } => json(self.export_start(&conn, &sql).await?),
             Request::ExportRead { export } => json(self.export_read(export).await?),
@@ -957,6 +963,8 @@ impl LocalEngine {
                     view: p.view.clone(),
                     prod: panel_prod(&self.proj(), p),
                     note: r.note,
+                    query: p.query.clone(),
+                    since: p.since.clone(),
                     ..Default::default()
                 };
                 if !p.err.is_empty() {
@@ -979,6 +987,7 @@ impl LocalEngine {
             title: b.title,
             error: self.clean_all(&b.err),
             panels,
+            every_secs: (b.every_ns / 1_000_000_000).max(0) as u64,
         })
     }
 

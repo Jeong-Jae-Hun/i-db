@@ -66,9 +66,10 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 | `source_open` | conn, path, limit(0 이면 Loki 100줄·나머지 50행, 상한 1,000) | ResultSet(트리 Enter 미리 보기) |
 | `source_run` | conn, text, since_ns, until_ns, limit(기본 1,000), direction(Loki `forward`·`backward`), force | ResultSet. aws 접속은 code 2 |
 | `health` | conn(모든 종류) | `{ok, latency_ms, version, metrics:[{name,value,warn}], summary, err}`(R64.2) |
-| `flows` | names(비면 모두), prod | `[{flow, boxes:[{stage, name, metrics, warn, idle, err, note, conn}]}]`(R69) |
+| `flows` | names(비면 모두), prod | `[{flow, boxes:[{stage, name, metrics, warn, idle, err, note, conn}], opens?:[{path?, sql?}]}]`(R69). opens[i] 는 boxes[i] 상세를 여는 길이다: path 는 `source_open` 길, sql 은 아웃박스·종류 줄 상세 읽기 문장(`run` 으로 보냄). 화면이 원격에서도 flows.json 없이 연다 |
+| `outbox_exhausted` | | `[{flow, conn, exhausted}]`(R64 카드). 재시도 열이 있는 아웃박스만, 세지 못하면 -1. AWS 를 부르지 않는다 |
 | `board_list` | | `[{name, title, panels, error?}]` |
-| `board_run` | name, prod | `{title, error?, panels:[{title, conn, flow, view, prod, value?, warn, result?, boxes?, error?, note?}]}`(R70) |
+| `board_run` | name, prod | `{title, error?, every_secs?, panels:[{title, conn, flow, view, prod, value?, warn, result?, boxes?, error?, note?, query?, since?}]}`(R70). every_secs 는 refresh 간격(없으면 60초), query·since 는 Enter 로 쿼리 탭에 열 패널 질의다 |
 | `decrypt` | conn(모든 종류), cells | `{values:[글\|null], failed}`(R37). 암호문 꼴(`<32 hex>^\|^<hex>`)이 아니거나 풀지 못한 칸은 null 이고 failed 는 꼴인데 못 푼 수다. 그룹이 없거나 `.env`에 키가 없으면 code 2 |
 | `export_start` | conn, sql | `{export, note?}`(R33.1, 아래 「전체 내보내기」) |
 | `export_read` | export | `{data, done, bytes, rows}`. data 는 CSV 바이트의 base64 |
