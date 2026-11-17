@@ -64,6 +64,11 @@ fn config(verify: Verify) -> Result<Arc<ClientConfig>, String> {
     Ok(Arc::new(cfg))
 }
 
+/// 체인과 이름을 검증하는 설정 사본이다. HTTP 저장소 클라이언트(reqwest)에 넘긴다.
+pub(crate) fn verified_config() -> Result<ClientConfig, String> {
+    config(Verify::Full).map(|c| (*c).clone())
+}
+
 /// tcp 위에서 TLS 핸드셰이크를 한다. server_name 은 SNI·검증 이름이다.
 pub(crate) async fn handshake(tcp: TcpStream, server_name: &str, verify: Verify) -> Result<TlsStream<TcpStream>, String> {
     let name = ServerName::try_from(server_name.to_string()).map_err(|e| e.to_string())?;

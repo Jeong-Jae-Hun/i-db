@@ -1,0 +1,5 @@
+args: ["conn","test","x","-p","/nonexistent-golden"]
+exit: 1
+--- stdout
+--- stderr
+db conn test: dataSources.xml not found: /nonexistent-golden/.idea/dataSources.xml

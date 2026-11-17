@@ -1,6 +1,8 @@
 //! Go `strconv`·`time.ParseDuration` 과 같은 규칙으로 숫자·기간 글을 읽는다.
 //! 플래그 값·CSV 수식 보호처럼 받느냐 마느냐가 출력·종료 코드를 가르는 자리라 Rust 표준 파서 대신 쓴다.
 
+use crate::project::{go_atoi, go_quote};
+
 /// Go `underscoreOK`: 밑줄은 숫자 사이나 진법 접두 바로 뒤에만 온다.
 fn underscore_ok(s: &str) -> bool {
     let b = s.strip_prefix(['+', '-']).unwrap_or(s).as_bytes();
@@ -239,6 +241,23 @@ pub fn parse_duration(s: &str) -> Option<i64> {
 }
 
 /// Go `time.Duration.String()`.
+/// --since·--until 처럼 날짜를 받는 기간의 상한(10년)이다
+pub const MAX_FLAG_DAYS: i64 = 3650;
+
+/// --since·--until 값이다. Go 기간 꼴(1h·15m)에 더해 날짜(7d)를 받는다. 날짜는 10년까지다.
+pub fn parse_day_duration(s: &str) -> Result<i64, String> {
+    if let Some(n) = s.strip_suffix('d') {
+        return match go_atoi(n) {
+            Some(days) if (0..=MAX_FLAG_DAYS).contains(&days) => Ok(days * 24 * 3600 * 1_000_000_000),
+            _ => Err(format!("invalid duration {} (days 0..{MAX_FLAG_DAYS})", go_quote(s))),
+        };
+    }
+    match parse_duration(s) {
+        Some(ns) if ns >= 0 => Ok(ns),
+        _ => Err(format!("invalid duration {}", go_quote(s))),
+    }
+}
+
 pub fn duration_string(ns: i64) -> String {
     if ns == 0 {
         return "0s".into();
@@ -283,6 +302,14 @@ fn frac(v: u128, div: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 날짜_기간은_10년까지이고_음수는_받지_않는다() {
+        assert_eq!(parse_day_duration("7d"), Ok(7 * 24 * 3_600_000_000_000));
+        assert_eq!(parse_day_duration("90m"), Ok(90 * 60_000_000_000));
+        assert_eq!(parse_day_duration("3651d"), Err("invalid duration \"3651d\" (days 0..3650)".into()));
+        assert_eq!(parse_day_duration("-1h"), Err("invalid duration \"-1h\"".into()));
+    }
 
     // 기대값은 Go 1.23 strconv·time 에 같은 입력을 넣어 얻었다
     #[test]

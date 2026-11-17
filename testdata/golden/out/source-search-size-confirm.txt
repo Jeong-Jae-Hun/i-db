@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","search-stg","GET logs/_search?size=20000"]
+exit: 3
+--- stdout
+--- stderr
+비싼 질의: size 1만 초과 (--force)

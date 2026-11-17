@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","aws-stg","x"]
+exit: 2
+--- stdout
+--- stderr
+aws 접속은 트리로 본다 (db tables -c aws-stg)

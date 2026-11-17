@@ -1,0 +1,5 @@
+args: ["update","--version","1.0"]
+exit: 2
+--- stdout
+--- stderr
+db update: --version 은 vX.Y.Z 꼴: "1.0"

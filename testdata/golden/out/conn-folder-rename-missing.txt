@@ -1,0 +1,5 @@
+args: ["conn","folder","--rename","nope","new","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn folder: 폴더 없음: nope (db conns)

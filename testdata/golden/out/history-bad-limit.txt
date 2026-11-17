@@ -1,0 +1,5 @@
+args: ["history","--limit","-1"]
+exit: 2
+--- stdout
+--- stderr
+db history: --limit must be 0 or more

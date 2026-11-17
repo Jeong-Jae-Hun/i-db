@@ -1,0 +1,5 @@
+args: ["conn","test","app-prod","-p","{P}"]
+exit: 3
+--- stdout
+--- stderr
+db conn test: prod 접속은 --prod 가 필요함

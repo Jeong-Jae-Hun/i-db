@@ -34,7 +34,7 @@ const IDX_QUERY: &str = "select ic.relname, pg_get_indexdef(i.indexrelid),
 		exists (select 1 from pg_inherits h where h.inhrelid = i.indexrelid)
 		from pg_index i join pg_class ic on ic.oid = i.indexrelid where i.indrelid = $1 order by ic.relname";
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableRef {
     pub schema: String,
     pub table: String,

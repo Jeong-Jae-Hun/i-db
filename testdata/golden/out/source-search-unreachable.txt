@@ -1,0 +1,5 @@
+args: ["query","-p","{P}","-c","search-stg","POST logs/_search"]
+exit: 1
+--- stdout
+--- stderr
+opensearch: Post "http://127.0.0.1:1/logs/_search": dial tcp 127.0.0.1:1: connect: connection refused

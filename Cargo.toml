@@ -10,6 +10,8 @@ publish = false
 [workspace.dependencies]
 idb-core = { path = "crates/idb-core" }
 idb-sources = { path = "crates/idb-sources" }
+idb-engine = { path = "crates/idb-engine" }
+idb-tui = { path = "crates/idb-tui" }
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,7 +33,33 @@ rustls-native-certs = "0.8"
 postgres-protocol = "0.6"
 bytes = "1"
 fallible-iterator = "0.2"
+# AWS 저장소(DynamoDB·Athena·aws 트리). 기본 HTTPS 클라이언트(aws-lc)를 끄고 rustls(ring) 클라이언트를 직접 넘긴다
+aws-config = { version = "1.13", default-features = false, features = ["rt-tokio", "credentials-process", "sso", "behavior-version-latest"] }
+aws-smithy-http-client = { version = "1.5", features = ["rustls-ring"] }
+aws-smithy-types = "1"
+aws-smithy-runtime-api = "1"
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-athena = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sts = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sns = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-lambda = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-eventbridge = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-scheduler = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-sfn = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# HTTP 저장소(OpenSearch·Loki·Prometheus·Grafana). TLS 는 tls.rs 의 rustls(ring) 설정을 그대로 넘긴다
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# OpenSearch sigv4 서명
+aws-credential-types = "1"
+aws-sigv4 = "1"
 
 [profile.release]
 strip = true
 lto = "thin"
+
+# i-db.app 릴리스. 패닉 백트레이스(~/Library/Logs/i-db/crash.log)에 함수·파일·줄이 남게 줄 표만 두고 벗기지 않는다
+[profile.release-gui]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"

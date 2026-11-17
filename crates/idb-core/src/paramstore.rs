@@ -25,7 +25,7 @@ pub fn path() -> io::Result<PathBuf> {
 
 /// 비밀 값이 들 만한 이름이다(Go textutil.LooksSecret, `(?i)pass|secret|token|key|pwd`). 넓게 잡아 api_key·monkey 처럼
 /// 비밀이 아닌 이름도 걸리지만 가리는 쪽이 안전하다. Go 의 (?i) 는 K(U+212A)·ſ(U+017F) 도 k·s 로 본다.
-fn looks_secret(name: &str) -> bool {
+pub fn looks_secret(name: &str) -> bool {
     let folded: String = name
         .chars()
         .map(|c| match c {

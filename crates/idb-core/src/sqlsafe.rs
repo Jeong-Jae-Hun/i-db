@@ -68,6 +68,18 @@ fn redis_read_sub_cmds(cmd: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// KEYS 를 막는 글이다. KEYS 는 키 전체를 한 번에 훑어 그동안 서버가 다른 요청을 받지 못한다(R58.2).
+/// CLI 와 엔진이 접속하기 전에 같은 글로 거절한다. KEYS 가 아니면 None 이다.
+pub fn keys_refusal(args: &[String]) -> Option<String> {
+    if !args.first().is_some_and(|a| a.eq_ignore_ascii_case("KEYS")) {
+        return None;
+    }
+    let pat = args.get(1).map_or("…", String::as_str);
+    Some(format!(
+        "KEYS 는 CLI 에서 하지 않음 (서버를 멈춤): SCAN 0 MATCH {pat} COUNT 1000 을 쓰세요"
+    ))
+}
+
 pub fn is_read_only_redis<S: AsRef<str>>(args: &[S]) -> bool {
     let Some(first) = args.first() else {
         return false;

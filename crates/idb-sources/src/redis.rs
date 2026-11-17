@@ -94,7 +94,7 @@ pub struct RedisConn {
 impl RedisConn {
     /// 평문 PING 을 먼저 하고, 3초 안에 답이 없으면 TLS 로 다시 붙는다.
     /// ElastiCache 인증서는 *.cache.amazonaws.com 이라 .local 별칭과 맞지 않으므로 서버 이름은 CNAME 대상을 쓴다(명세 R4.3).
-    pub(crate) async fn open(c: &ConnInfo) -> Result<RedisConn, Error> {
+    pub async fn open(c: &ConnInfo) -> Result<RedisConn, Error> {
         let port = if c.port == 0 { 6379 } else { c.port };
         let db = if c.db.is_empty() {
             0
@@ -128,6 +128,14 @@ impl RedisConn {
         ping(&opts, Some(&name))
             .await
             .map_err(|e| Error::msg(format!("plain: {plain_err} / tls: {}", e.into_error())))
+    }
+
+    /// 명령 하나를 보내고 값을 그대로 돌려준다. 맨 위 오류 응답은 Err 다.
+    pub async fn value(&mut self, args: &[String]) -> Result<Value, Error> {
+        match self.command(args).await? {
+            Reply::Value(v) => Ok(v),
+            Reply::Error(e) => Err(Error::Other(e)),
+        }
     }
 
     /// 명령 하나를 보내고 결과를 표·글로 만든다.
