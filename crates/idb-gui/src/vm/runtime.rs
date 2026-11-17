@@ -126,6 +126,34 @@ pub struct Prefs {
     pub font: String,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
+    /// 화면 확대 배율(⌘= ⌘- ⌘0)
+    #[serde(default = "default_zoom")]
+    pub zoom: f32,
+    #[serde(default)]
+    pub theme: super::settings::ThemePref,
+    /// 테이블 보기 한 쪽의 행 수(엔진 상한 1,000)
+    #[serde(default = "default_row_limit")]
+    pub row_limit: u64,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    #[serde(default = "default_editor_height")]
+    pub editor_height: f32,
+}
+
+fn default_zoom() -> f32 {
+    super::zoom::DEFAULT
+}
+
+fn default_row_limit() -> u64 {
+    super::settings::DEFAULT_ROW_LIMIT
+}
+
+fn default_sidebar_width() -> f32 {
+    280.0
+}
+
+fn default_editor_height() -> f32 {
+    260.0
 }
 
 fn default_font() -> String {
@@ -142,6 +170,11 @@ impl Default for Prefs {
             recent: Vec::new(),
             font: default_font(),
             font_size: default_font_size(),
+            zoom: default_zoom(),
+            theme: Default::default(),
+            row_limit: default_row_limit(),
+            sidebar_width: default_sidebar_width(),
+            editor_height: default_editor_height(),
         }
     }
 }
@@ -208,6 +241,28 @@ mod tests {
         std::fs::write(&path, r#"{"recent": []}"#).unwrap();
         let p = Prefs::load(&path);
         assert_eq!((p.font.as_str(), p.font_size), ("D2Coding", 13.0));
+    }
+
+    #[test]
+    fn 화면_설정은_저장하고_다시_읽고_옛_파일은_기본값이다() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui.json");
+        let mut p = Prefs::default();
+        p.zoom = 1.25;
+        p.theme = super::super::settings::ThemePref::Dark;
+        p.row_limit = 200;
+        p.sidebar_width = 320.0;
+        p.editor_height = 300.0;
+        p.save(&path).unwrap();
+        assert_eq!(Prefs::load(&path), p);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"theme\": \"dark\""), "{raw}");
+        std::fs::write(&path, r#"{"font": "D2Coding"}"#).unwrap();
+        let p = Prefs::load(&path);
+        assert_eq!(
+            (p.zoom, p.row_limit, p.theme),
+            (1.0, 500, super::super::settings::ThemePref::System)
+        );
     }
 
     #[test]
