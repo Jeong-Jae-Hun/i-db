@@ -723,7 +723,9 @@ impl Workspace {
 
     fn run_query(&mut self, explain: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Body::Redis { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
-            view.update(cx, |v, cx| v.run_command(window, cx));
+            // RedisView 가 작업 공간을 다시 빌리므로 지금 대여가 끝난 뒤에 부른다
+            let view = view.clone();
+            window.defer(cx, move |window, cx| view.update(cx, |v, cx| v.run_command(window, cx)));
             return;
         }
         let Some(t) = self.tabs.active() else { return };
@@ -1622,7 +1624,7 @@ impl Workspace {
                     )
                     .on_mouse_down(MouseButton::Middle, cx.listener(move |ws, _, _, cx| ws.close_tab(i, cx)))
                     .on_click(cx.listener(move |ws, _, _, cx| {
-                        ws.tabs.active = i;
+                        ws.tabs.activate(i);
                         cx.notify();
                     })),
             );
@@ -1913,9 +1915,46 @@ mod tests {
             })
         });
         draw(cx);
+        let result = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            match w.bodies.get(&w.tabs.tabs[0].id) {
+                Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                _ => panic!("결과가 없다"),
+            }
+        });
+        // 0.1.1 의 abort: 결과의 "다시 읽기"가 자기를 빌린 채 작업 공간이 그 결과를 읽어 패닉했다
+        cx.update(|window, cx| result.update(cx, |v, cx| v.reload(window, cx)));
+        draw(cx);
+    }
+
+    /// 0.1.1 의 abort: Redis 접속을 누르면 RedisView 가 만들어지며 작업 공간을 다시 빌려(scan) 패닉했다.
+    #[gpui::test]
+    fn Redis_접속을_눌러도_작업_공간을_두_번_빌리지_않는다(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        // 오프라인 프로젝트의 DataGrip 접속 위에 Redis 접속 하나를 더한다
+        std::fs::create_dir_all(dir.path().join(".idea")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".dbtui")).unwrap();
+        for f in ["dataSources.xml", "dataSources.local.xml"] {
+            std::fs::copy(offline_project().join(".idea").join(f), dir.path().join(".idea").join(f)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join(".dbtui/connections.json"),
+            r#"[{"uuid": "r1", "name": "cache-local", "group": "c", "kind": "redis", "host": "127.0.0.1", "port": 1}]"#,
+        )
+        .unwrap();
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("cache-local".into(), window, cx)));
+        draw(cx);
+        // ⌘↵ 도 Redis 탭에서는 RedisView 로 간다(같은 이중 대여 길)
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.run_query(false, window, cx)));
+        draw(cx);
         cx.update(|_, cx| {
             let w = ws.read(cx);
-            assert!(matches!(w.bodies.get(&w.tabs.tabs[0].id), Some(Body::Sql { result: Some(_), .. })));
+            let t = w.tabs.active().unwrap();
+            assert!(matches!(w.bodies.get(&t.id), Some(Body::Redis { .. })));
         });
     }
 

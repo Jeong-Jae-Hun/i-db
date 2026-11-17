@@ -222,6 +222,7 @@ fn apply_look(prefs: &Prefs, font: &FontChoice, window: &mut Window, cx: &mut Ap
 }
 
 pub fn run() {
+    crate::vm::crashlog::install();
     let initial = match initial_target() {
         Ok(t) => t,
         Err(e) => {

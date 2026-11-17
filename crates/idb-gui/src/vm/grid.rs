@@ -53,17 +53,17 @@ impl Grid {
         self.view.is_empty()
     }
 
-    /// 보이는 i 번째 줄의 원본 자리다.
-    pub fn source_row(&self, i: usize) -> usize {
-        self.view[i]
+    /// 보이는 i 번째 줄의 원본 자리다. 거르기로 줄이 줄었는데 표가 옛 선택(줄 번호)을 들고 있을 수 있어 범위를 본다.
+    pub fn source_row(&self, i: usize) -> Option<usize> {
+        self.view.get(i).copied()
     }
 
     pub fn source(&self, src: usize) -> &[String] {
-        &self.rows[src]
+        self.rows.get(src).map_or(&[], Vec::as_slice)
     }
 
     pub fn cell(&self, i: usize, col: usize) -> &str {
-        self.rows[self.view[i]].get(col).map_or("", String::as_str)
+        self.source_row(i).and_then(|r| self.rows[r].get(col)).map_or("", String::as_str)
     }
 
     pub fn sort_state(&self) -> Option<(usize, Dir)> {
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(ids(&g), vec!["100", "10", "9", "NULL"]);
         g.sort_by(None);
         assert_eq!(ids(&g), vec!["10", "NULL", "9", "100"]);
-        assert_eq!(g.source_row(1), 1);
+        assert_eq!(g.source_row(1), Some(1));
     }
 
     #[test]
@@ -213,7 +213,7 @@ mod tests {
         g.sort_by(Some((0, Dir::Desc)));
         g.set_filter("AP");
         assert_eq!(ids(&g), vec!["3", "1"]);
-        assert_eq!(g.source_row(0), 2);
+        assert_eq!(g.source_row(0), Some(2));
         g.set_filter("");
         assert_eq!(g.len(), 3);
     }
@@ -225,6 +225,18 @@ mod tests {
         g.append(vec![vec!["2".into(), "b".into()], vec!["3".into(), "c".into()]]);
         assert_eq!(g.source_len(), 3);
         assert_eq!(ids(&g), vec!["2"]);
+    }
+
+    #[test]
+    fn 거르기로_줄어든_뒤_옛_줄_번호를_물어도_넘어지지_않는다() {
+        let mut g = Grid::new(rs(&[&["1", "a"], &["2", "b"], &["3", "c"]]));
+        g.set_filter("c");
+        assert_eq!(g.len(), 1);
+        assert_eq!(g.source_row(2), None);
+        assert_eq!(g.cell(2, 0), "");
+        assert_eq!(g.cell(0, 9), "");
+        assert!(g.source(99).is_empty());
+        assert_eq!(g.tsv([5], &[0, 1], false), "\t");
     }
 
     #[test]

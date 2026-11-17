@@ -54,7 +54,9 @@ pub struct GridDelegate {
 
 impl GridDelegate {
     fn display(&self, row: usize, col: usize) -> (String, CellMark) {
-        let src = self.grid.source_row(row);
+        let Some(src) = self.grid.source_row(row) else {
+            return (String::new(), CellMark::Plain);
+        };
         let base = self.grid.cell(row, col).to_string();
         let Some(e) = &self.edits else {
             return (base, CellMark::Plain);
@@ -151,7 +153,11 @@ impl TableDelegate for GridDelegate {
             .edits
             .as_ref()
             .map(|e| (e.origin.table.schema.clone(), e.origin.table.table.clone()));
-        let src = self.grid.source(self.grid.source_row(row_ix)).to_vec();
+        let src = self
+            .grid
+            .source_row(row_ix)
+            .map(|r| self.grid.source(r).to_vec())
+            .unwrap_or_default();
         let insert = sqlcopy::insert_sql(table.as_ref().map(|(s, t)| (s.as_str(), t.as_str())), &self.grid.cols, &[src]);
         let col_vals: Vec<String> = (0..self.grid.len()).map(|i| self.grid.cell(i, col).to_string()).collect();
         let in_list = sqlcopy::in_list(&col_vals.iter().map(String::as_str).collect::<Vec<_>>());
@@ -205,6 +211,10 @@ impl TableDelegate for GridDelegate {
                     Ok(Ok(page)) => {
                         d.more = page.result.rows.len() as u64 >= d.page;
                         d.grid.append(page.result.rows);
+                        let n = d.grid.source_len();
+                        if let Some(e) = d.edits.as_mut() {
+                            e.rebase(n);
+                        }
                     }
                     _ => d.more = false,
                 }
@@ -234,6 +244,20 @@ pub struct ResultsView {
 }
 
 impl ResultsView {
+    /// 작업 공간을 고친다. 이 뷰는 작업 공간의 콜백(select_conn·실행 done) 안에서 만들어지거나 불릴 때가 많다.
+    /// 그때 바로 `update` 하면 GPUI 가 같은 엔티티를 두 번 빌려 패닉하고, AppKit 콜백 안이라 앱이 abort 된다.
+    /// 그래서 늘 효과 주기 끝으로 미룬다.
+    fn with_ws(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    ) {
+        let ws = self.ws.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = ws.update(cx, |ws, cx| f(ws, window, cx));
+        });
+    }
     // 창(window)·cx 두 자리가 늘 붙는 GPUI 뷰 함수라 묶음 구조체를 따로 두지 않는다
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -298,6 +322,9 @@ impl ResultsView {
                     let f = input.read(cx).value().to_string();
                     this.table.update(cx, |t, cx| {
                         t.delegate_mut().grid.set_filter(&f);
+                        // 줄 번호가 바뀌므로 옛 선택을 버린다(넘는 줄 번호로 복사·삭제하지 않게)
+                        t.clear_selection(cx);
+                        t.delegate_mut().ctx_cell = None;
                         t.refresh(cx);
                     });
                 }
@@ -381,8 +408,11 @@ impl ResultsView {
     }
 
     fn status(&self, msg: &str, error: bool, cx: &mut Context<Self>) {
-        let msg = msg.to_string();
-        let _ = self.ws.update(cx, |ws, cx| ws.set_status(msg, error, cx));
+        let (msg, ws) = (msg.to_string(), self.ws.clone());
+        // with_ws 와 같은 까닭으로 미룬다(창이 없는 자리에서도 부른다)
+        gpui::App::defer(cx, move |cx| {
+            let _ = ws.update(cx, |ws, cx| ws.set_status(msg, error, cx));
+        });
     }
 
     // ─── 편집 ───
@@ -394,7 +424,7 @@ impl ResultsView {
                 self.status("이 결과는 고칠 수 없다(한 테이블의 PK 열이 모두 있어야 한다)", true, cx);
                 return;
             };
-            let src = d.grid.source_row(row);
+            let Some(src) = d.grid.source_row(row) else { return };
             (src, d.grid.cell(row, col).to_string(), d.display(row, col).0, e.editable(col))
         };
         if !editable {
@@ -403,7 +433,7 @@ impl ResultsView {
         }
         let input = cx.new(|cx| InputState::new(window, cx).default_value(shown));
         let this = cx.entity().downgrade();
-        let col_name = self.table.read(cx).delegate().grid.cols[col].clone();
+        let col_name = self.table.read(cx).delegate().grid.cols.get(col).cloned().unwrap_or_default();
         let first = std::cell::Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
             if first.replace(false) {
@@ -477,11 +507,10 @@ impl ResultsView {
     fn toggle_delete(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
             let row = t.selected_cell().map(|(r, _)| r).or(t.selected_row());
-            if let Some(r) = row {
-                let src = t.delegate().grid.source_row(r);
-                if let Some(e) = t.delegate_mut().edits.as_mut() {
-                    e.toggle_delete(src);
-                }
+            if let Some(src) = row.and_then(|r| t.delegate().grid.source_row(r))
+                && let Some(e) = t.delegate_mut().edits.as_mut()
+            {
+                e.toggle_delete(src);
             }
             t.refresh(cx);
         });
@@ -555,7 +584,7 @@ impl ResultsView {
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
         let sent = cs.clone();
-        let _ = self.ws.update(cx, |ws, cx| {
+        self.with_ws(window, cx, move |ws, window, cx| {
             ws.guarded(
                 "반영",
                 Rc::new(move |e: Engine, c: Confirms| {
@@ -585,7 +614,7 @@ impl ResultsView {
         };
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
-        let _ = self.ws.update(cx, |ws, cx| {
+        self.with_ws(window, cx, move |ws, window, cx| {
             ws.guarded(
                 "반영 되돌리기",
                 Rc::new(move |e: Engine, c: Confirms| {
@@ -613,7 +642,7 @@ impl ResultsView {
         }
         let source = self.source.clone();
         let conn = self.conn.clone();
-        let _ = self.ws.update(cx, |ws, cx| ws.load_source(conn, source, window, cx));
+        self.with_ws(window, cx, move |ws, window, cx| ws.load_source(conn, source, window, cx));
     }
 
     fn add_row(&mut self, cx: &mut Context<Self>) {

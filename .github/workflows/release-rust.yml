@@ -144,14 +144,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show active-toolchain || rustup toolchain install
       - run: rustup target add aarch64-apple-darwin
-      - run: cargo build --release --locked --target aarch64-apple-darwin -p idb-gui --bin i-db
+      - run: cargo build --profile release-gui --locked --target aarch64-apple-darwin -p idb-gui --bin i-db
       - name: bundle
         run: |
           set -euo pipefail
           ver=${TAG#rs-}; ver=${ver#v}
           app=dist/i-db.app
           rm -rf "$app" && mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp target/aarch64-apple-darwin/release/i-db "$app/Contents/MacOS/i-db"
+          cp target/aarch64-apple-darwin/release-gui/i-db "$app/Contents/MacOS/i-db"
           sed "s/__VERSION__/$ver/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           plutil -lint "$app/Contents/Info.plist"
           iconset="$(mktemp -d)/AppIcon.iconset"

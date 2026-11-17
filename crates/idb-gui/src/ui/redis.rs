@@ -33,6 +33,20 @@ pub struct RedisView {
 }
 
 impl RedisView {
+    /// 작업 공간을 고친다. 이 뷰는 작업 공간의 콜백(select_conn·실행 done) 안에서 만들어지거나 불릴 때가 많다.
+    /// 그때 바로 `update` 하면 GPUI 가 같은 엔티티를 두 번 빌려 패닉하고, AppKit 콜백 안이라 앱이 abort 된다.
+    /// 그래서 늘 효과 주기 끝으로 미룬다.
+    fn with_ws(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    ) {
+        let ws = self.ws.clone();
+        window.defer(cx, move |window, cx| {
+            let _ = ws.update(cx, |ws, cx| f(ws, window, cx));
+        });
+    }
     pub fn new(
         ws: WeakEntity<Workspace>,
         rt: Rc<Runtime>,
@@ -55,7 +69,7 @@ impl RedisView {
                 }
             }),
         ];
-        let mut v = RedisView {
+        let v = RedisView {
             ws,
             rt,
             engine,
@@ -68,14 +82,15 @@ impl RedisView {
             value: None,
             _subs: subs,
         };
-        v.scan(window, cx);
+        // 작업 공간의 select_conn 안에서 만들어진다. 지금 scan 하면 작업 공간을 두 번 빌려 패닉한다
+        cx.defer_in(window, |v, window, cx| v.scan(window, cx));
         v
     }
 
     fn scan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (conn, pat) = (self.conn.clone(), self.pattern.read(cx).value().to_string());
         let this = cx.entity().downgrade();
-        let _ = self.ws.update(cx, |ws, cx| {
+        self.with_ws(window, cx, move |ws, window, cx| {
             ws.guarded(
                 "키 찾기",
                 Rc::new(move |e: Engine, _| {
@@ -105,7 +120,7 @@ impl RedisView {
         self.selected = Some(key.clone());
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
-        let _ = self.ws.update(cx, |ws, cx| {
+        self.with_ws(window, cx, move |ws, window, cx| {
             ws.guarded(
                 "값 읽기",
                 Rc::new(move |e: Engine, _| {
@@ -150,7 +165,7 @@ impl RedisView {
         }
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
-        let _ = self.ws.update(cx, |ws, cx| {
+        self.with_ws(window, cx, move |ws, window, cx| {
             ws.guarded(
                 "Redis 명령",
                 Rc::new(move |e: Engine, c: Confirms| {

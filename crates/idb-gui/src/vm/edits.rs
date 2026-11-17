@@ -157,6 +157,21 @@ impl Edits {
         true
     }
 
+    /// 테이블 보기가 다음 쪽을 붙여 원본 행이 늘었다. 추가 행 자리(원본 뒤)를 그만큼 민다.
+    /// 밀지 않으면 붙은 쪽의 행을 고칠 때 추가 행으로 잘못 보고 INSERT 를 만든다.
+    pub fn rebase(&mut self, base_rows: usize) {
+        if base_rows <= self.base_rows {
+            return;
+        }
+        let (old, delta) = (self.base_rows, base_rows - self.base_rows);
+        let shift = |r: usize| if r >= old { r + delta } else { r };
+        self.rows = std::mem::take(&mut self.rows).into_iter().map(|(r, e)| (shift(r), e)).collect();
+        for (r, _) in &mut self.log {
+            *r = shift(*r);
+        }
+        self.base_rows = base_rows;
+    }
+
     pub fn clear(&mut self) {
         self.rows.clear();
         self.log.clear();
@@ -191,9 +206,11 @@ impl Edits {
                     old: BTreeMap::new(),
                 };
                 if !e.inserted {
-                    let row = &rows[i];
+                    // 바꿈은 원본 행 자리에만 붙는다. 없는 행이면(있을 수 없지만) 보내지 않는다
+                    let Some(row) = rows.get(i) else { continue };
+                    let cell = |c: usize| row.get(c).cloned().unwrap_or_default();
                     for (k, name) in o.pk.iter().enumerate() {
-                        ch.key.insert(name.clone(), row[self.pk_cols[k]].clone());
+                        ch.key.insert(name.clone(), cell(self.pk_cols[k]));
                     }
                     // 옛값: 수정은 바꾸는 열, 삭제는 PK 가 아닌 모든 테이블 열. 그새 바뀐 행을 고치지 않게 엔진이 WHERE 로 확인한다
                     for (c, name) in o.cols.iter().enumerate() {
@@ -201,7 +218,7 @@ impl Edits {
                         if name.is_empty() || (!e.deleted && !edited) || (e.deleted && o.pk.contains(name)) {
                             continue;
                         }
-                        let v = &row[c];
+                        let v = cell(c);
                         if v.len() > MAX_CELL_BYTES {
                             continue;
                         }
@@ -210,7 +227,9 @@ impl Edits {
                 }
                 if !e.deleted {
                     for (&c, v) in &e.vals {
-                        ch.values.insert(o.cols[c].clone(), v.clone());
+                        if let Some(name) = o.cols.get(c) {
+                            ch.values.insert(name.clone(), v.clone());
+                        }
                     }
                 }
                 // 값을 하나도 안 정한 추가 행은 보내지 않는다(엔진이 빈 INSERT 를 거절한다)
@@ -326,6 +345,36 @@ mod tests {
         assert!(e.undo());
         assert_eq!(e.pending(), 0);
         assert!(!e.undo());
+    }
+
+    #[test]
+    fn 다음_쪽이_붙으면_추가_행을_밀고_붙은_행은_수정이다() {
+        let mut e = Edits::new(origin(), 2).unwrap();
+        let r = e.add_row();
+        e.set(r, 1, Some("new".into()), None).unwrap();
+        e.rebase(3);
+        let mut all = rows();
+        all.push(vec!["3".into(), "lee".into(), "z".into()]);
+        // 새로 붙은 2번 행을 고치면 UPDATE 다
+        assert!(!e.is_inserted(2));
+        e.set(2, 1, Some("choi".into()), Some("lee")).unwrap();
+        let cs = e.change_set(&all);
+        let ops: Vec<ChangeOp> = cs.changes.iter().map(|c| c.op).collect();
+        assert_eq!(ops, vec![ChangeOp::Update, ChangeOp::Insert]);
+        assert_eq!(cs.changes[0].key, BTreeMap::from([("id".to_string(), "3".to_string())]));
+        assert!(e.is_inserted(3));
+        assert_eq!(e.value(3, 1), Some(Some("new")));
+        // 되돌리기도 민 자리를 따른다
+        assert!(e.undo());
+        assert!(e.undo());
+        assert_eq!(e.value(3, 1), None);
+    }
+
+    #[test]
+    fn 없는_행의_바꿈은_보내지_않는다() {
+        let mut e = Edits::new(origin(), 2).unwrap();
+        e.set(1, 1, Some("x".into()), Some("NULL")).unwrap();
+        assert!(e.change_set(&rows()[..1]).changes.is_empty());
     }
 
     #[test]
