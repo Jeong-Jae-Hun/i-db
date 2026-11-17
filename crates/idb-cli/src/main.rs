@@ -46,8 +46,32 @@ fn tui_options(args: &[String]) -> Result<idb_tui::Options, String> {
     Ok(o)
 }
 
+/// 앞에 둔 `-p 폴더`·`--remote 이름` 뒤에 하위 명령이 오면(`db-rs --remote devbox conns`, 별칭 `dbw conns`)
+/// 그 플래그를 명령 뒤로 옮긴다. 하위 명령이 없으면 그대로 두어 화면 플래그로 읽힌다.
+fn lead_flags_after_command(args: Vec<String>) -> Vec<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let name = a.split_once('=').map_or(a, |(n, _)| n);
+        if !matches!(name, "-p" | "--p" | "-remote" | "--remote") {
+            break;
+        }
+        i += if a.contains('=') { 1 } else { 2 };
+    }
+    let is_command = |a: &str| a == "serve" || a == "mcp" || cli::is_cli_command(a);
+    match args.get(i) {
+        Some(cmd) if i > 0 && is_command(cmd) => {
+            let mut out = vec![cmd.clone()];
+            out.extend_from_slice(&args[..i]);
+            out.extend_from_slice(&args[i + 1..]);
+            out
+        }
+        _ => args,
+    }
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = lead_flags_after_command(std::env::args().skip(1).collect());
     if args.first().is_some_and(|a| a == "serve") {
         // 패닉 값에는 SQL·서버 응답이 섞여 비밀번호가 나올 수 있어 찍지 않는다
         std::panic::set_hook(Box::new(|_| {}));
@@ -92,4 +116,36 @@ fn main() {
         std::process::exit(cli::EXIT_ERR);
     }
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod lead_flag_tests {
+    use super::lead_flags_after_command;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn 앞에_둔_remote_는_하위_명령_뒤로_옮긴다() {
+        assert_eq!(
+            lead_flags_after_command(v(&["--remote", "devbox", "conns"])),
+            v(&["conns", "--remote", "devbox"])
+        );
+        assert_eq!(
+            lead_flags_after_command(v(&["--remote=devbox", "-p", "x", "query", "-c", "a"])),
+            v(&["query", "--remote=devbox", "-p", "x", "-c", "a"])
+        );
+        assert_eq!(
+            lead_flags_after_command(v(&["--remote", "devbox", "mcp"])),
+            v(&["mcp", "--remote", "devbox"])
+        );
+    }
+
+    #[test]
+    fn 하위_명령이_없으면_화면_플래그로_둔다() {
+        assert_eq!(lead_flags_after_command(v(&["--remote", "devbox"])), v(&["--remote", "devbox"]));
+        assert_eq!(lead_flags_after_command(v(&["conns", "-p", "x"])), v(&["conns", "-p", "x"]));
+        assert_eq!(lead_flags_after_command(v(&["-p", "x", "nope"])), v(&["-p", "x", "nope"]));
+    }
 }
