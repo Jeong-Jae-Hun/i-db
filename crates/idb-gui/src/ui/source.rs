@@ -101,7 +101,7 @@ impl SourceView {
         cx.notify();
     }
 
-    fn open(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(path.clone());
         let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
         self.with_ws(window, cx, move |ws, window, cx| {
