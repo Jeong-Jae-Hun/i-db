@@ -150,7 +150,7 @@ impl LocalEngine {
         match req {
             Request::Hello { .. } => json(Hello {
                 version: PROTOCOL_VERSION,
-                server: "db-rs".into(),
+                server: "db".into(),
             }),
             Request::Cancel { .. } => Err(EngineError::usage("cancel is handled by serve")),
             Request::Project => json(self.project()),

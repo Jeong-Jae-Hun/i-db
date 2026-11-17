@@ -1,4 +1,12 @@
-//! golden.rs(로컬)·remote.rs(--remote 고리)가 같이 쓰는 골든 러너. 형식·자리 규칙은 레포 루트 golden_test.go 머리 주석과 같다.
+//! golden.rs(로컬)·remote.rs(--remote 고리)가 같이 쓰는 골든 러너.
+//!
+//! testdata/golden/cases.json 의 명령을 돌려 종료 코드·stdout·stderr 를 out/<name>.txt 와 바이트로 비교한다.
+//! out/ 은 v0.x Go 판이 만든 기대 출력이다. Go 판을 지운 뒤로는 다시 만들 수 없으니, 새 케이스는 db 출력을
+//! 사람이 확인한 뒤 같은 꼴(`args:`·`exit:`·`--- stdout`·`--- stderr`)로 넣고 rust-ported.txt 에 이름을 적는다.
+//!   - project "offline" 은 닿지 않는 주소만 든 프로젝트다(설정 읽기·사용법·안전장치 거절).
+//!   - project "live" 는 ${PG_HOST} 같은 자리를 DBTUI_TEST_PG_URL·DBTUI_TEST_REDIS_ADDR 로 채운다. 순서대로 돈다.
+//!   - DBTUI_PROJECT 는 /golden/project, XDG_STATE_HOME·HOME 은 빈 임시 폴더다.
+//!   - 인자의 {P} 는 프로젝트를 복사한 임시 폴더다. 출력에서는 다시 {P} 로 바꾸고, "elapsed_ms":N 은 0 으로 바꾼다.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -108,8 +116,8 @@ fn go_query_escape(s: &str) -> String {
     out
 }
 
-/// 골든 케이스를 돌려 Go 판 출력과 비교한다. remote 가 Some(명령들)이면 그 명령의 케이스만 `--remote` 를 붙여
-/// 같은 프로젝트를 여는 `db-rs serve` 를 거쳐 돌린다(DB_REMOTE_CMD, 시험 전용). 출력은 로컬과 바이트까지 같아야 한다.
+/// 골든 케이스를 돌려 기대 출력과 비교한다. remote 가 Some(명령들)이면 그 명령의 케이스만 `--remote` 를 붙여
+/// 같은 프로젝트를 여는 `db serve` 를 거쳐 돌린다(DB_REMOTE_CMD, 시험 전용). 출력은 로컬과 바이트까지 같아야 한다.
 pub fn run_golden(remote: Option<&[&str]>) {
     let root = root();
     let golden = root.join("testdata/golden");
@@ -125,7 +133,7 @@ pub fn run_golden(remote: Option<&[&str]>) {
         assert!(cases.iter().any(|c| &c.name == p), "rust-ported.txt names unknown case {p}");
     }
     let live = live_vars();
-    let tmp = std::env::temp_dir().join(format!("db-rs-golden-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("db-golden-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     let state = tmp.join("state");
     fs::create_dir_all(&state).unwrap();
@@ -149,10 +157,10 @@ pub fn run_golden(remote: Option<&[&str]>) {
             })
             .clone();
         let mut args: Vec<String> = c.args.iter().map(|a| a.replace("{P}", &dir)).collect();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_db-rs"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_db"));
         if remote.is_some() {
             args.splice(1..1, ["--remote".to_string(), "loop".to_string()]);
-            cmd.env("DB_REMOTE_CMD", format!("{} serve -p {dir}", env!("CARGO_BIN_EXE_db-rs")));
+            cmd.env("DB_REMOTE_CMD", format!("{} serve -p {dir}", env!("CARGO_BIN_EXE_db")));
         }
         let mut child = cmd
             .args(&args)

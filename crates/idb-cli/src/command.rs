@@ -190,7 +190,7 @@ pub async fn run_command(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>, std
             }
             // 읽기 전용 실행은 바인딩을 받지 않아 값을 리터럴로 넣는다(R51 과 같은 방식)
             "query" | "explain" => pg.run_read_only_rows(&inline_args(&sql, &args), o.max_rows as usize).await?,
-            _ => return Err(Error::msg(format!("db {}: not yet ported to db-rs", o.cmd))),
+            _ => return Err(Error::msg(format!("db {}: unknown command", o.cmd))),
         })
     })
     .await?;

@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! db-rs 를 실제로 띄워 보는 PostgreSQL·Redis 명령 시험. Go `cli_test.go` 의 안전장치·입력·통합 시험을 옮겼다.
+//! db 를 실제로 띄워 보는 PostgreSQL·Redis 명령 시험. Go `cli_test.go` 의 안전장치·입력·통합 시험을 옮겼다.
 //! 가짜 프로젝트의 접속은 닿지 않는 주소(127.0.0.1:1)라 거절은 접속 전에, 허락된 명령은 접속 오류(1)로 끝난다.
 //! 통합 시험은 DBTUI_TEST_PG_URL·DBTUI_TEST_REDIS_ADDR 가 있을 때만 돈다.
 
@@ -90,12 +90,12 @@ fn fake_project() -> tempfile::TempDir {
 }
 
 fn db_rs(args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_db-rs"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_db"));
     cmd.args(args).env_remove("DBTUI_PROJECT");
     cmd
 }
 
-/// 표준 입력에 stdin 을 넣고 db-rs 를 돌린다. 터미널이 아닌 stdout 이다.
+/// 표준 입력에 stdin 을 넣고 db 를 돌린다. 터미널이 아닌 stdout 이다.
 fn run(stdin: &str, args: &[&str]) -> (i32, String, String) {
     let mut child = db_rs(args)
         .stdin(Stdio::piped())
@@ -104,7 +104,7 @@ fn run(stdin: &str, args: &[&str]) -> (i32, String, String) {
         .spawn()
         .unwrap();
     let mut input = child.stdin.take().unwrap();
-    // 16MiB 를 넘는 입력은 db-rs 가 다 읽지 않고 끝내 쓰기가 끊길 수 있다
+    // 16MiB 를 넘는 입력은 db 가 다 읽지 않고 끝내 쓰기가 끊길 수 있다
     let _ = input.write_all(stdin.as_bytes());
     drop(input);
     let out = child.wait_with_output().unwrap();

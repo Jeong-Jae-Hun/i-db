@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! db-rs: i-db 의 Rust 판. 지금은 화면 없는 하위 명령(R58)만 옮기는 중이다.
+//! db: i-db 의 실행 파일. 하위 명령이 없으면 화면(TUI), 있으면 CLI·serve·mcp 다.
 
 mod board_cmd;
 mod cli;
@@ -22,6 +22,7 @@ fn tui_options(args: &[String]) -> Result<idb_tui::Options, String> {
     let mut o = idb_tui::Options {
         project: None,
         remote: None,
+        update_notice: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -32,21 +33,21 @@ fn tui_options(args: &[String]) -> Result<idb_tui::Options, String> {
         let slot = match flag {
             "-p" | "--p" => &mut o.project,
             "-remote" | "--remote" => &mut o.remote,
-            _ => return Err(format!("db-rs: unknown flag {a} (db-rs [-p 폴더] [--remote 이름])")),
+            _ => return Err(format!("db: unknown flag {a} (db [-p 폴더] [--remote 이름])")),
         };
         let v = match inline {
             Some(v) => v,
-            None => it.next().cloned().ok_or_else(|| format!("db-rs: flag needs an argument: {flag}"))?,
+            None => it.next().cloned().ok_or_else(|| format!("db: flag needs an argument: {flag}"))?,
         };
         if v.is_empty() {
-            return Err(format!("db-rs: flag needs an argument: {flag}"));
+            return Err(format!("db: flag needs an argument: {flag}"));
         }
         *slot = Some(v);
     }
     Ok(o)
 }
 
-/// 앞에 둔 `-p 폴더`·`--remote 이름` 뒤에 하위 명령이 오면(`db-rs --remote devbox conns`, 별칭 `dbw conns`)
+/// 앞에 둔 `-p 폴더`·`--remote 이름` 뒤에 하위 명령이 오면(`db --remote devbox conns`, 별칭 `dbw conns`)
 /// 그 플래그를 명령 뒤로 옮긴다. 하위 명령이 없으면 그대로 두어 화면 플래그로 읽힌다.
 fn lead_flags_after_command(args: Vec<String>) -> Vec<String> {
     let mut i = 0;
@@ -82,10 +83,20 @@ fn main() {
         std::panic::set_hook(Box::new(|_| {}));
         std::process::exit(cli::run_serve(&args[1..]));
     }
-    // 하위 명령이 없으면 화면이다: `db-rs`, `db-rs -p 폴더`, `db-rs --remote 이름`
+    // 하위 명령이 없으면 화면이다: `db`, `db -p 폴더`, `db --remote 이름`
     if args.first().is_none_or(|a| a.starts_with('-')) {
         std::process::exit(match tui_options(&args) {
-            Ok(o) => idb_tui::run(o),
+            Ok(mut o) => {
+                let u = update_cmd::default_updater();
+                let (src, repo) = (u.src.clone(), u.repo.clone());
+                o.update_notice = update_cmd::update_notice(
+                    |k| std::env::var(k).ok(),
+                    &u.current,
+                    update_cmd::update_check_path(),
+                    Box::new(move || update_cmd::fetch_latest_tag(src, repo)),
+                );
+                idb_tui::run(o)
+            }
             Err(e) => {
                 eprintln!("{e}");
                 cli::EXIT_USAGE
@@ -97,7 +108,7 @@ fn main() {
         std::process::exit(mcp::run_mcp(&args[1..]));
     }
     if args.first().is_none_or(|a| !cli::is_cli_command(a)) {
-        eprintln!("db-rs: unknown command {:?} (db-rs help)", args[0]);
+        eprintln!("db: unknown command {:?} (db help)", args[0]);
         std::process::exit(cli::EXIT_USAGE);
     }
     let stdin_tty = std::io::stdin().is_terminal();

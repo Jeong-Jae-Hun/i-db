@@ -50,13 +50,30 @@ db update --version v0.11.0 --force   # go back to an older release
 
 If the binary's folder is not writable, it stops with `쓸 수 없음: <path> (sudo 로 다시)`. Builds from source (`dev`) are only replaced with `--force`. The TUI checks for a new release once a day at startup and shows `새 판 vX — db update` in the status line (`DB_UPDATE_CHECK=0` turns this off).
 
-### go install
+### From source
 
 ```sh
-go install github.com/Jeong-Jae-Hun/i-db@latest
+cargo build --release          # target/release/db (CLI, TUI, serve, mcp)
+cargo build --release -p idb-gui --bin i-db   # macOS GUI (needs Xcode and the Metal toolchain)
 ```
 
-Go names the binary after the module, so this installs `i-db`, not `db`. Rename or alias it if you want the short name (`mv "$(go env GOPATH)/bin/i-db" "$(go env GOPATH)/bin/db"`). The examples below use `db`.
+### macOS GUI
+
+`i-db.app` (GPUI, D2Coding font) ships as `i-db_darwin_arm64.zip` in each release:
+
+```sh
+brew install --cask jeong-jae-hun/tap/i-db
+```
+
+### Use the WSL connections from a Mac (SSH remote)
+
+`db --remote devbox …` (CLI, TUI, MCP and the GUI picker) runs `ssh devbox db serve -p <project>` and talks over stdin/stdout, so connection definitions, `.env` passwords and VPN routes stay on the remote machine and safety checks run there. Targets live in `~/.config/db/remote.json`:
+
+```json
+{"devbox": {"ssh": "devbox", "db": "~/.local/bin/db", "project": "~/work/db"}}
+```
+
+The protocol is in [docs/serve-protocol.md](docs/serve-protocol.md).
 
 ## Quick start
 
@@ -361,7 +378,7 @@ claude mcp add db -- db mcp -p ~/work/db-project --max-rows 100
 ## Development
 
 ```sh
-go vet ./... && go test ./...
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
 Integration tests run when these point at disposable servers:
@@ -369,12 +386,12 @@ Integration tests run when these point at disposable servers:
 ```sh
 docker run -d --name dbtui-it-pg -e POSTGRES_PASSWORD=itpass -p 127.0.0.1:55432:5432 postgres:16-alpine
 docker run -d --name dbtui-it-redis -p 127.0.0.1:56379:6379 redis:7-alpine
-DBTUI_TEST_PG_URL=postgres://postgres:itpass@127.0.0.1:55432/postgres DBTUI_TEST_REDIS_ADDR=127.0.0.1:56379 go test ./...
+DBTUI_TEST_PG_URL=postgres://postgres:itpass@127.0.0.1:55432/postgres DBTUI_TEST_REDIS_ADDR=127.0.0.1:56379 cargo test
 ```
 
 `DBTUI_TEST_PROJECT=<project>` with `DBTUI_TEST_CONNS=<name>,<name>` additionally connects read-only to those real connections.
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`: tests against Postgres and Redis service containers, then builds the four archives and creates the GitHub Release.
+Pushing a `v*` tag runs `.github/workflows/release.yml`: tests against Postgres and Redis service containers, then builds static linux (amd64, arm64) and darwin (arm64, amd64) archives plus `i-db_darwin_arm64.zip`, and publishes them with `checksums.txt`. CLI output is pinned by `testdata/golden` (expected output recorded from the v0.x Go build).
 
 ## License
 

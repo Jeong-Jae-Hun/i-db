@@ -12,7 +12,7 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 
 ## 인사와 취소
 
-첫 요청은 `{"id":1,"op":"hello","version":1}`이어야 한다. 답은 `{"version":1,"server":"db-rs"}`다. 그 전 요청과 다른 판은 code 2 다.
+첫 요청은 `{"id":1,"op":"hello","version":1}`이어야 한다. 답은 `{"version":1,"server":"db"}`다. 그 전 요청과 다른 판은 code 2 다.
 
 `{"id":9,"op":"cancel","target":5}`는 진행 중인 5 를 멈춘다. 5 는 code 1 `canceled`로 끝나고 9 의 답은 `{"canceled":true}`다(이미 끝났으면 false). PostgreSQL 실행을 멈추면 세션 연결이 닫히고 다음 실행은 한 번 R3.6 세션 유실 오류를 낸다. 단, `cli`는 serve 안에서 막는 작업이라 응답만 끊기고 명령은 `--timeout`까지 돈다.
 
@@ -129,4 +129,4 @@ ChangeSet 은 `{table:{schema,table}, pk:[…], changes:[{op:"update"|"insert"|"
 
 띄우는 명령은 `ssh -o BatchMode=yes -o ConnectTimeout=15 -T devbox '~/.local/bin/db serve -p ~/work/db'`다. 시스템 ssh 라 `~/.ssh/config`·키·ProxyJump 가 그대로 듣고, 비밀번호·호스트 키를 묻지 않고 실패한다. ssh 가 끝나면 종료 코드와 ssh 가 남긴 마지막 글을 오류에 붙인다.
 
-`DB_REMOTE_CMD`는 시험 전용이다. 있으면 설정 파일과 ssh 대신 그 명령(공백으로 나눔, 예: `db-rs serve -p /tmp/proj`)을 띄운다.
+`DB_REMOTE_CMD`는 시험 전용이다. 있으면 설정 파일과 ssh 대신 그 명령(공백으로 나눔, 예: `db serve -p /tmp/proj`)을 띄운다.

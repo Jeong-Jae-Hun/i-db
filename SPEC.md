@@ -81,6 +81,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R4.3 Redis 접속은 먼저 비밀번호 없이 평문으로 3초 안에 PING을 시도하고(TLS 전용 서버에 비밀번호를 평문으로 흘리지 않기 위해), 응답이 없으면 TLS로 다시 시도해야 한다. TLS의 서버 이름은 호스트의 CNAME 대상이다. 평문으로 답하면(응답 또는 `NOAUTH`) 비밀번호를 넣어 평문으로 붙는다.
   - 단, TLS 서버 이름은 인증되지 않은 DNS 응답(CNAME)에서 온다. 내부 DNS를 믿는다는 전제다.
   - PostgreSQL은 원격 호스트에 `sslmode=require`, localhost에는 `prefer`를 쓴다.
+  - `require`는 libpq·pgx와 같이 암호화만 하고 서버 인증서는 검증하지 않는다(2026-11-17 결정: Go 판과 같은 동작 유지). 인증서까지 확인하려면 그 접속의 `sslmode`를 `verify-full`로 둔다.
   - 예: `redis.stg.example.internal`(평문 응답 없음) → TLS, 서버 이름은 CNAME 대상 `app-stg-001.xxxxxx.cache.amazonaws.com`.
   - 예: `valkey.stg.example.internal` → 평문 PONG, TLS 시도 안 함.
 
@@ -289,7 +290,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
   - 예: `delete from t where id = 1;`, `update … from … where …` → 묻지 않음(stg·local). 주석·문자열 안의 `where`는 WHERE로 치지 않는다.
   - 예: `alter table t alter column c drop not null;`, `… drop default`·`drop identity`·`drop expression` → 묻지 않음(제약·기본값만 푼다). `alter table t drop constraint t_pk;` → `DROP`.
   - 단, `with … delete from t` 처럼 CTE 안의 쓰기와 함수 안의 쓰기는 R6과 같이 잡지 못한다.
-- R25.2 판정은 `internal/db.DangerOf(stmt)`(SQL)와 `DangerOfRedis(args)`가 한다. MCP는 쓰기를 막고 있어 쓰지 않는다.
+- R25.2 판정은 `idb_core::sqlsafe::danger_of(stmt)`(SQL)와 `danger_of_redis(args)`가 한다. MCP는 쓰기를 막고 있어 쓰지 않는다.
 
 ### R26 정의로 이동
 
@@ -350,7 +351,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 - R34.1 트리의 Redis 접속 줄에서 `A`는 `INFO` 요약(버전·가동 시간·메모리 사용/최대·클라이언트 수·초당 명령·적중률·DB별 키 수)을, `L`은 `SLOWLOG GET 50`(시각·걸린 시간·명령 앞 80자·클라이언트)을, `S`는 큰 키(`SCAN` 앞 1,000개의 `MEMORY USAGE` 상위 50개, 타입·TTL 포함)를 결과 표로 보인다. 모두 읽기 명령이라 prod에서도 묻지 않는다.
   - 단, 큰 키는 표본이라 전체 순위가 아니다. 표본은 `SCAN`이 준 순서의 앞 1,000개다. 표 위에 `표본 N개`를 적는다. SLOWLOG 명령 인자는 값이 들어 있을 수 있어 80자에서 자른다.
-  - 예: `MEMORY USAGE`를 못 쓰는 서버(모르는 명령·ACL `NOPERM`)면 큰 키 표를 만들지 않고 상태 줄에 알린다(`internal/db.ErrNoMemoryUsage`).
+  - 예: `MEMORY USAGE`를 못 쓰는 서버(모르는 명령·ACL `NOPERM`)면 큰 키 표를 만들지 않고 상태 줄에 알린다(`idb_engine::redis` 의 MEMORY USAGE 미지원 판정).
 - R34.2 키 값 보기 위 정보 줄에 `MEMORY USAGE` 바이트를 더한다. 명령을 못 쓰는 서버면 빼고 보인다.
 
 ### R35 IN 목록 복사
@@ -560,7 +561,7 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 - R58.2 읽기 명령은 R6 판정과 상관없이 서버 `READ ONLY` 트랜잭션(`RunReadOnly`)으로 돈다. prod 접속은 읽기도 `--prod`를 붙여야 하고, 없으면 `prod 접속은 --prod 가 필요함`으로 종료 코드 3이다. 쓰기는 `query --write`·`redis --write`로만 하고 prod에서는 `--prod`가 있어도 거절한다(prod 쓰기는 TUI에서 R6·R54를 거친다). `--write`여도 R25 위험 문장은 `--force` 없이는 거절한다.
   - 예: `db query -c app-prod "select 1"` → 종료 코드 3. `db query -c app-prod --prod "select 1"` → 실행. `db query -c app-stg --write "delete from t"` → `위험: WHERE 없는 DELETE (--force)`로 3.
   - 예: `query --write`의 첫 단어는 `insert`·`update`·`delete`·`merge`·`create`·`alter`·`drop`·`truncate`·`comment`·`grant`·`revoke`·`refresh`·`vacuum`·`analyze`·`reindex`·`cluster`·`select`·`with`만 받는다. `copy`·`do`·`call`·`set` 등은 `--force`여도 `--write 로 실행하지 않는 문장: COPY`로 3이다.
-  - 예: R6.1이 놓치는 CTE 안 쓰기(`with … (delete …)`), `select … into`, 읽기 경로가 막는 부수효과 함수(`pg_terminate_backend` 등) 호출은 `--write`여도 `위험: CTE 안 쓰기 (--force)`처럼 `--force`가 필요하다(`internal/db.HiddenWriteOf`).
+  - 예: R6.1이 놓치는 CTE 안 쓰기(`with … (delete …)`), `select … into`, 읽기 경로가 막는 부수효과 함수(`pg_terminate_backend` 등) 호출은 `--write`여도 `위험: CTE 안 쓰기 (--force)`처럼 `--force`가 필요하다(`idb_core::sqlsafe::hidden_write_of`).
   - 예: `explain`은 플래그와 상관없이 늘 READ ONLY다. Redis `KEYS`는 서버를 멈추므로 `--write`여도 거절하고 `SCAN 0 MATCH <패턴> COUNT 1000`을 권한다(3).
   - 단, `--write`의 결과 행은 화면과 같이 1,000행까지고 `--max-rows`로 늘지 않는다. 잘리면 `--write 는 1,000행 상한`을 알린다.
 - R58.3 출력과 오류에 비밀번호·AES 키·IV를 넣지 않는다(오류는 `db.Redact`). staticEncrypt 칸은 `--decrypt`일 때만 풀어 찍는다. CLI 실행은 실행 기록(R8)에 남기지 않는다.
@@ -923,6 +924,6 @@ DataGrip 프로젝트 하나를 원본으로 삼아 PostgreSQL과 Redis를 한 �
 
 ## 5. 구조와 검증
 
-Go, Bubble Tea v1, pgx v5, go-redis v9. 바이너리 하나로 `go install`한다.
+Rust(v1.0부터, 그 전 v0.x 는 Go). `crates/idb-core`(설정·상태 파일·SQL 판정), `idb-sources`(PostgreSQL 와이어·RESP·HTTP·AWS SDK, rustls), `idb-engine`(Local/Remote 공통 op, `db serve` stdio 프로토콜), `idb-cli`(`db`: CLI·serve·mcp), `idb-tui`(ratatui), `idb-gui`(GPUI, macOS). 실행 파일 `db` 하나에 CLI·TUI·serve·MCP 가 들고, 맥 GUI 는 `i-db.app` 이다.
 
 검증은 단위 테스트(설정 파싱, 문장 경계, Redis 인자 분리, 읽기 전용 판정, 화면 키·마우스 동작)와, `DBTUI_TEST_PG_URL`·`DBTUI_TEST_REDIS_ADDR`가 있을 때만 도는 통합 테스트(로컬 컨테이너)로 한다.
