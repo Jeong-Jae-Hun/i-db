@@ -7,7 +7,9 @@ use idb_core::result::QueryResult;
 use idb_core::sqlsafe::quote_ident;
 use tokio::sync::Mutex;
 
-use super::edit::{self, Applied, ChangeSet, Origin};
+use super::TableRef;
+use super::edit::{self, Applied, ChangeSet, Origin, text_array};
+use super::ops::PRIMARY_KEY_SQL;
 use super::{Pg, Pooled, run_on, wire};
 use crate::Error;
 
@@ -49,6 +51,7 @@ enum Job<'a> {
     },
     Apply(&'a ChangeSet),
     SearchPath(&'a str),
+    PrimaryKey(&'a TableRef),
 }
 
 fn search_path_sql(schema: &str) -> String {
@@ -72,6 +75,15 @@ impl Session {
     /// 편집 묶음을 한 트랜잭션(열린 트랜잭션 안이면 SAVEPOINT)으로 반영한다(R15.2).
     pub async fn apply(&self, cs: &ChangeSet) -> Ran {
         self.job(Job::Apply(cs)).await
+    }
+
+    /// 테이블의 PK 열이다. 세션 연결에서 찾아 그 트랜잭션 안에서 만들거나 바꾼 테이블·PK 도 본다(apply 와 같은 눈).
+    /// 열린 트랜잭션이면 SAVEPOINT 로 감싸 찾다 실패해도 사용자 트랜잭션이 깨지지 않는다.
+    pub async fn primary_key(&self, t: &TableRef) -> Result<Vec<String>, Error> {
+        self.job(Job::PrimaryKey(t))
+            .await
+            .res
+            .map(|r| r.rows.into_iter().next().unwrap_or_default())
     }
 
     /// `SET search_path TO "<schema>", public` 을 보내고 성공하면 기억한다(R27.2).
@@ -133,6 +145,11 @@ impl Session {
             Job::Apply(cs) => edit::apply_changes(c, cs).await.map(|(r, a)| {
                 applied = Some(a);
                 r
+            }),
+            // 결과는 PK 열 이름을 행 하나에 담는다
+            Job::PrimaryKey(t) => primary_key_on(c, t).await.map(|pk| QueryResult {
+                rows: vec![pk],
+                ..Default::default()
             }),
             Job::SearchPath(schema) => match c.exec(&search_path_sql(schema)).await {
                 Ok(()) => {
@@ -206,4 +223,22 @@ async fn run_session(c: &mut wire::Conn, sql: &str, params: &[Option<&str>], rea
             Err(re) => Err(Error::msg(format!("{e}\nrollback: {re}"))),
         },
     }
+}
+
+async fn primary_key_on(c: &mut wire::Conn, t: &TableRef) -> Result<Vec<String>, Error> {
+    let in_tx = c.in_tx();
+    if in_tx {
+        c.exec("SAVEPOINT dbtui_pk").await?;
+    }
+    let rows = c.query(PRIMARY_KEY_SQL, &[Some(&t.quoted())], 1).await;
+    if in_tx {
+        let end = if rows.is_ok() {
+            "RELEASE SAVEPOINT dbtui_pk"
+        } else {
+            "ROLLBACK TO SAVEPOINT dbtui_pk; RELEASE SAVEPOINT dbtui_pk"
+        };
+        c.exec(end).await?;
+    }
+    let rows = rows?;
+    Ok(rows.rows.first().map(|_| text_array(&rows.text(0, 0))).unwrap_or_default())
 }

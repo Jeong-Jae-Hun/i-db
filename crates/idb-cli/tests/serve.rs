@@ -684,3 +684,41 @@ fn Redis_KEYS_는_접속하기_전에_CLI_와_같은_글로_거절한다() {
     }
     s.finish(&secrets(tmp.path()));
 }
+
+#[test]
+fn live_편집_반영의_PK_는_세션_트랜잭션_안에서_찾는다() {
+    let Some(vars) = common::live_vars() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    common::copy_project(&common::root().join("testdata/golden/live"), tmp.path(), &vars);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let conn = "golden-local";
+    let ok = |r: &Value| -> Value {
+        assert_eq!(r["ok"], true, "{r}");
+        r["result"].clone()
+    };
+    ok(&s.call(json!({"op": "tx_begin", "conn": conn})));
+    // 아직 커밋하지 않은 테이블·PK 는 풀 연결에서 보이지 않는다
+    for sql in [
+        "create temp table pk_t (id int, v text)",
+        "alter table pk_t add primary key (id)",
+        "insert into pk_t values (1, 'a')",
+    ] {
+        ok(&s.call(json!({"op": "run", "conn": conn, "sql": sql})));
+    }
+    let cs = json!({"table": {"schema": "pg_temp", "table": "pk_t"}, "pk": ["id"], "changes": [
+        {"op": "update", "key": {"id": "1"}, "values": {"v": "b"}, "old": {"v": "a"}}]});
+    let a = ok(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": cs})));
+    assert_eq!(a["result"]["text"], "UPDATE 1", "{a}");
+    // PK 가 아닌 열이면 여전히 거절하고, 찾다 실패해도 트랜잭션은 이어진다
+    let bad = json!({"table": {"schema": "pg_temp", "table": "pk_t"}, "pk": ["v"], "changes": [
+        {"op": "delete", "key": {"v": "b"}}]});
+    assert_eq!(err(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": bad}))).0, 2);
+    let none = json!({"table": {"schema": "public", "table": "no_such_t"}, "pk": ["id"], "changes": [
+        {"op": "delete", "key": {"id": "1"}}]});
+    assert_eq!(err(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": none}))).0, 1);
+    let r = ok(&s.call(json!({"op": "run", "conn": conn, "sql": "select v from pk_t"})));
+    assert_eq!((r["rows"].clone(), r["in_tx"].clone()), (json!([["b"]]), json!(true)), "{r}");
+    ok(&s.call(json!({"op": "tx_rollback", "conn": conn})));
+    s.finish(&[]);
+}

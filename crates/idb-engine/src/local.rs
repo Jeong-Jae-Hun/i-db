@@ -935,8 +935,9 @@ impl LocalEngine {
         }
         let ask = format!("prod({})에 {what} {}건: y/N", c.name, cs.changes.len());
         self.write_guard(&c, confirm_prod, &ask, false)?;
-        let t = cs.table.clone();
-        let pk = self.pg(&c, |pg| async move { pg.primary_key(&t).await }).await?;
+        // 반영과 같은 세션에서 찾아야 그 트랜잭션에서 만든 테이블·바꾼 PK 를 본다
+        let session = self.session(&c).await?;
+        let pk = session.primary_key(&cs.table).await.map_err(|e| self.run_err(&c, &e))?;
         if pk.is_empty() || pk != cs.pk {
             return Err(EngineError::usage(format!(
                 "편집 묶음의 PK({})가 {} 의 PK({})와 다름",
@@ -945,7 +946,7 @@ impl LocalEngine {
                 pk.join(", ")
             )));
         }
-        let ran = self.session(&c).await?.apply(&cs).await;
+        let ran = session.apply(&cs).await;
         let applied = ran.applied.clone().unwrap_or_default();
         Ok(AppliedResult {
             result: self.ran(&c, ran)?,
