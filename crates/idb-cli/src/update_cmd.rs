@@ -22,9 +22,8 @@ use crate::usage_text::UPDATE_USAGE;
 const EXIT_NEWER: i32 = 10;
 pub const DEFAULT_API: &str = "https://api.github.com";
 pub const DEFAULT_REPO: &str = "Jeong-Jae-Hun/i-db";
-/// 릴리스 묶음과 그 안 실행 파일의 이름이다(묶음은 `<이름>_<os>_<arch>.tar.gz`). release.yml 이 올리는 Go 판 `db` 와 같다.
-/// 넘기기(전환 계획 11번) 전까지 db-rs 로 바꾸면 Go 판 db 를 받아 db-rs 자리에 끼운다는 점을 안다. 넘기는 날 release.yml 이
-/// Rust 판을 `db` 로 올리면 이 값은 그대로 둔다.
+/// 릴리스 묶음과 그 안 실행 파일의 이름이다(묶음은 `<이름>_<os>_<arch>.tar.gz`). v0.x Go 판 묶음과 같은 꼴이라
+/// `db update --version v0.<판> --force` 로 Go 판으로 되돌릴 수도 있다.
 pub const RELEASE_BIN: &str = "db";
 /// 받는 묶음과 꺼낸 바이너리의 상한이다
 const MAX_ARCHIVE: u64 = 100 << 20;
@@ -643,6 +642,97 @@ async fn update(u: &Updater, check: bool, force: bool, want: &str, stdout: &mut 
     }
     stdout.push_str(&format!("{} → {}\n", u.current, rel.tag));
     EXIT_OK
+}
+
+// ─── 켤 때 새 판 알림 (R65.2) ───
+
+/// TUI 가 최신 판을 다시 물을 간격이다
+const CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
+/// 켤 때 묻는 데 쓰는 시간 상한이다. 화면은 기다리지 않는다
+const NOTICE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 마지막 확인이다. Go 판과 같은 파일(`{"checked":"2026-11-15T12:00:00Z","latest":"v0.13.0"}`)을 같이 쓴다.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CheckState {
+    checked: String,
+    latest: String,
+}
+
+/// 마지막 확인을 남길 파일이다. 실행 기록과 같은 개인 상태 폴더의 update-check 다.
+pub fn update_check_path() -> Option<PathBuf> {
+    idb_core::history::default_path().ok().map(|p| p.with_file_name("update-check"))
+}
+
+/// path 에 남긴 마지막 확인이 하루 안이면 그때 받은 최신 판을, 아니면 fetch 로 새로 물어 남긴 판을 쓴다.
+/// 그 판이 current 보다 높으면 돌려주고 아니면 빈 글이다. fetch·파일 오류는 알리지 않는다(다음 실행에 다시 묻는다).
+/// 앞으로의 시각은 시계가 틀렸던 것이라 믿지 않고, 판 꼴이 아닌 값(제어 문자 등)도 믿지 않는다.
+pub fn daily(path: &Path, now: chrono::DateTime<chrono::Utc>, current: &str, fetch: impl FnOnce() -> Result<String, String>) -> String {
+    let saved = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<CheckState>(&b).ok())
+        .filter(|st| valid(&st.latest))
+        .and_then(|st| {
+            let at = chrono::DateTime::parse_from_rfc3339(&st.checked).ok()?.with_timezone(&chrono::Utc);
+            let age = (now - at).num_seconds();
+            (at <= now && age < CHECK_INTERVAL_SECS).then_some(st.latest)
+        });
+    let latest = match saved {
+        Some(l) => l,
+        None => {
+            let Ok(latest) = fetch() else { return String::new() };
+            if !valid(&latest) {
+                return String::new();
+            }
+            let st = CheckState {
+                checked: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                latest: latest.clone(),
+            };
+            if let (Ok(b), Some(dir)) = (serde_json::to_vec(&st), path.parent())
+                && std::fs::create_dir_all(dir).is_ok()
+            {
+                let _ = atomicfile::write(path, ".update-check-*", &b, 0o600);
+            }
+            latest
+        }
+    };
+    if compare(&latest, current) == Some(1) {
+        latest
+    } else {
+        String::new()
+    }
+}
+
+/// 켤 때 하루 한 번 최신 판을 조용히 묻는 일이다. 끄였거나(DB_UPDATE_CHECK=0) 소스 빌드거나 상태 폴더를 모르면 None 이다.
+/// 돌려준 일은 화면 밖 스레드에서 부르고, 새 판이면 그 태그를 돌려준다.
+pub fn update_notice(
+    getenv: impl Fn(&str) -> Option<String>,
+    current: &str,
+    path: Option<PathBuf>,
+    fetch: Box<dyn FnOnce() -> Result<String, String> + Send>,
+) -> Option<idb_tui::UpdateNotice> {
+    let path = path?;
+    if getenv("DB_UPDATE_CHECK").as_deref() == Some("0") || !valid(current) {
+        return None;
+    }
+    let current = current.to_string();
+    Some(Box::new(move || {
+        let tag = daily(&path, chrono::Utc::now(), &current, fetch);
+        (!tag.is_empty()).then_some(tag)
+    }))
+}
+
+/// GitHub 최신 릴리스 태그를 5초 안에 묻는다(GITHUB_TOKEN 이 있으면 붙인다).
+pub fn fetch_latest_tag(src: Source, repo: String) -> Result<String, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        match tokio::time::timeout(NOTICE_TIMEOUT, src.release(&repo, "")).await {
+            Ok(r) => r.map(|rel| rel.tag),
+            Err(_) => Err("timeout".into()),
+        }
+    })
 }
 
 #[cfg(test)]

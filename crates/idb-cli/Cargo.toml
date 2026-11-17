@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-# 넘기기(전환 계획 11번) 전까지는 Go db 와 이름이 겹치지 않게 db-rs 로 낸다
 [[bin]]
-name = "db-rs"
+name = "db"
 path = "src/main.rs"
 
 [dependencies]

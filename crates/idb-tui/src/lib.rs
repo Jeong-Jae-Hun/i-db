@@ -1,10 +1,11 @@
 #![allow(non_snake_case)]
-//! db 의 터미널 화면(ratatui + crossterm). `db-rs` 를 하위 명령 없이 켜면 이 화면이다.
+//! db 의 터미널 화면(ratatui + crossterm). `db` 를 하위 명령 없이 켜면 이 화면이다.
 //! 데이터는 모두 idb_engine::Engine(Local 또는 ssh 너머 Remote)으로 읽고 쓴다. 화면은 접속 정의·비밀번호를 보지 않는다.
 
 mod actions;
 pub mod app;
 mod board;
+mod clipboard;
 mod complete;
 mod connform;
 mod dash;
@@ -48,11 +49,16 @@ use serde_json::Value;
 
 pub use app::App;
 
+/// 켤 때 새 판을 묻는 일이다(R65.2). 화면 밖 스레드에서 부르고 새 판이면 그 태그를 돌려준다.
+pub type UpdateNotice = Box<dyn FnOnce() -> Option<String> + Send>;
+
 pub struct Options {
     /// -p 프로젝트 폴더(비면 현재 폴더)
     pub project: Option<String>,
     /// --remote 이름(~/.config/db/remote.json)
     pub remote: Option<String>,
+    /// 하루 한 번 새 판 확인(끄였거나 소스 빌드면 None)
+    pub update_notice: Option<UpdateNotice>,
 }
 
 /// 끝난 Engine 요청이다.
@@ -178,7 +184,16 @@ pub fn run(opts: Options) -> i32 {
         eprintln!("{e}");
         return 1;
     }
-    let res = event_loop(&mut app, &mut runner);
+    // 새 판 확인은 화면 밖에서 하고 켜기를 막지 않는다. 네트워크 오류는 알리지 않는다(R65.2)
+    let (notice_tx, notice_rx) = mpsc::channel::<String>();
+    if let Some(check) = opts.update_notice {
+        std::thread::spawn(move || {
+            if let Some(tag) = check() {
+                let _ = notice_tx.send(tag);
+            }
+        });
+    }
+    let res = event_loop(&mut app, &mut runner, notice_rx);
     let saved = app.save_session();
     let _ = restore_terminal(kitty);
     runner.rt.block_on(engine.close());
@@ -223,7 +238,27 @@ fn restore_terminal(kitty: bool) -> std::io::Result<()> {
     terminal::disable_raw_mode()
 }
 
-fn event_loop(app: &mut App, runner: &mut Runner) -> std::io::Result<()> {
+/// OSC 52 는 화면 스레드에서 바로 쓰고, 시스템 명령(최대 2초)은 화면 밖 스레드에서 돌려 결과를 tx 로 돌려준다.
+fn copy_out(s: &str, tx: &mpsc::Sender<String>, app: &mut App) {
+    let sys = clipboard::Sys::real();
+    let mode = sys.mode();
+    let osc = (mode != clipboard::Mode::System).then(|| clipboard::write_osc52(&mut std::io::stdout(), s));
+    if mode == clipboard::Mode::Osc52 {
+        if let Err(e) = clipboard::outcome(mode, osc, None) {
+            app.clip_failed(&e);
+        }
+        return;
+    }
+    let (tx, text) = (tx.clone(), s.to_string());
+    std::thread::spawn(move || {
+        if let Err(e) = clipboard::outcome(mode, osc, Some(sys.system_write(&text))) {
+            let _ = tx.send(e);
+        }
+    });
+}
+
+fn event_loop(app: &mut App, runner: &mut Runner, notice: mpsc::Receiver<String>) -> std::io::Result<()> {
+    let (clip_tx, clip_rx) = mpsc::channel::<String>();
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let mut last_tick = Instant::now();
     let mut dirty = true;
@@ -250,10 +285,17 @@ fn event_loop(app: &mut App, runner: &mut Runner) -> std::io::Result<()> {
             }
             dirty = true;
         }
-        if !app.clips.is_empty() {
-            for c in std::mem::take(&mut app.clips) {
-                copy_osc52(&c);
-            }
+        for c in std::mem::take(&mut app.clips) {
+            copy_out(&c, &clip_tx, app);
+        }
+        // 시스템 클립보드 명령의 결과는 화면 밖 스레드에서 온다. 실패면 상태 줄에 알린다(R71.4)
+        if let Ok(tag) = notice.try_recv() {
+            app.update_available(&tag);
+            dirty = true;
+        }
+        while let Ok(e) = clip_rx.try_recv() {
+            app.clip_failed(&e);
+            dirty = true;
         }
         if last_tick.elapsed() >= Duration::from_secs(1) {
             app.tick();
@@ -268,75 +310,4 @@ fn event_loop(app: &mut App, runner: &mut Runner) -> std::io::Result<()> {
             dirty = true;
         }
     }
-}
-
-/// OSC 52 와 시스템 클립보드 명령에 같이 쓴다(R71.4). DB_CLIPBOARD=osc52 면 OSC 52 만, system 이면 명령만이다.
-/// 명령은 2초 제한으로 화면 밖 스레드에서 돈다. OSC 52 를 막은 터미널에서도 복사가 사라지지 않게 하려는 것이다.
-fn copy_osc52(s: &str) {
-    let mode = std::env::var("DB_CLIPBOARD").unwrap_or_default();
-    if mode != "system" {
-        let mut out = std::io::stdout();
-        let _ = write!(out, "\x1b]52;c;{}\x07", base64(s.as_bytes()));
-        let _ = out.flush();
-    }
-    if mode != "osc52" {
-        let text = s.to_string();
-        std::thread::spawn(move || system_copy(&text));
-    }
-}
-
-/// 맥 pbcopy, WSL·Windows clip(UTF-8), 리눅스 wl-copy·xclip 가운데 PATH 에 있는 것이다.
-fn system_copy(text: &str) {
-    use std::process::{Command, Stdio};
-    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some() || std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists();
-    let cands: Vec<(String, Vec<&str>)> = if cfg!(target_os = "macos") {
-        vec![("pbcopy".into(), vec![])]
-    } else if wsl {
-        vec![
-            ("cmd.exe".into(), vec!["/c", "chcp 65001 >nul && clip"]),
-            ("/mnt/c/Windows/System32/cmd.exe".into(), vec!["/c", "chcp 65001 >nul && clip"]),
-        ]
-    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        vec![("wl-copy".into(), vec![]), ("xclip".into(), vec!["-selection", "clipboard"])]
-    } else {
-        vec![("xclip".into(), vec!["-selection", "clipboard"]), ("wl-copy".into(), vec![])]
-    };
-    for (cmd, args) in cands {
-        let Ok(mut child) = Command::new(&cmd)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue;
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => return,
-                Ok(None) if start.elapsed() < Duration::from_secs(2) => std::thread::sleep(Duration::from_millis(20)),
-                _ => {
-                    let _ = child.kill();
-                    return;
-                }
-            }
-        }
-    }
-}
-
-fn base64(b: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
-    for c in b.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        out.push(T[(n >> 18) as usize & 63] as char);
-        out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    out
 }

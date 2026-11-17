@@ -6,16 +6,6 @@ Rust 판은 `rs-v*` 태그로 미리 보기(prerelease) 릴리스를 낸다(`.gi
 
 불확실한 것: macOS amd64 GUI 는 내지 않는다(GPUI 를 한 번 더 빌드하는 값에 비해 쓰는 기계가 없다). `ubuntu-24.04-arm` 러너에 `gh` 가 없으면 apt 로 받게 해 두었지만 실제 러너에서 돌려 본 적은 아직 없다.
 
-## 미리 보기 릴리스 내기
-
-```sh
-git tag rs-v0.1.0 && git push origin rs-v0.1.0
-```
-
-시험(fmt·clippy·build·test, PG·Redis 컨테이너) → 초안 릴리스 → 리눅스 musl 정적 2개·darwin 2개·`i-db.app` → `checksums.txt` 를 더해 공개 순서로 돈다. 실패해 다시 돌리면 같은 초안에 덮어 올린다.
-
-미리 보기 빌드의 판 글은 태그 그대로(`rs-v0.1.0`)다. `db update` 는 이 글을 판으로 읽지 못해 소스 빌드처럼 다룬다. 넘기기 전에 `db update --force` 를 하면 최신 Go 판으로 바뀌니 하지 않는다.
-
 ## 넘기는 날
 
 1. 갈래를 모은다. `feat/rust-tui`(TUI·GUI 포함)와 이 갈래를 `main` 에 합치고 CI 가 초록인지, 골든 시험이 모두 Rust 판으로 도는지(`testdata/golden/rust-ported.txt`) 본다. CI 는 리눅스라 macOS 에서만 빌드되는 GUI 화면 코드를 보지 않는다. 합친 뒤 Mac 에서 `cargo build -p idb-gui` 를 한 번 돌린다(2026-11-17 `feat/rust-tui` 는 `RunRequest.confirm_analyze` 가 빠져 macOS 빌드가 깨져 있었다).

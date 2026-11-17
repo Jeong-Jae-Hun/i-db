@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! `db-rs serve` 프로토콜 시험. 표준 입출력으로 요청을 보내 안전장치가 서버에서 걸리는지, 취소가 되는지,
+//! `db serve` 프로토콜 시험. 표준 입출력으로 요청을 보내 안전장치가 서버에서 걸리는지, 취소가 되는지,
 //! 어느 응답에도 .env 의 비밀번호·AES 키가 나오지 않는지 본다. live 시험은 DBTUI_TEST_PG_URL·DBTUI_TEST_REDIS_ADDR 가 있을 때만 돈다.
 
 mod common;
@@ -24,7 +24,7 @@ struct Serve {
 
 impl Serve {
     fn start(dir: &Path) -> Serve {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_db-rs"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_db"))
             .args(["serve", "-p"])
             .arg(dir)
             .env("XDG_STATE_HOME", dir.join("state"))
@@ -308,7 +308,7 @@ async fn 원격_엔진과_로컬_엔진은_같은_답을_내고_버린_요청은
     let tmp = offline_project(hang.local_addr().unwrap().port());
     let spec = RemoteSpec {
         name: "loop".into(),
-        program: env!("CARGO_BIN_EXE_db-rs").into(),
+        program: env!("CARGO_BIN_EXE_db").into(),
         args: vec!["serve".into(), "-p".into(), tmp.path().to_string_lossy().into_owned()],
     };
     let remote = Engine::Remote(Arc::new(RemoteEngine::connect(&spec).await.unwrap()));
@@ -788,7 +788,7 @@ async fn 원격_엔진으로_복호화와_접속_시험이_로컬과_같은_답�
     let tmp = offline_project(1);
     let spec = RemoteSpec {
         name: "loop".into(),
-        program: env!("CARGO_BIN_EXE_db-rs").into(),
+        program: env!("CARGO_BIN_EXE_db").into(),
         args: vec!["serve".into(), "-p".into(), tmp.path().to_string_lossy().into_owned()],
     };
     let remote = Engine::Remote(Arc::new(RemoteEngine::connect(&spec).await.unwrap()));

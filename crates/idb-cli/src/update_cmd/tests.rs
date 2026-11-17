@@ -608,3 +608,122 @@ fn 도움말은_stderr_에_사용법이다() {
     let (code, _, err) = run(&u, &["-h"]);
     assert!(code == EXIT_OK && err.contains("db update [--check]"), "{err}");
 }
+
+// ─── 켤 때 새 판 알림 (R65.2, Go TestDaily·TestUpdateNotice) ───
+
+#[test]
+fn 하루_안이면_남긴_판을_쓰고_지나면_새로_묻는다() {
+    use chrono::{Duration as D, TimeZone, Utc};
+    let now = Utc.with_ymd_and_hms(2026, 11, 15, 12, 0, 0).unwrap();
+    let write = |p: &Path, at: chrono::DateTime<Utc>, latest: &str| {
+        let b = serde_json::json!({"checked": at.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "latest": latest}).to_string();
+        std::fs::write(p, b).unwrap();
+    };
+    type Prep = Option<Box<dyn Fn(&Path)>>;
+    type Case = (
+        &'static str,
+        Prep,
+        Result<&'static str, &'static str>,
+        &'static str,
+        &'static str,
+        usize,
+    );
+    let cases: Vec<Case> = vec![
+        ("파일 없음 → 묻고 새 판", None, Ok("v0.13.0"), "v0.12.0", "v0.13.0", 1),
+        (
+            "하루 안 → 남긴 새 판",
+            Some(Box::new(move |p| write(p, now - D::hours(1), "v0.13.0"))),
+            Ok("v9.0.0"),
+            "v0.12.0",
+            "v0.13.0",
+            0,
+        ),
+        (
+            "하루 안 → 같은 판이면 없음",
+            Some(Box::new(move |p| write(p, now - D::hours(1), "v0.12.0"))),
+            Ok("v9.0.0"),
+            "v0.12.0",
+            "",
+            0,
+        ),
+        (
+            "하루 지남 → 다시 묻는다",
+            Some(Box::new(move |p| write(p, now - D::hours(25), "v0.12.0"))),
+            Ok("v0.14.0"),
+            "v0.12.0",
+            "v0.14.0",
+            1,
+        ),
+        (
+            "앞으로의 시각 → 다시 묻는다",
+            Some(Box::new(move |p| write(p, now + D::hours(1), "v0.13.0"))),
+            Ok("v0.12.0"),
+            "v0.12.0",
+            "",
+            1,
+        ),
+        (
+            "깨진 파일 → 다시 묻는다",
+            Some(Box::new(|p| std::fs::write(p, "{").unwrap())),
+            Ok("v0.13.0"),
+            "v0.12.0",
+            "v0.13.0",
+            1,
+        ),
+        ("네트워크 오류 → 조용히 없음", None, Err("offline"), "v0.12.0", "", 1),
+        ("지금 판이 더 높음", None, Ok("v0.12.0"), "v0.13.0", "", 1),
+        (
+            "판에 제어 문자 → 다시 묻는다",
+            Some(Box::new(move |p| write(p, now - D::hours(1), "v0.13.0-\x1b[2J"))),
+            Ok("v0.13.0"),
+            "v0.12.0",
+            "v0.13.0",
+            1,
+        ),
+    ];
+    for (name, prep, fetched, current, want, want_calls) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state").join("update-check");
+        if let Some(p) = prep {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            p(&path);
+        }
+        let calls = std::cell::Cell::new(0);
+        let got = daily(&path, now, current, || {
+            calls.set(calls.get() + 1);
+            fetched.map(String::from).map_err(String::from)
+        });
+        assert_eq!((got.as_str(), calls.get()), (want, want_calls), "{name}");
+    }
+}
+
+#[test]
+fn 새_판_알림은_끄기와_소스_빌드에서_묻지_않고_가짜_GitHub_로_묻는다() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Some(dir.path().join("update-check"));
+    let env = |v: &'static str| move |k: &str| (k == "DB_UPDATE_CHECK").then(|| v.to_string());
+    let never: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(|| panic!("묻지 않아야 한다"));
+    assert!(update_notice(env("0"), "v0.12.0", path.clone(), never).is_none());
+    let never: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(|| panic!("묻지 않아야 한다"));
+    assert!(update_notice(env(""), "dev", path.clone(), never).is_none());
+    // 가짜 GitHub(토큰을 Authorization 에 붙인다)
+    let srv = fake_github("v0.13.0", HashMap::from([("v0.13.0".to_string(), Vec::new())]), None);
+    let src = Source {
+        api: srv.url.clone(),
+        token: "tok-1".into(),
+    };
+    let fetch: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(move || fetch_latest_tag(src, "o/r".into()));
+    let notice = update_notice(env(""), "v0.12.0", path.clone(), fetch).unwrap();
+    assert_eq!(notice(), Some("v0.13.0".into()));
+    let log = srv.log.lock().unwrap();
+    assert_eq!(log[0].headers.get("authorization").map(String::as_str), Some("Bearer tok-1"));
+    drop(log);
+    // 하루 안에 다시 켜면 묻지 않고 남긴 판으로 알리고, 이미 그 판이면 알리지 않는다
+    let never: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(|| panic!("묻지 않아야 한다"));
+    assert_eq!(
+        update_notice(env(""), "v0.12.0", path.clone(), never).unwrap()(),
+        Some("v0.13.0".into())
+    );
+    let never: Box<dyn FnOnce() -> Result<String, String> + Send> = Box::new(|| panic!("묻지 않아야 한다"));
+    assert_eq!(update_notice(env(""), "v0.13.0", path, never).unwrap()(), None);
+}

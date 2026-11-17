@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! db-rs 의 저장소 명령(query·logs·metrics·tables, R60~R63) 시험. Go `sources_test.go` 의 CLI 시험을 옮겼다.
+//! db 의 저장소 명령(query·logs·metrics·tables, R60~R63) 시험. Go `sources_test.go` 의 CLI 시험을 옮겼다.
 //! Go 판은 Backend 를 가짜로 바꿔 끼우지만 여기서는 실제 클라이언트를 가짜 HTTP 서버에 붙여 보낸 요청까지 본다.
 
 use std::collections::HashMap;
@@ -141,7 +141,7 @@ fn project(search: &str, loki: &str, prom: &str, graf: &str) -> tempfile::TempDi
 }
 
 fn run(dir: &tempfile::TempDir, args: &[&str]) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_db-rs"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_db"))
         .args(args)
         .arg("-p")
         .arg(dir.path())

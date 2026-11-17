@@ -800,6 +800,21 @@ impl App {
         }
     }
 
+    /// 새 판이 있다(R65.2). 지금 상태 글 뒤에 ` · ` 로 잇는다(Go addStatus).
+    pub fn update_available(&mut self, tag: &str) {
+        let msg = format!("새 판 {tag} — db update");
+        self.status = if self.status.is_empty() {
+            msg
+        } else {
+            format!("{} · {msg}", self.status)
+        };
+    }
+
+    /// 복사가 실패했다(OSC 52·시스템 명령, R71.4). 먼저 보인 `복사함` 을 갈음한다.
+    pub fn clip_failed(&mut self, e: &str) {
+        self.status = format!("클립보드 복사 실패: {e}");
+    }
+
     pub fn label(&self, s: &str) -> String {
         crate::keys::label(s, self.mac)
     }
