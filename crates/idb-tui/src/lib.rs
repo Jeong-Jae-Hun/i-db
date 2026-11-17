@@ -6,6 +6,7 @@ mod actions;
 pub mod app;
 mod board;
 mod complete;
+mod connform;
 mod dash;
 pub mod editor;
 mod export;

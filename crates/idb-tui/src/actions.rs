@@ -426,6 +426,11 @@ impl App {
             Pend::Source(job) => self.source_done(id, *job, res),
             Pend::Health { tab, round, conn } => self.health_done(id, tab, round, conn, res),
             Pend::Outbox { tab, round } => self.outbox_done(tab, round, res),
+            Pend::ConnGet => self.conn_got(res),
+            Pend::ConnTested { save } => self.conn_tested(save, res),
+            Pend::ConnSaved => self.conn_saved(res),
+            Pend::ConnChanged { what } => self.conn_changed(what, res),
+            Pend::Reload { changed } => self.reloaded(changed, res),
             Pend::ExportStart => self.export_started(res),
             Pend::ExportRead => self.export_read(res),
             Pend::Ignore => {}

@@ -160,6 +160,17 @@ pub enum Pend {
         round: u64,
     },
     Estimate,
+    ConnGet,
+    ConnTested {
+        save: bool,
+    },
+    ConnSaved,
+    ConnChanged {
+        what: String,
+    },
+    Reload {
+        changed: Option<String>,
+    },
     ExportStart,
     ExportRead,
     /// 답을 쓰지 않는 요청
@@ -451,6 +462,7 @@ pub struct App {
     /// 확인 창 전에 기다리는 예상 행 수(R39): 요청 id·시작·질문·확인하면 할 일
     pub estimating: Option<(u64, Instant, crate::actions::ConfirmParts, After)>,
     pub exporting: Option<crate::export::Exporting>,
+    pub conn_form: Option<crate::connform::ConnForm>,
 }
 
 impl App {
@@ -502,6 +514,7 @@ impl App {
             last_copy_fmt: "tsv",
             estimating: None,
             exporting: None,
+            conn_form: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -698,6 +711,11 @@ impl App {
 
     /// 붙여넣기(bracketed paste)다. 입력 줄·편집기·결과 표(R48) 순으로 받는다.
     pub fn on_paste(&mut self, s: &str) {
+        if let Some(f) = &mut self.conn_form {
+            let at = f.at;
+            f.fields[at].insert(s);
+            return;
+        }
         match &mut self.overlay {
             Overlay::Prompt { input, .. } => return input.insert(s),
             Overlay::Picker { filter, sel, .. } => {
@@ -751,6 +769,9 @@ impl App {
     pub fn on_key(&mut self, k: &str) {
         if !self.overlay.is_none() {
             return self.overlay_key(k);
+        }
+        if self.conn_form.is_some() {
+            return self.conn_form_key(k);
         }
         // 키를 지우는 동안은 esc 로 멈추고, 종료는 멈춘 뒤에 한다(R42.1)
         if let Some(d) = &mut self.deleting {
@@ -1217,6 +1238,8 @@ impl App {
             "D" => self.ddl_node(n),
             "A" | "L" | "S" => self.ops_node(n, k),
             "B" => self.pick_database(n),
+            // Redis 접속·이름공간 줄 X 는 패턴 삭제(R42), 그 밖의 접속 줄은 db 전용 접속 지우기(R59.3)
+            "X" if matches!(self.tree.node(n).kind, crate::tree::NodeKind::Conn(c) if !self.is_redis(c)) => self.conn_remove(n),
             "X" => self.pattern_delete(n),
             "?" => self.open_keys(),
             "q" => self.request_quit(),
@@ -1227,9 +1250,10 @@ impl App {
             }
             "=" => self.schema_compare(n),
             "I" => self.csv_import(n),
-            "N" | "E" | "M" | "alt+X" => {
-                self.status = format!("{} 은 Rust 화면에 아직 옮기지 않음", key_label(k));
-            }
+            "N" => self.conn_new(n),
+            "E" => self.conn_edit(n),
+            "M" => self.conn_move(n),
+            "alt+X" => self.conn_remove(n),
             _ => {}
         }
     }
@@ -1291,7 +1315,7 @@ impl App {
 
     pub fn on_mouse(&mut self, ev: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
-        if !self.overlay.is_none() {
+        if !self.overlay.is_none() || self.conn_form.is_some() {
             self.drag = None;
             return;
         }

@@ -112,10 +112,13 @@ fn 화면_틀은_헤더_트리_탭_편집기_결과_상태_줄이다() {
     assert!(s.contains("Result"));
     assert!(s.contains("결과가 여기에 나옵니다"));
     // 트리 포커스의 줄 종류별 키 안내(R74.1)
-    assert!(lines[31].ends_with("Enter 펼치기 · / 거르기 · ? 키"), "{}", lines[31]);
+    assert!(lines[31].ends_with("Enter 펼치기 · N 새 접속 · / 거르기 · ? 키"), "{}", lines[31]);
     select_conn(&mut a, "app-stg");
     let s = screen(&mut a);
-    assert!(s.lines().last().unwrap().contains("Enter 펼치기 · A/L/S 운영 · B DB"), "{s}");
+    assert!(
+        s.lines().last().unwrap().contains("Enter 펼치기 · N 새 접속 · A/L/S 운영 · B DB"),
+        "{s}"
+    );
 }
 
 #[test]
@@ -1347,4 +1350,51 @@ fn I_는_CSV_머리를_열에_맞춰_미리_보이고_import_csv_로_보낸다()
     assert_eq!(req["rows"], json!([["alice", "1"], [null, "2"]]));
     a.on_done(id, Ok(json!({"rows": 2})));
     assert_eq!(a.status, "2행 가져옴");
+}
+
+#[test]
+fn 접속_창은_URL_로_채우고_시험한_뒤_저장하고_목록을_다시_읽는다() {
+    let mut a = app();
+    a.on_key("N");
+    assert!(screen(&mut a).contains("새 접속"));
+    a.on_paste("postgres://u:pw@db.local:5432/app");
+    a.on_key("tab");
+    assert!(!screen(&mut a).contains("pw"), "비밀번호는 • 로만 보인다");
+    a.on_key("up");
+    typed(&mut a, "app-new");
+    a.on_key("enter");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "conn_test");
+    assert_eq!(
+        (req["conn"]["name"].as_str(), req["conn"]["password"].as_str()),
+        (Some("app-new"), Some("pw"))
+    );
+    a.on_done(id, Ok(json!({"version": "PostgreSQL 16.4", "warning": ""})));
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!((req["op"].as_str(), req["old_name"].as_str()), (Some("conn_save"), Some("")));
+    let mut c = serde_json::to_value(conn("app-new", "postgresql", "local", "app")).unwrap();
+    c["source"] = json!("db");
+    a.on_done(id, Ok(json!({"conn": c, "warning": "", "env_error": ""})));
+    assert!(a.conn_form.is_none() && a.status == "접속 더함: app-new");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(req["op"], "project");
+    let mut conns: Vec<Value> = a.conns.iter().map(|c| serde_json::to_value(c).unwrap()).collect();
+    conns.push(c);
+    a.on_done(id, Ok(json!({"dir": "/tmp/proj", "conns": conns, "warnings": []})));
+    assert!(screen(&mut a).contains("app-new (db)"));
+    // DataGrip 접속은 고치지 않는다
+    select_conn(&mut a, "app-stg");
+    a.on_key("E");
+    assert_eq!(a.status, "DataGrip 접속은 DataGrip 에서 고침");
+    // 원격 serve 의 거절은 그대로 보이고 저장을 묻지 않는다
+    a.on_key("N");
+    typed(&mut a, "x");
+    a.on_key("enter");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(
+        id,
+        Err(EngineError::refused("remote_conn_edit", "원격 serve 에서는 접속을 고치지 않음")),
+    );
+    let f = a.conn_form.as_ref().unwrap();
+    assert!(!f.ask_save && f.msg.starts_with("원격 serve"));
 }

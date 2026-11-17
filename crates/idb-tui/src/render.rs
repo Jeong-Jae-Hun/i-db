@@ -191,6 +191,9 @@ impl App {
         self.draw_result(buf, inner(res_rect));
         // ─── 상태 줄 ───
         self.draw_status(buf);
+        if self.conn_form.is_some() {
+            self.draw_conn_form(buf, area);
+        }
     }
 
     fn draw_header(&self, buf: &mut Buffer) {
@@ -653,11 +656,29 @@ impl App {
         let Some(n) = self.tree.current() else { return out };
         let node = self.tree.node(n);
         let list: Vec<&str> = match &node.kind {
-            NodeKind::Group => vec!["Enter 펼치기", "/ 거르기", "? 키"],
-            NodeKind::Conn(c) if self.is_pg(*c) => vec!["Enter 펼치기", "A/L/S 운영", "B DB", "r 새로고침", "/ 거르기", "? 키"],
-            NodeKind::Conn(c) if self.is_redis(*c) => vec!["Enter 펼치기", "A/L/S 운영", "/ SCAN 패턴", "r 새로고침", "? 키"],
-            NodeKind::Conn(c) if self.is_source(*c) => vec!["Enter 펼치기", "r 새로고침", "/ 거르기", "? 키"],
-            NodeKind::Conn(_) => vec!["Enter 펼치기", "/ 거르기", "? 키"],
+            NodeKind::Group => vec!["Enter 펼치기", "N 새 접속", "/ 거르기", "? 키"],
+            NodeKind::Conn(c) => {
+                let db = self.conns[*c].source == "db";
+                let mut v = vec!["Enter 펼치기"];
+                if db {
+                    v.push("E 고치기");
+                }
+                v.push("N 새 접속");
+                if db && !self.is_redis(*c) {
+                    v.push("X 지우기");
+                }
+                if self.is_pg(*c) {
+                    v.extend(["A/L/S 운영", "B DB", "F 검색", "= 비교"]);
+                } else if self.is_redis(*c) {
+                    v.extend(["X 키 삭제", "A/L/S 운영", "/ SCAN 패턴"]);
+                }
+                v.extend(["M 폴더", "r 새로고침"]);
+                if !self.is_redis(*c) {
+                    v.push("/ 거르기");
+                }
+                v.push("? 키");
+                v
+            }
             NodeKind::Source { openable, kids, .. } => {
                 let mut v = Vec::new();
                 if self.sns_topic(n).is_some() {
@@ -672,10 +693,10 @@ impl App {
                 v.extend(["r 새로고침", "? 키"]);
                 v
             }
-            NodeKind::Schema { .. } => vec!["Enter 펼치기", "r 새로고침", "/ 거르기", "? 키"],
-            NodeKind::Table { .. } => vec!["Enter 열기", "d 구조", "D DDL", "/ 거르기", "? 키"],
+            NodeKind::Schema { .. } => vec!["Enter 펼치기", "F 검색", "= 비교", "r 새로고침", "/ 거르기", "? 키"],
+            NodeKind::Table { .. } => vec!["Enter 열기", "d 구조", "D DDL", "I CSV 가져오기", "/ 거르기", "? 키"],
             NodeKind::Key { .. } => vec!["Enter 값 편집", "/ SCAN 패턴", "r 새로고침", "? 키"],
-            NodeKind::Folder { .. } => vec!["Enter 펼치기", "/ SCAN 패턴", "r 새로고침", "? 키"],
+            NodeKind::Folder { .. } => vec!["Enter 펼치기", "X 키 삭제", "/ SCAN 패턴", "r 새로고침", "? 키"],
             NodeKind::Queries(_) => vec!["Enter 펼치기", "r 새로고침", "? 키"],
             NodeKind::File(_) => vec!["Enter 파일 열기", "r 새로고침", "? 키"],
             NodeKind::Info => vec!["↑↓ 이동", "? 키"],
