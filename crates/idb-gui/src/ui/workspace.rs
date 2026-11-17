@@ -44,6 +44,25 @@ use idb_engine::SessionState;
 pub type Make<F> = Rc<dyn Fn(Engine, Confirms) -> F>;
 pub type Done<T> = Rc<dyn Fn(&mut Workspace, T, &mut Window, &mut Context<Workspace>)>;
 
+/// `guarded` 의 덧붙임이다. precheck 는 (확인 뒤 다시 보낼 때도) 보내기 바로 전에 돌고, Err 면 보내지 않는다.
+/// fail 은 답이 성공이 아니면(오류·거절·멈춤·확인 취소·precheck 실패) 한 번 돈다.
+pub type Precheck = Rc<dyn Fn(&Workspace) -> Result<(), String>>;
+pub type OnFail = Rc<dyn Fn(&mut Workspace, &mut Context<Workspace>)>;
+
+#[derive(Clone, Default)]
+pub struct Hooks {
+    pub precheck: Option<Precheck>,
+    pub fail: Option<OnFail>,
+}
+
+impl Hooks {
+    fn failed(&self, ws: &mut Workspace, cx: &mut Context<Workspace>) {
+        if let Some(f) = &self.fail {
+            f(ws, cx);
+        }
+    }
+}
+
 enum Body {
     Sql {
         editor: Entity<EditorState>,
@@ -71,6 +90,9 @@ pub struct Workspace {
     /// switch_db·set_search_path 뒤의 세션(R27)
     sessions: HashMap<String, SessionState>,
     databases: HashMap<String, Vec<String>>,
+    /// 데이터베이스 바꾸기 요청이 도는 접속. 원격이면 엔진은 이미 바꿨는데 답이 안 왔을 수 있어
+    /// 그동안 그 접속 결과의 고치기·반영·되돌리기·다음 쪽을 막는다
+    switching: std::collections::HashSet<String>,
     /// 접속마다 데이터베이스를 바꾼 횟수. 요청은 보낼 때 값을 들고 가고, 답이 올 때 다르면 버린다(R27.1)
     db_gen: HashMap<String, u64>,
     /// 사이드바에서 고른 테이블(두 번 누르면 연다)
@@ -178,6 +200,7 @@ impl Workspace {
             sessions: HashMap::new(),
             databases: HashMap::new(),
             db_gen: HashMap::new(),
+            switching: Default::default(),
             selected_table: None,
             dir_input,
             remotes: crate::vm::runtime::remote_names(),
@@ -248,7 +271,33 @@ impl Workspace {
         T: Send + 'static,
         F: Future<Output = Result<T, EngineError>> + Send + 'static,
     {
-        let Some(engine) = self.engine.clone() else { return };
+        self.guarded_with(label, make, done, Hooks::default(), confirms, window, cx)
+    }
+
+    // 창(window)·cx 두 자리가 늘 붙는 GPUI 뷰 함수라 묶음 구조체를 따로 두지 않는다
+    #[allow(clippy::too_many_arguments)]
+    pub fn guarded_with<T, F>(
+        &mut self,
+        label: &str,
+        make: Make<F>,
+        done: Done<T>,
+        hooks: Hooks,
+        confirms: Confirms,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        T: Send + 'static,
+        F: Future<Output = Result<T, EngineError>> + Send + 'static,
+    {
+        if let Some(Err(msg)) = hooks.precheck.as_ref().map(|p| p(self)) {
+            self.set_status(format!("{label}: {msg}"), true, cx);
+            hooks.failed(self, cx);
+            return;
+        }
+        let Some(engine) = self.engine.clone() else {
+            hooks.failed(self, cx);
+            return;
+        };
         let job = self.rt.spawn(make(engine, confirms));
         self.busy = Some((label.to_string(), job.canceler()));
         self.status = (format!("{label} 중…"), false);
@@ -259,12 +308,15 @@ impl Workspace {
             let _ = this.update_in(cx, move |ws, window, cx| {
                 ws.busy = None;
                 match r {
-                    Err(_) => ws.set_status(format!("{label}: 멈춤"), true, cx),
+                    Err(_) => {
+                        ws.set_status(format!("{label}: 멈춤"), true, cx);
+                        hooks.failed(ws, cx);
+                    }
                     Ok(Ok(v)) => {
                         ws.status = (String::new(), false);
                         done(ws, v, window, cx)
                     }
-                    Ok(Err(e)) => ws.refused(&label, e, make, done, confirms, window, cx),
+                    Ok(Err(e)) => ws.refused(&label, e, make, done, hooks, confirms, window, cx),
                 }
                 cx.notify();
             });
@@ -280,6 +332,7 @@ impl Workspace {
         e: EngineError,
         make: Make<F>,
         done: Done<T>,
+        hooks: Hooks,
         confirms: Confirms,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -293,16 +346,19 @@ impl Workspace {
                     window.push_notification(Notification::warning("트랜잭션이 열려 있다. 커밋하거나 되돌려야 한다"), cx);
                 }
                 self.set_status(format!("{label}: {msg}"), true, cx);
+                hooks.failed(self, cx);
             }
             Gate::Locked(msg) => {
                 self.set_status(format!("{msg} (⌘L 로 prod 잠금을 연다)"), true, cx);
                 window.push_notification(Notification::warning("prod 가 잠겨 있다. ⌘L 로 잠시 연다"), cx);
+                hooks.failed(self, cx);
             }
             Gate::Ask { ask, question } => {
                 let this = cx.entity().downgrade();
                 let label = label.to_string();
                 window.open_alert_dialog(cx, move |alert, _, _| {
-                    let (this, make, done, label) = (this.clone(), make.clone(), done.clone(), label.clone());
+                    let (this, make, done, label, hooks) = (this.clone(), make.clone(), done.clone(), label.clone(), hooks.clone());
+                    let (this_c, hooks_c) = (this.clone(), hooks.clone());
                     alert
                         .title(ask.title())
                         .description(question.clone())
@@ -316,7 +372,13 @@ impl Workspace {
                         .on_ok(move |_, window, cx| {
                             let mut c = confirms;
                             c.grant(ask);
-                            let _ = this.update(cx, |ws, cx| ws.guarded(&label, make.clone(), done.clone(), c, window, cx));
+                            let _ = this.update(cx, |ws, cx| {
+                                ws.guarded_with(&label, make.clone(), done.clone(), hooks.clone(), c, window, cx)
+                            });
+                            true
+                        })
+                        .on_cancel(move |_, _, cx| {
+                            let _ = this_c.update(cx, |ws, cx| hooks_c.failed(ws, cx));
                             true
                         })
                 });
@@ -386,6 +448,7 @@ impl Workspace {
         self.sessions.clear();
         self.databases.clear();
         self.db_gen.clear();
+        self.switching.clear();
         self.selected_table = None;
         cx.notify();
     }
@@ -484,6 +547,27 @@ impl Workspace {
 
     // ─── 데이터베이스·스키마 ───
 
+    pub(super) fn is_switching(&self, conn: &str) -> bool {
+        self.switching.contains(conn)
+    }
+
+    /// 결과로 쓰기(반영·되돌리기)를 보내도 되는가. 결과를 만든 세대와 지금 세대가 같고 바꾸는 중이 아니어야 한다.
+    pub(super) fn write_ok(&self, conn: &str, gen0: u64) -> Result<(), String> {
+        if self.is_switching(conn) {
+            return Err("데이터베이스를 바꾸는 중이라 보내지 않는다".into());
+        }
+        if self.db_gen(conn) != gen0 {
+            return Err("데이터베이스를 바꾸기 전 결과라 보내지 않는다 (다시 실행한다)".into());
+        }
+        Ok(())
+    }
+
+    fn set_frozen(&self, conn: &str, frozen: bool, cx: &mut Context<Self>) {
+        for r in self.results_for(conn, cx) {
+            r.update(cx, |v, cx| v.set_frozen(frozen, cx));
+        }
+    }
+
     pub(super) fn db_gen(&self, conn: &str) -> u64 {
         self.db_gen.get(conn).copied().unwrap_or(0)
     }
@@ -544,7 +628,18 @@ impl Workspace {
     /// R27.1: 같은 서버의 다른 데이터베이스로 세션을 옮긴다. 카탈로그는 다시 읽는다.
     fn switch_db(&mut self, conn: String, db: String, window: &mut Window, cx: &mut Context<Self>) {
         let (c2, d2) = (conn.clone(), db.clone());
-        self.guarded(
+        // 보내기 전에 얼린다. 실패하면 풀고, 성공하면 옛 결과로 무효화한다
+        self.switching.insert(conn.clone());
+        self.set_frozen(&conn, true, cx);
+        let c_fail = conn.clone();
+        let hooks = Hooks {
+            precheck: None,
+            fail: Some(Rc::new(move |ws: &mut Workspace, cx: &mut Context<Workspace>| {
+                ws.switching.remove(&c_fail);
+                ws.set_frozen(&c_fail, false, cx);
+            })),
+        };
+        self.guarded_with(
             "데이터베이스 바꾸기",
             Rc::new(move |e: Engine, _| {
                 let (c, d) = (c2.clone(), d2.clone());
@@ -553,10 +648,12 @@ impl Workspace {
             Rc::new(move |ws: &mut Workspace, st: SessionState, window, cx| {
                 ws.set_status(format!("{} 로 바꿈", st.db), false, cx);
                 ws.sessions.insert(conn.clone(), st);
+                ws.switching.remove(&conn);
                 ws.on_db_switched(&conn, cx);
                 ws.catalogs.remove(&conn);
                 ws.ensure_catalog(&conn, window, cx);
             }),
+            hooks,
             Confirms::default(),
             window,
             cx,
@@ -970,7 +1067,15 @@ impl Workspace {
         let Some(engine) = self.engine.clone() else { return };
         let ws = cx.entity().downgrade();
         let page = self.prefs.row_limit;
-        let view = cx.new(|cx| ResultsView::new(ws, self.rt.clone(), engine, conn, source, rs, more, page, window, cx));
+        let (cur_gen, frozen) = (self.db_gen(&conn), self.is_switching(&conn));
+        let view = cx.new(|cx| {
+            let mut v = ResultsView::new(ws, self.rt.clone(), engine, conn, source, rs, more, page, window, cx);
+            v.db_gen = cur_gen;
+            if frozen {
+                v.set_frozen(true, cx);
+            }
+            v
+        });
         match self.bodies.get_mut(&tab_id) {
             Some(Body::Sql { result, .. }) | Some(Body::Table { result }) => *result = Some(view),
             _ => {}
@@ -2058,6 +2163,10 @@ mod tests {
     }
 
     fn edited_result(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<ResultsView> {
+        edited_result_on(ws, "app-stg", cx)
+    }
+
+    fn edited_result_on(ws: &Entity<Workspace>, conn: &str, cx: &mut VisualTestContext) -> Entity<ResultsView> {
         let rs: ResultSet = serde_json::from_value(serde_json::json!({
             "cols": ["id", "name"], "rows": [["1", "kim"]], "text": "", "truncated": false, "elapsed_ms": 1,
             "origin": {"table": {"schema": "public", "table": "users"}, "pk": ["id"], "cols": ["id", "name"]}
@@ -2066,16 +2175,8 @@ mod tests {
         cx.update(|window, cx| {
             ws.update(cx, |w, cx| {
                 let id = w.tabs.tabs[0].id;
-                w.tabs.tabs[0].conn = Some("app-stg".into());
-                w.show_result(
-                    id,
-                    "app-stg".into(),
-                    Source::Query { sql: "select 1".into() },
-                    rs,
-                    false,
-                    window,
-                    cx,
-                );
+                w.tabs.tabs[0].conn = Some(conn.into());
+                w.show_result(id, conn.into(), Source::Query { sql: "select 1".into() }, rs, false, window, cx);
             })
         });
         draw(cx);
@@ -2136,6 +2237,72 @@ mod tests {
             let w = ws.read(cx);
             assert!(w.busy.is_none(), "반영을 보내지 않는다");
             assert!(w.status.0.contains("데이터베이스를 바꾸기 전"), "{:?}", w.status);
+        });
+    }
+
+    /// 재리뷰: 바꾸기 요청이 도는 동안(원격이면 엔진은 이미 B 일 수 있다) A 결과로 반영하면 안 된다.
+    #[gpui::test]
+    fn 데이터베이스_바꾸기가_도는_동안_반영과_고치기를_막는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let r = edited_result(&ws, cx);
+        let cs = idb_engine::ChangeSet {
+            table: idb_engine::TableRef {
+                schema: "public".into(),
+                table: "users".into(),
+            },
+            pk: vec!["id".into()],
+            changes: vec![],
+            override_system: false,
+        };
+        cx.update(|window, cx| {
+            // 바꾸기를 보낸 바로 뒤, 답이 오기 전이다
+            ws.update(cx, |w, cx| w.switch_db("app-stg".into(), "other".into(), window, cx));
+            assert!(ws.read(cx).is_switching("app-stg"));
+            assert!(r.read(cx).frozen);
+            r.update(cx, |v, cx| v.submit(cs.clone(), window, cx));
+            r.update(cx, |v, cx| v.set_cell(0, 1, Some("park".into()), "kim", cx));
+            assert_eq!(r.read(cx).pending(cx), 1, "고치기도 막는다");
+            let w = ws.read(cx);
+            assert_eq!(
+                w.busy.as_ref().map(|b| b.0.as_str()),
+                Some("데이터베이스 바꾸기"),
+                "반영을 보내지 않았다"
+            );
+            assert!(w.write_ok("app-stg", 0).is_err());
+        });
+        // 바꾸기가 성공하면 옛 결과가 되고 세대가 오른다
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(!w.is_switching("app-stg"));
+            assert_eq!(w.db_gen("app-stg"), 1);
+            assert!(w.write_ok("app-stg", 0).is_err(), "세대가 다르면 막는다");
+            assert!(w.write_ok("app-stg", 1).is_ok());
+            assert!(!r.read(cx).frozen && r.read(cx).stale);
+        });
+    }
+
+    #[gpui::test]
+    fn 데이터베이스_바꾸기가_실패하면_결과를_다시_푼다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        // 프로젝트에 없는 접속이라 엔진이 바꾸기를 거절한다
+        let r = edited_result_on(&ws, "ghost", cx);
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| w.switch_db("ghost".into(), "other".into(), window, cx));
+            assert!(r.read(cx).frozen);
+        });
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(!w.is_switching("ghost"));
+            assert_eq!(w.db_gen("ghost"), 0);
+            assert!(w.write_ok("ghost", 0).is_ok());
+            assert!(!r.read(cx).frozen && !r.read(cx).stale);
+            assert_eq!(r.read(cx).pending(cx), 1, "실패하면 바꿈을 그대로 둔다");
         });
     }
 

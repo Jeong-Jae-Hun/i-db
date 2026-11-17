@@ -14,7 +14,7 @@ use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableE
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use idb_engine::{Applied, ChangeSet, Engine, EngineError, ResultSet, TablePage, TablePageRequest};
 
-use super::workspace::Workspace;
+use super::workspace::{Hooks, Workspace};
 use crate::vm::edits::Edits;
 use crate::vm::grid::{Dir, Grid, NULL};
 use crate::vm::runtime::{Job, Runtime};
@@ -47,6 +47,8 @@ pub struct GridDelegate {
     loader: Option<Loader>,
     /// 테이블 보기 한 쪽의 행 수(설정, 엔진 상한 1,000)
     page: u64,
+    /// 데이터베이스를 바꾸는 중이면 다음 쪽을 읽지 않는다
+    frozen: bool,
     /// 결과의 출처 테이블(INSERT 복사에 쓴다). 편집 상태와 달리 데이터베이스를 바꿔도 이름은 그대로라 남긴다
     origin: Option<idb_engine::Origin>,
     /// 마지막으로 오른쪽 단추를 누른 칸(열을 고르는 데 쓴다)
@@ -199,7 +201,7 @@ impl TableDelegate for GridDelegate {
 
     fn load_more(&mut self, _: &mut Window, cx: &mut Context<TableState<Self>>) {
         let Some(loader) = self.loader.clone() else { return };
-        if self.loading || !self.more {
+        if self.loading || !self.more || self.frozen {
             return;
         }
         self.loading = true;
@@ -244,6 +246,10 @@ pub struct ResultsView {
     last_applied: Option<(ChangeSet, Applied)>,
     /// 데이터베이스를 바꾼 뒤의 옛 결과다. 고치기·되돌리기·다음 쪽을 막는다(R27.1·R50)
     pub stale: bool,
+    /// 그 접속의 데이터베이스 바꾸기 요청이 도는 중이다(답이 오면 stale 이 되거나 풀린다)
+    pub frozen: bool,
+    /// 이 결과를 만든 데이터베이스 세대. 반영·되돌리기를 보내기 바로 전에 작업 공간 세대와 견준다
+    pub db_gen: u64,
     _subs: Vec<Subscription>,
 }
 
@@ -311,6 +317,7 @@ impl ResultsView {
             loading: false,
             loader,
             page,
+            frozen: false,
             origin,
             ctx_cell: None,
             owner: Some(cx.weak_entity()),
@@ -358,6 +365,8 @@ impl ResultsView {
             truncated,
             last_applied: None,
             stale: false,
+            frozen: false,
+            db_gen: 0,
             _subs: subs,
         }
     }
@@ -378,8 +387,28 @@ impl ResultsView {
 
     /// 접속의 데이터베이스가 바뀌었다. 이 결과의 바꿈·되돌리기 묶음은 옛 데이터베이스 것이라 버리고,
     /// 고치기와 다음 쪽 읽기를 막는다. 보기·복사는 그대로 둔다.
+    pub fn set_frozen(&mut self, frozen: bool, cx: &mut Context<Self>) {
+        self.frozen = frozen;
+        self.table.update(cx, |t, _| t.delegate_mut().frozen = frozen);
+        cx.notify();
+    }
+
+    /// 옛 결과이거나 데이터베이스를 바꾸는 중이면 고치기·반영·되돌리기를 막고 까닭을 보인다.
+    fn blocked(&self, cx: &mut Context<Self>) -> bool {
+        let why = if self.stale {
+            "데이터베이스를 바꾸기 전 결과라 고치거나 되돌리지 않는다 (다시 실행한다)"
+        } else if self.frozen {
+            "데이터베이스를 바꾸는 중이라 고치거나 되돌리지 않는다"
+        } else {
+            return false;
+        };
+        self.status(why, true, cx);
+        true
+    }
+
     pub fn invalidate(&mut self, cx: &mut Context<Self>) {
         self.stale = true;
+        self.frozen = false;
         self.last_applied = None;
         self.note = "데이터베이스를 바꾸기 전 결과다. 고치거나 더 읽으려면 다시 실행한다".into();
         self.table.update(cx, |t, cx| {
@@ -441,6 +470,9 @@ impl ResultsView {
     // ─── 편집 ───
 
     fn edit_cell(&mut self, row: usize, col: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked(cx) {
+            return;
+        }
         let (src, base, shown, editable) = {
             let d = self.table.read(cx).delegate();
             let Some(e) = &d.edits else {
@@ -514,6 +546,9 @@ impl ResultsView {
     }
 
     pub(super) fn set_cell(&mut self, src: usize, col: usize, v: Option<String>, base: &str, cx: &mut Context<Self>) {
+        if self.blocked(cx) {
+            return;
+        }
         let r = self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
             let inserted = d.edits.as_ref().is_some_and(|e| e.is_inserted(src));
@@ -528,6 +563,9 @@ impl ResultsView {
     }
 
     fn toggle_delete(&mut self, cx: &mut Context<Self>) {
+        if self.blocked(cx) {
+            return;
+        }
         self.table.update(cx, |t, cx| {
             let row = t.selected_cell().map(|(r, _)| r).or(t.selected_row());
             if let Some(src) = row.and_then(|r| t.delegate().grid.source_row(r))
@@ -564,8 +602,7 @@ impl ResultsView {
 
     /// 보류 중인 바꿈을 미리 보이고 확인하면 반영한다. prod 면 엔진이 confirm_prod 로 한 번 더 묻는다.
     fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.stale {
-            self.status("데이터베이스를 바꾸기 전 결과라 고치거나 되돌리지 않는다 (다시 실행한다)", true, cx);
+        if self.blocked(cx) {
             return;
         }
         let cs = {
@@ -608,15 +645,15 @@ impl ResultsView {
     }
 
     pub(super) fn submit(&mut self, cs: ChangeSet, window: &mut Window, cx: &mut Context<Self>) {
-        if self.stale {
-            self.status("데이터베이스를 바꾸기 전 결과라 고치거나 되돌리지 않는다 (다시 실행한다)", true, cx);
+        if self.blocked(cx) {
             return;
         }
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
         let sent = cs.clone();
+        let hooks = write_hooks(conn.clone(), self.db_gen);
         self.with_ws(window, cx, move |ws, window, cx| {
-            ws.guarded(
+            ws.guarded_with(
                 "반영",
                 Rc::new(move |e: Engine, c: Confirms| {
                     let (conn, cs) = (conn.clone(), cs.clone());
@@ -630,6 +667,7 @@ impl ResultsView {
                         v.reload(window, cx);
                     });
                 }),
+                hooks,
                 Confirms::default(),
                 window,
                 cx,
@@ -639,8 +677,7 @@ impl ResultsView {
 
     /// 마지막 반영을 되돌린다(R50). 다시 읽은 뒤에도 묶음이 남아 있으면 엔진이 옛값으로 확인한다.
     fn undo_applied(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.stale {
-            self.status("데이터베이스를 바꾸기 전 결과라 고치거나 되돌리지 않는다 (다시 실행한다)", true, cx);
+        if self.blocked(cx) {
             return;
         }
         let Some((cs, applied)) = self.last_applied.clone() else {
@@ -649,8 +686,9 @@ impl ResultsView {
         };
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
+        let hooks = write_hooks(conn.clone(), self.db_gen);
         self.with_ws(window, cx, move |ws, window, cx| {
-            ws.guarded(
+            ws.guarded_with(
                 "반영 되돌리기",
                 Rc::new(move |e: Engine, c: Confirms| {
                     let (conn, cs, applied) = (conn.clone(), cs.clone(), applied.clone());
@@ -663,6 +701,7 @@ impl ResultsView {
                         v.reload(window, cx);
                     });
                 }),
+                hooks,
                 Confirms::default(),
                 window,
                 cx,
@@ -681,6 +720,9 @@ impl ResultsView {
     }
 
     fn add_row(&mut self, cx: &mut Context<Self>) {
+        if self.blocked(cx) {
+            return;
+        }
         self.table.update(cx, |t, cx| {
             if let Some(e) = t.delegate_mut().edits.as_mut() {
                 e.add_row();
@@ -689,6 +731,14 @@ impl ResultsView {
         });
         self.status("추가 행은 반영 뒤 다시 읽을 때 보인다. 값은 칸을 두 번 눌러 정한다", false, cx);
         cx.notify();
+    }
+}
+
+/// 반영·되돌리기는 (확인 뒤 다시 보낼 때도) 보내기 바로 전에 데이터베이스 세대·바꾸는 중을 다시 본다.
+fn write_hooks(conn: String, gen0: u64) -> Hooks {
+    Hooks {
+        precheck: Some(Rc::new(move |ws: &Workspace| ws.write_ok(&conn, gen0))),
+        fail: None,
     }
 }
 
