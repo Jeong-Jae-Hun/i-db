@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use idb_core::result::QueryResult;
+pub use idb_sources::{Applied, Catalog, Change, ChangeOp, ChangeSet, Fk, Object, Origin, TableRef};
+
+pub use crate::redis::{PatternKeys, RawValue, RedisEdit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -22,6 +25,8 @@ pub const CODE_REFUSED: i32 = 3;
 pub const REASON_PROD_LOCKED: &str = "prod_locked";
 pub const REASON_CONFIRM_PROD: &str = "confirm_prod";
 pub const REASON_CONFIRM_DANGER: &str = "confirm_danger";
+/// 환경과 상관없이 늘 묻는 확인(백엔드 신호 R22.1, 패턴 일괄 삭제 R42). `confirm:true` 로 다시 보낸다
+pub const REASON_CONFIRM: &str = "confirm";
 
 /// 요청 하나다. op 이름은 snake_case 다. 모르는 필드는 무시해 새 필드를 더해도 옛 서버가 받는다.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +124,170 @@ pub enum Request {
     },
     /// CLI 하위 명령 하나를 서버에서 돌린다(`db <명령> --remote`)
     Cli(CliRequest),
+
+    // ─── 판 1 에 더한 op (모두 더하기만 했다) ───
+    /// 같은 서버의 접속할 수 있는 데이터베이스(R27.1)
+    Databases {
+        conn: String,
+    },
+    /// 이 접속을 다른 데이터베이스로 다시 연다. 빈 db 는 프로젝트의 DB 로 돌아간다. 열린 트랜잭션이 있으면 거절한다
+    SwitchDb {
+        conn: String,
+        #[serde(default)]
+        db: String,
+    },
+    /// 편집기 세션에 `SET search_path TO "<schema>", public`(R27.2)
+    SetSearchPath {
+        conn: String,
+        schema: String,
+    },
+    /// 운영 화면(R22.1)
+    Activity {
+        conn: String,
+    },
+    Locks {
+        conn: String,
+    },
+    TableSizes {
+        conn: String,
+    },
+    /// pid 의 쿼리 취소(terminate 면 연결 종료). 늘 confirm 을 요구하고 prod 는 잠금·confirm_prod 도 거친다
+    SignalBackend {
+        conn: String,
+        pid: i64,
+        #[serde(default)]
+        terminate: bool,
+        #[serde(default)]
+        confirm: bool,
+        #[serde(default)]
+        confirm_prod: bool,
+    },
+    /// t 가 가리키는 FK, incoming 이면 t 를 가리키는 FK(R36)
+    ForeignKeys {
+        conn: String,
+        schema: String,
+        table: String,
+        #[serde(default)]
+        incoming: bool,
+    },
+    /// 이름을 테이블·뷰·함수로 찾는다(R26)
+    Resolve {
+        conn: String,
+        name: String,
+    },
+    FunctionDef {
+        conn: String,
+        schema: String,
+        name: String,
+    },
+    /// 자동완성·찾기 목록(R8·R22.3·R56)
+    Catalog {
+        conn: String,
+    },
+    EnumLabels {
+        conn: String,
+        types: Vec<String>,
+    },
+    /// UPDATE·DELETE 하나의 예상 행 수(R39, 실행하지 않음)
+    EstimateRows {
+        conn: String,
+        sql: String,
+        #[serde(default)]
+        params: BTreeMap<String, String>,
+    },
+    /// 결과 표 편집 반영(R15.2)
+    ApplyChanges {
+        conn: String,
+        changes: ChangeSet,
+        #[serde(default)]
+        confirm_prod: bool,
+    },
+    /// 반영한 묶음 되돌리기(R50). applied 는 apply_changes 가 돌려준 것이다
+    UndoChanges {
+        conn: String,
+        changes: ChangeSet,
+        applied: Applied,
+        #[serde(default)]
+        confirm_prod: bool,
+    },
+    /// 묶음의 미리 보기 문장. applied 가 있으면 되돌리기 묶음과 그 문장이다
+    ChangesSql {
+        changes: ChangeSet,
+        #[serde(default)]
+        applied: Option<Applied>,
+    },
+    /// CSV 가져오기(COPY). 파일은 클라이언트가 읽어 행으로 보낸다
+    ImportCsv {
+        conn: String,
+        schema: String,
+        table: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<Option<String>>>,
+        #[serde(default)]
+        confirm_prod: bool,
+    },
+    Linked {
+        conn: String,
+        column: String,
+        value: String,
+        #[serde(default)]
+        table: String,
+    },
+    SchemaDiff {
+        conn: String,
+        to: String,
+        #[serde(default)]
+        schema: String,
+        #[serde(default)]
+        to_schema: String,
+    },
+    User360 {
+        query: String,
+    },
+    /// 값 편집기용 잘리지 않은 값
+    RedisRawValue {
+        conn: String,
+        key: String,
+    },
+    /// 값 편집 하나를 명령으로 만들어 세션에서 차례로 실행한다
+    RedisEdit {
+        conn: String,
+        edit: RedisEdit,
+        #[serde(default)]
+        confirm_prod: bool,
+        #[serde(default)]
+        confirm_danger: bool,
+    },
+    /// Redis 모니터(R34.1)
+    RedisInfo {
+        conn: String,
+    },
+    RedisSlowlog {
+        conn: String,
+        #[serde(default)]
+        n: i64,
+    },
+    RedisBigKeys {
+        conn: String,
+        #[serde(default)]
+        sample: usize,
+        #[serde(default)]
+        top: usize,
+    },
+    /// 패턴 일괄 삭제(R42) 1단계: 맞는 키(100,000개까지)
+    RedisPatternKeys {
+        conn: String,
+        pattern: String,
+    },
+    /// 2단계: 센 키만 UNLINK 한다. 늘 confirm, prod 는 잠금·confirm_prod 도
+    RedisUnlink {
+        conn: String,
+        keys: Vec<String>,
+        #[serde(default)]
+        confirm: bool,
+        #[serde(default)]
+        confirm_prod: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -235,6 +404,9 @@ pub struct ResultSet {
     /// enc() 확장 알림(R52) 같은 딸린 글
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// 결과가 한 테이블에서 왔고 PK 를 다 담았을 때만 있다. 없으면 표는 읽기 전용이다(R15.1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
 }
 
 impl ResultSet {
@@ -248,6 +420,7 @@ impl ResultSet {
             elapsed_ms: r.elapsed.as_millis() as u64,
             in_tx: None,
             note: String::new(),
+            origin: None,
         }
     }
 }
@@ -281,6 +454,62 @@ pub struct LockState {
     pub remaining_secs: u64,
     /// 열면 열리는 분(DB_PROD_UNLOCK_MIN)
     pub unlock_min: u64,
+}
+
+/// set_search_path·switch_db 뒤 세션 상태다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionState {
+    pub conn: String,
+    pub db: String,
+    pub search_path: String,
+    pub in_tx: bool,
+}
+
+/// apply_changes·undo_changes 의 답이다. result 는 INSERT 가 돌려준 행과 `UPDATE 1 · DELETE 1` 요약, sql 은 실행한 문장의 미리 보기다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppliedResult {
+    pub result: ResultSet,
+    pub applied: Applied,
+    pub sql: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChangesPreview {
+    /// applied 를 줬으면 되돌리기 묶음, 아니면 받은 묶음 그대로다
+    pub changes: ChangeSet,
+    pub sql: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Count {
+    pub rows: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinkedResult {
+    /// text 는 요약(`연결된 곳 3 · 접속 2곳 …`)이다
+    pub result: ResultSet,
+    /// 접속·테이블 하나라도 실패했다
+    pub failed: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct User360Item {
+    pub title: String,
+    pub conn: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedisEditResult {
+    /// 실행한 명령마다의 결과(첫 오류에서 멈춘다)
+    pub results: Vec<ResultSet>,
+    /// 다시 읽을 키. 이름을 바꿨으면 새 이름, 키를 지웠으면 빈 글이다
+    pub key: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

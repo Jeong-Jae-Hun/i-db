@@ -531,6 +531,7 @@ dependencies = [
 name = "idb-engine"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "idb-core",
  "idb-sources",
  "serde",

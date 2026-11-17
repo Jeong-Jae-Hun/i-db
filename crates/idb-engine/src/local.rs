@@ -2,51 +2,75 @@
 //! 안전장치(읽기 전용·prod 확인·잠금 R54·위험 문장 R25·가리기)는 모두 여기서 정한다. 원격 클라이언트는 확인 여부만 보낸다.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use idb_core::params::inline_args;
 use idb_core::project::{Conn, Kind, Project, SOURCE_DB, folder_of};
 use idb_core::redact::redact;
-use idb_core::result::{MAX_ROWS, QueryResult, cap_cell};
+use idb_core::result::MAX_ROWS;
 use idb_core::sqlsafe::{
     ExplainOpt, danger_of, danger_of_redis, explain_sql, first_sql_word, is_read_only_redis, is_read_only_sql, mask_sql, quote_ident,
     quote_literal, split_statements,
 };
 use idb_core::textutil::printable;
-use idb_sources::redis::{RedisConn, Value as RValue};
-use idb_sources::{Clients, Error, Session, TableRef};
+use idb_sources::redis::RedisConn;
+use idb_sources::{Clients, Error, Ran, Session, TableRef, changes_sql, undo_changes};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::lookup;
 use crate::protocol::*;
+use crate::redis;
 
 /// 테이블 보기 기본 페이지(R16.1)
 const DEFAULT_PAGE: u64 = 200;
 const DEFAULT_UNLOCK_MIN: u64 = 10;
 const MAX_UNLOCK_MIN: u64 = 24 * 60;
-/// Redis string 값은 앞 1MiB 만 보여 준다(E63)
-const MAX_STRING_BYTES: i64 = 1 << 20;
 const TX_END_WORDS: &[&str] = &["commit", "rollback", "end", "abort"];
+/// 여러 접속을 거치는 조회(user360·schema-diff)의 시간 제한. CLI 기본 --timeout 과 같다
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Redis 모니터 기본값(Go redisSlowLogN·redisBigKeySample·redisBigKeyTop)
+const SLOWLOG_N: i64 = 50;
+const BIGKEY_SAMPLE: usize = 1000;
+const BIGKEY_TOP: usize = 50;
+/// 끊긴 Redis 세션을 한 번 알리는 글이다(R4.2, Go RedisConn.Run)
+pub const REDIS_SESSION_LOST: &str = "이전 Redis 세션 연결이 끊겨 SELECT 한 DB 같은 세션 상태가 사라졌다. 다시 실행하면 새 연결에서 돈다";
 
 /// serve 가 CLI 하위 명령을 돌리는 함수다. idb-cli 가 넘긴다(엔진이 CLI 에 기대지 않게).
 pub type CliHandler = Arc<dyn Fn(CliRequest) -> CliResponse + Send + Sync>;
 
 type RedisSlot = Arc<tokio::sync::Mutex<RedisState>>;
+type RedisJob<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
 
 #[derive(Default)]
 struct RedisState {
     conn: Option<RedisConn>,
     /// 명령 중에 퓨처가 버려졌다(취소). 연결은 함께 버려졌다
     running: bool,
+    /// 세션 연결이 끊겨 SELECT 같은 세션 상태를 잃었고 아직 알리지 않았다(세션 칸만)
+    lost: bool,
+}
+
+/// Redis 연결 칸이다. 편집기 명령·값 편집은 세션, 트리·값 보기·모니터·일괄 삭제는 풀이다(Go 와 같다).
+#[derive(Clone, Copy, PartialEq)]
+enum RedisUse {
+    Session,
+    Pool,
 }
 
 pub struct LocalEngine {
     proj: Project,
-    clients: Clients,
+    clients: Arc<Clients>,
     sessions: tokio::sync::Mutex<HashMap<String, Arc<Session>>>,
-    redis: Mutex<HashMap<String, RedisSlot>>,
+    redis_session: Mutex<HashMap<String, RedisSlot>>,
+    redis_pool: Mutex<HashMap<String, RedisSlot>>,
     /// prod 접속마다 열린 끝 시각(R54.2). 없으면 잠김
     unlocked: Mutex<HashMap<String, Instant>>,
+    /// switch_db 로 바꾼 데이터베이스(R27.1). 프로젝트 파일은 고치지 않는다
+    db_override: Mutex<HashMap<String, String>>,
     cli: Option<CliHandler>,
 }
 
@@ -54,10 +78,12 @@ impl LocalEngine {
     pub fn new(proj: Project, cli: Option<CliHandler>) -> LocalEngine {
         LocalEngine {
             proj,
-            clients: Clients::new(),
+            clients: Arc::new(Clients::new()),
             sessions: Default::default(),
-            redis: Default::default(),
+            redis_session: Default::default(),
+            redis_pool: Default::default(),
             unlocked: Default::default(),
+            db_override: Default::default(),
             cli,
         }
     }
@@ -71,7 +97,7 @@ impl LocalEngine {
         self.clients.close().await;
     }
 
-    /// 요청 하나를 처리한다. hello·cancel 은 serve 가 처리한다.
+    /// 요청 하나를 처리한다. cancel 은 serve 가 처리한다.
     pub async fn handle(&self, req: Request) -> Result<Value, EngineError> {
         match req {
             Request::Hello { .. } => json(Hello {
@@ -82,34 +108,33 @@ impl LocalEngine {
             Request::Project => json(self.project()),
             Request::Schemas { conn } => {
                 let c = self.conn(&conn, Kind::Pg)?;
-                let names = self.pg(c, |pg| async move { pg.find_schemas().await }).await?;
-                json(names)
+                json(self.pg(&c, |pg| async move { pg.find_schemas().await }).await?)
             }
             Request::Tables { conn, schema } => {
                 let c = self.conn(&conn, Kind::Pg)?;
                 let schema = if schema.is_empty() { "public".to_string() } else { schema };
-                json(self.pg(c, |pg| async move { pg.find_tables(&schema).await }).await?)
+                json(self.pg(&c, |pg| async move { pg.find_tables(&schema).await }).await?)
             }
             Request::Describe { conn, schema, table } => {
                 let c = self.conn(&conn, Kind::Pg)?;
                 let t = table_ref(schema, table);
-                let r = self.pg(c, |pg| async move { pg.describe_table(&t).await }).await?;
+                let r = self.pg(&c, |pg| async move { pg.describe_table(&t).await }).await?;
                 json(ResultSet::from_query(r))
             }
             Request::Ddl { conn, schema, table } => {
                 let c = self.conn(&conn, Kind::Pg)?;
                 let t = table_ref(schema, table);
-                json(self.pg(c, |pg| async move { pg.table_ddl(&t).await }).await?)
+                json(self.pg(&c, |pg| async move { pg.table_ddl(&t).await }).await?)
             }
             Request::Search { conn, schema, text } => {
                 let c = self.conn(&conn, Kind::Pg)?;
                 if text.is_empty() {
                     return Err(EngineError::usage("찾을 글이 필요함"));
                 }
-                let (r, skipped) = self.pg(c, |pg| async move { pg.search_data(&schema, &text).await }).await?;
+                let (r, skipped) = self.pg(&c, |pg| async move { pg.search_data(&schema, &text).await }).await?;
                 let mut rs = ResultSet::from_query(r);
                 if !skipped.is_empty() {
-                    rs.note = self.clean(c, &format!("건너뛴 테이블: {}", skipped.join(", ")));
+                    rs.note = self.clean(&c, &format!("건너뛴 테이블: {}", skipped.join(", ")));
                 }
                 json(rs)
             }
@@ -127,7 +152,7 @@ impl LocalEngine {
             Request::TxState { conn } => {
                 let c = self.conn(&conn, Kind::Pg)?;
                 json(TxState {
-                    in_tx: self.in_tx(c).await,
+                    in_tx: self.in_tx(&c).await,
                     text: String::new(),
                 })
             }
@@ -135,11 +160,14 @@ impl LocalEngine {
             Request::RedisScan { conn, pattern } => {
                 let c = self.conn(&conn, Kind::Redis)?;
                 let pattern = if pattern.is_empty() { "*".to_string() } else { pattern };
-                json(self.redis_do(c, |r| Box::pin(scan_keys(r, pattern))).await?)
+                json(
+                    self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::scan_keys(r, pattern)))
+                        .await?,
+                )
             }
             Request::RedisValue { conn, key } => {
                 let c = self.conn(&conn, Kind::Redis)?;
-                json(self.redis_do(c, |r| Box::pin(get_value(r, key))).await?)
+                json(self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::get_value(r, key))).await?)
             }
             Request::RedisRun {
                 conn,
@@ -155,6 +183,243 @@ impl LocalEngine {
                     .await
                     .map_err(|_| EngineError::run("internal error"))?;
                 json(out)
+            }
+            Request::Databases { conn } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                json(self.pg(&c, |pg| async move { pg.databases().await }).await?)
+            }
+            Request::SwitchDb { conn, db } => json(self.switch_db(&conn, db).await?),
+            Request::SetSearchPath { conn, schema } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                let ran = self.session(&c).await?.set_search_path(&schema).await;
+                ran.res.map_err(|e| self.run_err(&c, &e))?;
+                json(self.session_state(&c, ran.in_tx).await)
+            }
+            Request::Activity { conn } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                json(ResultSet::from_query(self.pg(&c, |pg| async move { pg.activity().await }).await?))
+            }
+            Request::Locks { conn } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                json(ResultSet::from_query(self.pg(&c, |pg| async move { pg.locks().await }).await?))
+            }
+            Request::TableSizes { conn } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                json(ResultSet::from_query(
+                    self.pg(&c, |pg| async move { pg.table_sizes().await }).await?,
+                ))
+            }
+            Request::SignalBackend {
+                conn,
+                pid,
+                terminate,
+                confirm,
+                confirm_prod,
+            } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                let what = if terminate { "연결 종료" } else { "쿼리 취소" };
+                self.always_confirm(&c, confirm, confirm_prod, &format!("pid {pid} {what}"))?;
+                self.pg(&c, |pg| async move { pg.signal_backend(pid, terminate).await }).await?;
+                json(serde_json::json!({}))
+            }
+            Request::ForeignKeys {
+                conn,
+                schema,
+                table,
+                incoming,
+            } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                let t = TableRef { schema, table };
+                json(self.pg(&c, |pg| async move { pg.foreign_keys(&t, incoming).await }).await?)
+            }
+            Request::Resolve { conn, name } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                let sp = self.search_path(&c).await;
+                json(self.pg(&c, |pg| async move { pg.resolve(&name, &sp).await }).await?)
+            }
+            Request::FunctionDef { conn, schema, name } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                json(self.pg(&c, |pg| async move { pg.function_def(&schema, &name).await }).await?)
+            }
+            Request::Catalog { conn } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                json(self.pg(&c, |pg| async move { pg.catalog().await }).await?)
+            }
+            Request::EnumLabels { conn, types } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                let out = self
+                    .pg(&c, |pg| async move {
+                        let mut out = HashMap::new();
+                        for t in types {
+                            let labels = pg.enum_labels(&t).await?;
+                            out.insert(t, labels);
+                        }
+                        Ok(out)
+                    })
+                    .await?;
+                json(out)
+            }
+            Request::EstimateRows { conn, sql, params } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                let (sent, _) = self.proj.expand_enc(&c, &sql).map_err(EngineError::usage)?;
+                let (bound, args) = bind_params(&sent, &params)?;
+                let sql = inline_args(&bound, &args);
+                let sp = self.search_path(&c).await;
+                let rows = self.pg(&c, |pg| async move { pg.estimate_rows(&sql, &sp).await }).await?;
+                json(Count { rows })
+            }
+            Request::ApplyChanges {
+                conn,
+                changes,
+                confirm_prod,
+            } => json(self.apply(&conn, changes, confirm_prod, "제출").await?),
+            Request::UndoChanges {
+                conn,
+                changes,
+                applied,
+                confirm_prod,
+            } => {
+                let undo = undo_changes(&changes, &applied).map_err(EngineError::usage)?;
+                json(self.apply(&conn, undo, confirm_prod, "제출 되돌리기").await?)
+            }
+            Request::ChangesSql { changes, applied } => {
+                let changes = match applied {
+                    Some(a) => undo_changes(&changes, &a).map_err(EngineError::usage)?,
+                    None => changes,
+                };
+                json(ChangesPreview {
+                    sql: changes_sql(&changes),
+                    changes,
+                })
+            }
+            Request::ImportCsv {
+                conn,
+                schema,
+                table,
+                columns,
+                rows,
+                confirm_prod,
+            } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                self.write_guard(
+                    &c,
+                    confirm_prod,
+                    &format!("prod({})에 CSV {}행 가져오기: y/N", c.name, rows.len()),
+                    false,
+                )?;
+                let t = TableRef { schema, table };
+                let n = self.pg(&c, |pg| async move { pg.import_csv(&t, &columns, &rows).await }).await?;
+                json(Count { rows: n })
+            }
+            Request::Linked {
+                conn,
+                column,
+                value,
+                table,
+            } => {
+                let c = self.conn(&conn, Kind::Pg)?;
+                let err_text = |c: &Conn, e: &Error| self.clean(c, &e.to_string());
+                let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
+                let (res, failed) = lookup::linked(&self.proj, self.clients.clone(), &c, &column, &table, &value, deadline, &err_text)
+                    .await
+                    .map_err(EngineError::usage)?;
+                json(LinkedResult {
+                    result: ResultSet::from_query(res),
+                    failed,
+                })
+            }
+            Request::SchemaDiff {
+                conn,
+                to,
+                schema,
+                to_schema,
+            } => {
+                let (a, b) = (self.conn(&conn, Kind::Pg)?, self.conn(&to, Kind::Pg)?);
+                let schema = if schema.is_empty() { "public".to_string() } else { schema };
+                let to_schema = if to_schema.is_empty() { schema.clone() } else { to_schema };
+                let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
+                let res = lookup::schema_diff(self.clients.clone(), &a, &b, &schema, &to_schema, deadline)
+                    .await
+                    .map_err(|e| EngineError::run(self.clean(&a, &self.clean(&b, &e.to_string()))))?;
+                json(ResultSet::from_query(res))
+            }
+            Request::User360 { query } => {
+                if query.trim().is_empty() {
+                    return Err(EngineError::usage("찾을 이메일·uid·id·닉네임이 필요함"));
+                }
+                let qs = lookup::user360_plan(&self.proj, &query).map_err(|e| EngineError::run(self.clean_all(&e.to_string())))?;
+                let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
+                let rows = lookup::user360_run(&self.proj, self.clients.clone(), &qs, deadline).await;
+                let items: Vec<User360Item> = rows
+                    .into_iter()
+                    .map(|r| User360Item {
+                        error: r.err.map(|e| match self.proj.conn_by_name(&r.conn) {
+                            Some(c) => self.clean(c, &e),
+                            None => self.clean_all(&e),
+                        }),
+                        title: r.title,
+                        conn: r.conn,
+                        result: r.res.map(ResultSet::from_query),
+                    })
+                    .collect();
+                json(items)
+            }
+            Request::RedisRawValue { conn, key } => {
+                let c = self.conn(&conn, Kind::Redis)?;
+                json(self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::raw_value(r, key))).await?)
+            }
+            Request::RedisEdit {
+                conn,
+                edit,
+                confirm_prod,
+                confirm_danger,
+            } => json(self.redis_edit(&conn, edit, confirm_prod, confirm_danger).await?),
+            Request::RedisInfo { conn } => {
+                let c = self.conn(&conn, Kind::Redis)?;
+                json(self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::info_summary(r))).await?)
+            }
+            Request::RedisSlowlog { conn, n } => {
+                let c = self.conn(&conn, Kind::Redis)?;
+                let n = if n <= 0 { SLOWLOG_N } else { n };
+                json(self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::slow_log(r, n))).await?)
+            }
+            Request::RedisBigKeys { conn, sample, top } => {
+                let c = self.conn(&conn, Kind::Redis)?;
+                let sample = if sample == 0 { BIGKEY_SAMPLE } else { sample.min(100_000) };
+                let top = if top == 0 { BIGKEY_TOP } else { top.min(MAX_ROWS) };
+                json(
+                    self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::big_keys(r, sample, top)))
+                        .await?,
+                )
+            }
+            Request::RedisPatternKeys { conn, pattern } => {
+                let c = self.conn(&conn, Kind::Redis)?;
+                if pattern.is_empty() {
+                    return Err(EngineError::usage("패턴이 없어 지우지 않음"));
+                }
+                json(
+                    self.redis_do(&c, RedisUse::Pool, |r| {
+                        Box::pin(redis::pattern_keys(r, pattern, redis::DELETE_LIMIT))
+                    })
+                    .await?,
+                )
+            }
+            Request::RedisUnlink {
+                conn,
+                keys,
+                confirm,
+                confirm_prod,
+            } => {
+                let c = self.conn(&conn, Kind::Redis)?;
+                if keys.len() > redis::DELETE_LIMIT {
+                    return Err(EngineError::usage(format!(
+                        "키가 {}개를 넘어 지우지 않음 (패턴을 좁히세요)",
+                        redis::DELETE_LIMIT
+                    )));
+                }
+                self.always_confirm(&c, confirm, confirm_prod, &format!("키 {}개 지움", keys.len()))?;
+                let n = self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::unlink_keys(r, keys))).await?;
+                json(Count { rows: n })
             }
         }
     }
@@ -173,7 +438,13 @@ impl LocalEngine {
                     kind: c.kind_str().into(),
                     env: c.env().into(),
                     host: if c.host.is_empty() { c.url.clone() } else { c.host.clone() },
-                    db: c.db.clone(),
+                    db: self
+                        .db_override
+                        .lock()
+                        .unwrap()
+                        .get(&c.uuid)
+                        .cloned()
+                        .unwrap_or_else(|| c.db.clone()),
                     source: if c.source == SOURCE_DB { SOURCE_DB } else { "datagrip" }.into(),
                 })
                 .collect(),
@@ -183,7 +454,8 @@ impl LocalEngine {
 
     // ─── 접속·오류 ───
 
-    fn conn(&self, name: &str, kind: Kind) -> Result<&Conn, EngineError> {
+    /// 이름의 접속이다. switch_db 로 바꾼 DB 를 입힌 사본이다.
+    fn conn(&self, name: &str, kind: Kind) -> Result<Conn, EngineError> {
         if name.is_empty() {
             return Err(EngineError::usage("접속 이름이 필요함"));
         }
@@ -193,6 +465,10 @@ impl LocalEngine {
             .ok_or_else(|| EngineError::usage(format!("접속 없음: {name}")))?;
         if c.kind != Some(kind) {
             return Err(EngineError::usage(format!("{name} 는 {kind} 접속이 아님")));
+        }
+        let mut c = c.clone();
+        if let Some(db) = self.db_override.lock().unwrap().get(&c.uuid) {
+            c.db = db.clone();
         }
         Ok(c)
     }
@@ -206,7 +482,7 @@ impl LocalEngine {
         printable(&msg, true)
     }
 
-    /// 접속을 모를 때(프로젝트 경고)는 모든 비밀번호를 지운다.
+    /// 접속을 모를 때(프로젝트 경고·여러 접속 조회)는 모든 비밀번호를 지운다.
     fn clean_all(&self, msg: &str) -> String {
         let mut msg = msg.to_string();
         for c in &self.proj.conns {
@@ -225,7 +501,7 @@ impl LocalEngine {
     async fn pg<T, F, Fut>(&self, c: &Conn, f: F) -> Result<T, EngineError>
     where
         F: FnOnce(idb_sources::Pg) -> Fut,
-        Fut: std::future::Future<Output = Result<T, Error>>,
+        Fut: Future<Output = Result<T, Error>>,
     {
         let r = async { f(self.clients.pg(c).await?).await }.await;
         r.map_err(|e| self.run_err(c, &e))
@@ -240,6 +516,24 @@ impl LocalEngine {
         }
     }
 
+    /// 이미 연 세션에서 고른 search_path 다.
+    async fn search_path(&self, c: &Conn) -> String {
+        let s = self.sessions.lock().await.get(&c.uuid).cloned();
+        match s {
+            Some(s) => s.search_path().await,
+            None => String::new(),
+        }
+    }
+
+    async fn session_state(&self, c: &Conn, in_tx: bool) -> SessionState {
+        SessionState {
+            conn: c.name.clone(),
+            db: c.db.clone(),
+            search_path: self.search_path(c).await,
+            in_tx,
+        }
+    }
+
     async fn session(&self, c: &Conn) -> Result<Arc<Session>, EngineError> {
         let mut map = self.sessions.lock().await;
         if let Some(s) = map.get(&c.uuid) {
@@ -249,6 +543,32 @@ impl LocalEngine {
         let s = Arc::new(Session::new(pg));
         map.insert(c.uuid.clone(), s.clone());
         Ok(s)
+    }
+
+    /// R27.1: 세션과 풀을 닫고 다음 연결부터 db 로 연다. 열린 트랜잭션이 있으면 바꾸지 않는다.
+    async fn switch_db(&self, name: &str, db: String) -> Result<SessionState, EngineError> {
+        let c = self.conn(name, Kind::Pg)?;
+        if self.in_tx(&c).await {
+            return Err(EngineError::usage(
+                "열린 트랜잭션이 있어 데이터베이스를 바꾸지 않음 (COMMIT·ROLLBACK 먼저)",
+            ));
+        }
+        let old = self.sessions.lock().await.remove(&c.uuid);
+        if let Some(s) = old {
+            s.close().await;
+        }
+        self.clients.forget(&c.uuid).await;
+        let base = self.proj.conn_by_name(name).map(|c| c.db.clone()).unwrap_or_default();
+        {
+            let mut m = self.db_override.lock().unwrap();
+            if db.is_empty() || db == base {
+                m.remove(&c.uuid);
+            } else {
+                m.insert(c.uuid.clone(), db);
+            }
+        }
+        let c = self.conn(name, Kind::Pg)?;
+        Ok(self.session_state(&c, false).await)
     }
 
     // ─── prod 잠금 (R54) ───
@@ -307,6 +627,31 @@ impl LocalEngine {
         EngineError::refused(REASON_PROD_LOCKED, msg)
     }
 
+    /// prod 쓰기의 문이다. 잠겨 있으면 확인 없이 거절(R54.1), 열려 있으면 confirm_prod(R6)를 요구한다. prod 가 아니면 통과다.
+    fn write_guard(&self, c: &Conn, confirm_prod: bool, ask: &str, tx_hint: bool) -> Result<(), EngineError> {
+        if c.env() != "prod" {
+            return Ok(());
+        }
+        if self.locked(c) {
+            return Err(self.lock_refusal(c, tx_hint));
+        }
+        if !confirm_prod {
+            return Err(EngineError::refused(REASON_CONFIRM_PROD, ask));
+        }
+        Ok(())
+    }
+
+    /// 환경과 상관없이 늘 묻는 쓰기(백엔드 신호·패턴 일괄 삭제)다. prod 는 잠금과 confirm_prod 를, 아니면 confirm 을 요구한다.
+    fn always_confirm(&self, c: &Conn, confirm: bool, confirm_prod: bool, what: &str) -> Result<(), EngineError> {
+        if c.env() == "prod" {
+            return self.write_guard(c, confirm_prod, &format!("prod({}) {what}: y/N", c.name), false);
+        }
+        if !confirm {
+            return Err(EngineError::refused(REASON_CONFIRM, format!("{} {what}: y/N", c.name)));
+        }
+        Ok(())
+    }
+
     // ─── 편집기 세션 ───
 
     /// 편집기 문장 하나(explain 이면 EXPLAIN 으로 감싼 것)를 안전장치를 거쳐 세션에서 실행한다.
@@ -318,26 +663,19 @@ impl LocalEngine {
         if stmts.len() != 1 {
             return Err(EngineError::usage(format!("문장 하나만 실행함 ({}개)", stmts.len())));
         }
-        let (mut sent, note) = self.proj.expand_enc(c, stmts[0]).map_err(EngineError::usage)?;
+        let (mut sent, note) = self.proj.expand_enc(&c, stmts[0]).map_err(EngineError::usage)?;
         if let Some(opt) = &explain {
             sent = explain_sql(&sent, opt);
         }
-        let (sql, names) = idb_core::params::bind(&sent);
-        let mut args = Vec::with_capacity(names.len());
-        for n in &names {
-            match r.params.get(n) {
-                Some(v) => args.push(Some(v.clone())),
-                None => return Err(EngineError::usage(format!("파라미터 값이 없음: {n}"))),
-            }
-        }
+        let (sql, args) = bind_params(&sent, &r.params)?;
         let read_only = is_read_only_sql(&sent);
         // 거절은 접속을 열기 전에 한다. 그래야 거절할 prod 에 연결 자체를 하지 않는다
         if c.env() == "prod" && !read_only {
             let w = first_sql_word(&sent);
             let tx_end = TX_END_WORDS.contains(&w.as_str()) && !mask_sql(&sent).to_lowercase().split_whitespace().any(|t| t == "prepared");
-            if !tx_end && self.locked(c) {
-                let hint = matches!(w.as_str(), "begin" | "start" | "set") || self.in_tx(c).await;
-                return Err(self.lock_refusal(c, hint));
+            if !tx_end && self.locked(&c) {
+                let hint = matches!(w.as_str(), "begin" | "start" | "set") || self.in_tx(&c).await;
+                return Err(self.lock_refusal(&c, hint));
             }
             if !r.confirm_prod {
                 return Err(EngineError::refused(
@@ -350,19 +688,53 @@ impl LocalEngine {
         if !danger.is_empty() && !r.confirm_danger {
             return Err(EngineError::refused(REASON_CONFIRM_DANGER, format!("위험: {danger}")));
         }
-        let s = self.session(c).await?;
-        let ran = s.run(&sql, &args, read_only && self.locked(c)).await;
+        let s = self.session(&c).await?;
+        let ran = s.run(&sql, &args, read_only && self.locked(&c)).await;
+        let mut rs = self.ran(&c, ran)?;
+        rs.note = note;
+        Ok(rs)
+    }
+
+    /// 세션 결과를 ResultSet 으로 바꾼다. 실패해도 트랜잭션이 열려 있으면 reason in_tx 로 화면이 알게 한다(R3.6).
+    fn ran(&self, c: &Conn, ran: Ran) -> Result<ResultSet, EngineError> {
+        let in_tx = ran.in_tx;
         let mut rs = ResultSet::from_query(ran.res.map_err(|e| {
             let mut e = self.run_err(c, &e);
-            // 실패해도 트랜잭션이 열려 있으면 화면이 알게 한다(R3.6)
-            if ran.in_tx {
+            if in_tx {
                 e.reason = Some("in_tx".into());
             }
             e
         })?);
-        rs.in_tx = Some(ran.in_tx);
-        rs.note = note;
+        rs.in_tx = Some(in_tx);
+        rs.origin = ran.origin;
         Ok(rs)
+    }
+
+    /// 편집 묶음을 반영한다(R15.2·R50). pk 가 테이블의 진짜 PK 가 아니면 거절한다(ctid·다른 열로 행을 찾지 않는다).
+    async fn apply(&self, name: &str, cs: ChangeSet, confirm_prod: bool, what: &str) -> Result<AppliedResult, EngineError> {
+        let c = self.conn(name, Kind::Pg)?;
+        if cs.changes.is_empty() {
+            return Err(EngineError::usage("no changes to apply"));
+        }
+        let ask = format!("prod({})에 {what} {}건: y/N", c.name, cs.changes.len());
+        self.write_guard(&c, confirm_prod, &ask, false)?;
+        let t = cs.table.clone();
+        let pk = self.pg(&c, |pg| async move { pg.primary_key(&t).await }).await?;
+        if pk.is_empty() || pk != cs.pk {
+            return Err(EngineError::usage(format!(
+                "편집 묶음의 PK({})가 {} 의 PK({})와 다름",
+                cs.pk.join(", "),
+                cs.table.quoted(),
+                pk.join(", ")
+            )));
+        }
+        let ran = self.session(&c).await?.apply(&cs).await;
+        let applied = ran.applied.clone().unwrap_or_default();
+        Ok(AppliedResult {
+            result: self.ran(&c, ran)?,
+            applied,
+            sql: changes_sql(&cs),
+        })
     }
 
     async fn table_page(&self, r: &TablePageRequest) -> Result<TablePage, EngineError> {
@@ -426,9 +798,9 @@ impl LocalEngine {
     /// F9·F10·F11(R17). COMMIT 은 prod 면 확인을 받고 잠금에는 막히지 않는다(R54.2 단서). BEGIN 은 잠긴 prod 에서 막는다.
     async fn tx(&self, name: &str, verb: &str, confirm_prod: bool) -> Result<TxState, EngineError> {
         let c = self.conn(name, Kind::Pg)?;
-        let in_tx = self.in_tx(c).await;
+        let in_tx = self.in_tx(&c).await;
         match verb {
-            "BEGIN" if c.env() == "prod" && self.locked(c) => return Err(self.lock_refusal(c, true)),
+            "BEGIN" if c.env() == "prod" && self.locked(&c) => return Err(self.lock_refusal(&c, true)),
             "COMMIT" | "ROLLBACK" if !in_tx => return Err(EngineError::usage("열린 트랜잭션 없음")),
             "COMMIT" if c.env() == "prod" && !confirm_prod => {
                 return Err(EngineError::refused(
@@ -438,8 +810,8 @@ impl LocalEngine {
             }
             _ => {}
         }
-        let ran = self.session(c).await?.run(verb, &[], false).await;
-        let res = ran.res.map_err(|e| self.run_err(c, &e))?;
+        let ran = self.session(&c).await?.run(verb, &[], false).await;
+        let res = ran.res.map_err(|e| self.run_err(&c, &e))?;
         if verb == "COMMIT" && res.text == "ROLLBACK" {
             return Err(EngineError::run("COMMIT 이 ROLLBACK 으로 끝남(트랜잭션 오류 상태)"));
         }
@@ -451,16 +823,26 @@ impl LocalEngine {
 
     // ─── Redis ───
 
-    /// 접속의 Redis 연결로 f 를 돌린다. 한 번에 하나다. 실행 중 취소되면 연결을 버리고 다음 요청에서 다시 연다.
+    /// 접속의 Redis 연결로 f 를 돌린다. 칸마다 한 번에 하나다. 실행 중 취소되면 연결을 버리고 다음 요청에서 다시 연다.
+    /// 세션 칸은 연결이 끊기면 SELECT 같은 상태를 잃은 것이라 다음 요청 한 번은 실행하지 않고 알린다(R4.2). 취소는 사용자가 한 일이라 알리지 않는다.
     async fn redis_do<T>(
         &self,
         c: &Conn,
-        f: impl for<'a> FnOnce(&'a mut RedisConn) -> std::pin::Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>,
+        which: RedisUse,
+        f: impl for<'a> FnOnce(&'a mut RedisConn) -> RedisJob<'a, T>,
     ) -> Result<T, EngineError> {
-        let slot = self.redis.lock().unwrap().entry(c.uuid.clone()).or_default().clone();
+        let slots = if which == RedisUse::Session {
+            &self.redis_session
+        } else {
+            &self.redis_pool
+        };
+        let slot = slots.lock().unwrap().entry(c.uuid.clone()).or_default().clone();
         let mut st = slot.lock().await;
         if std::mem::take(&mut st.running) {
             st.conn = None;
+        }
+        if std::mem::take(&mut st.lost) {
+            return Err(EngineError::run(REDIS_SESSION_LOST));
         }
         let mut conn = match st.conn.take() {
             Some(r) => r,
@@ -473,8 +855,22 @@ impl LocalEngine {
         st.running = false;
         if keep {
             st.conn = Some(conn);
+        } else if which == RedisUse::Session {
+            st.lost = true;
         }
         res.map_err(|e| self.run_err(c, &e))
+    }
+
+    /// Redis 쓰기의 문이다. prod 는 잠금·확인(R54·R6), 위험 명령(R25)은 환경과 상관없이 확인이다.
+    fn redis_guard(&self, c: &Conn, cmds: &[Vec<String>], confirm_prod: bool, confirm_danger: bool) -> Result<(), EngineError> {
+        if !cmds.iter().all(|a| is_read_only_redis(a)) {
+            self.write_guard(c, confirm_prod, &format!("prod({})에 쓰기 실행: y/N", c.name), false)?;
+        }
+        let danger: Vec<String> = cmds.iter().map(|a| danger_of_redis(a)).filter(|d| !d.is_empty()).collect();
+        if !danger.is_empty() && !confirm_danger {
+            return Err(EngineError::refused(REASON_CONFIRM_DANGER, format!("위험: {}", danger.join(", "))));
+        }
+        Ok(())
     }
 
     async fn redis_run(&self, name: &str, args: Vec<String>, confirm_prod: bool, confirm_danger: bool) -> Result<ResultSet, EngineError> {
@@ -482,30 +878,71 @@ impl LocalEngine {
         if args.is_empty() {
             return Err(EngineError::usage("실행할 명령이 없음"));
         }
-        if c.env() == "prod" && !is_read_only_redis(&args) {
-            if self.locked(c) {
-                return Err(self.lock_refusal(c, false));
-            }
-            if !confirm_prod {
-                return Err(EngineError::refused(
-                    REASON_CONFIRM_PROD,
-                    format!("prod({})에 쓰기 실행: y/N", c.name),
-                ));
-            }
-        }
-        let danger = danger_of_redis(&args);
-        if !danger.is_empty() && !confirm_danger {
-            return Err(EngineError::refused(REASON_CONFIRM_DANGER, format!("위험: {danger}")));
-        }
-        let r = self.redis_do(c, |r| Box::pin(async move { r.run(&args).await })).await?;
+        self.redis_guard(&c, std::slice::from_ref(&args), confirm_prod, confirm_danger)?;
+        let r = self
+            .redis_do(&c, RedisUse::Session, |r| Box::pin(async move { r.run(&args).await }))
+            .await?;
         Ok(ResultSet::from_query(r))
+    }
+
+    /// 값 편집 하나를 명령으로 만들어 세션에서 첫 오류까지 차례로 실행한다(Go redisEditKey·afterRedisWrite).
+    async fn redis_edit(&self, name: &str, e: RedisEdit, confirm_prod: bool, confirm_danger: bool) -> Result<RedisEditResult, EngineError> {
+        let c = self.conn(name, Kind::Redis)?;
+        let cmds = redis::edit_commands(&e).map_err(EngineError::usage)?;
+        if cmds.is_empty() {
+            return Ok(RedisEditResult {
+                results: Vec::new(),
+                key: e.key,
+                status: "바뀐 것이 없음".into(),
+            });
+        }
+        self.redis_guard(&c, &cmds, confirm_prod, confirm_danger)?;
+        let n = cmds.len();
+        let results = self
+            .redis_do(&c, RedisUse::Session, |r| {
+                Box::pin(async move {
+                    let mut out = Vec::with_capacity(n);
+                    for (i, a) in cmds.iter().enumerate() {
+                        match r.run(a).await {
+                            Ok(res) => out.push(ResultSet::from_query(res)),
+                            Err(e) if n > 1 => return Err(Error::msg(format!("statement {} of {n}: {e}", i + 1))),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Ok(out)
+                })
+            })
+            .await?;
+        let (key, status) = match e.op.as_str() {
+            "delete_key" => (String::new(), "키를 지움"),
+            // RENAMENX 가 0 이면 같은 이름의 키가 있어 바뀌지 않았다
+            "rename" if results.first().is_some_and(|r| r.text.trim() == "0") => (e.key, "같은 이름의 키가 있어 바꾸지 않음"),
+            "rename" => (e.text, "반영함"),
+            _ => (e.key, "반영함"),
+        };
+        Ok(RedisEditResult {
+            results,
+            key,
+            status: status.into(),
+        })
     }
 }
 
-use std::future::Future;
-
 fn json<T: Serialize>(v: T) -> Result<Value, EngineError> {
     serde_json::to_value(v).map_err(|e| EngineError::run(e.to_string()))
+}
+
+/// `:이름` 을 $n 으로 바꾸고 값을 순서대로 모은다(R21). 값이 없는 이름은 사용법 오류다.
+fn bind_params(sql: &str, params: &std::collections::BTreeMap<String, String>) -> Result<(String, Vec<Option<String>>), EngineError> {
+    let (bound, names) = idb_core::params::bind(sql);
+    let mut args = Vec::with_capacity(names.len());
+    for n in &names {
+        match params.get(n) {
+            Some(v) => args.push(Some(v.clone())),
+            None => return Err(EngineError::usage(format!("파라미터 값이 없음: {n}"))),
+        }
+    }
+    Ok((bound, args))
 }
 
 fn table_ref(schema: String, table: String) -> TableRef {
@@ -532,237 +969,76 @@ fn check_single(s: &str) -> Result<(), EngineError> {
     Ok(())
 }
 
-// ─── Redis 읽기 (Go GetKeys·GetValue) ───
-
-fn text(v: &RValue) -> String {
-    match v {
-        RValue::Str(b) => String::from_utf8_lossy(b).into_owned(),
-        RValue::Int(n) => n.to_string(),
-        other => idb_sources::redis::format_cell(other),
-    }
-}
-
-fn cell(v: &RValue) -> String {
-    match v {
-        RValue::Str(b) => cap_cell(b),
-        other => idb_sources::redis::format_cell(other),
-    }
-}
-
-fn int(v: &RValue) -> i64 {
-    match v {
-        RValue::Int(n) => *n,
-        other => text(other).parse().unwrap_or(0),
-    }
-}
-
-/// SCAN 답(커서, 원소들)을 읽는다.
-fn scan_reply(v: RValue) -> Result<(String, Vec<RValue>), Error> {
-    match v {
-        RValue::Array(mut a) if a.len() == 2 => {
-            let items = match a.pop() {
-                Some(RValue::Array(items)) => items,
-                Some(RValue::Map(pairs)) => pairs.into_iter().flat_map(|(k, v)| [k, v]).collect(),
-                _ => Vec::new(),
-            };
-            Ok((text(&a[0]), items))
-        }
-        _ => Err(Error::msg("unexpected SCAN reply")),
-    }
-}
-
-fn args(a: &[&str]) -> Vec<String> {
-    a.iter().map(|s| s.to_string()).collect()
-}
-
-async fn scan_keys(r: &mut RedisConn, pattern: String) -> Result<ScanResult, Error> {
-    let (mut keys, mut more, mut cursor) = (Vec::new(), false, "0".to_string());
-    loop {
-        let (next, batch) = scan_reply(r.value(&args(&["SCAN", &cursor, "MATCH", &pattern, "COUNT", "500"])).await?)?;
-        keys.extend(batch.iter().map(text));
-        cursor = next;
-        if cursor == "0" {
-            break;
-        }
-        if keys.len() >= MAX_ROWS {
-            more = true;
-            break;
-        }
-    }
-    if keys.len() > MAX_ROWS {
-        keys.truncate(MAX_ROWS);
-        more = true;
-    }
-    // SCAN 은 리해시 중 같은 키를 두 번 줄 수 있다
-    keys.sort();
-    keys.dedup();
-    Ok(ScanResult { keys, more })
-}
-
-/// Go HumanBytes.
-fn human_bytes(n: i64) -> String {
-    if n < 1024 {
-        return format!("{n}B");
-    }
-    let mut f = n as f64;
-    for u in ["KB", "MB", "GB", "TB"] {
-        f /= 1024.0;
-        if f < 1024.0 || u == "TB" {
-            return format!("{f:.1}{u}");
-        }
-    }
-    String::new()
-}
-
-async fn get_value(r: &mut RedisConn, key: String) -> Result<ResultSet, Error> {
-    let start = Instant::now();
-    let typ = text(&r.value(&args(&["TYPE", &key])).await?);
-    let ttl = int(&r.value(&args(&["TTL", &key])).await?);
-    let ttl_text = if ttl >= 0 {
-        idb_core::gostrconv::duration_string(ttl.saturating_mul(1_000_000_000))
-    } else {
-        "∞".into()
-    };
-    let mut res = QueryResult {
-        text: format!("{key} · {typ} · TTL {ttl_text}"),
-        ..Default::default()
-    };
-    match r.value(&args(&["MEMORY", "USAGE", &key])).await {
-        Ok(RValue::Nil) => {}
-        Ok(v) => res.text.push_str(&format!(" · 메모리 {}", human_bytes(int(&v)))),
-        // 관리형 서버가 명령을 막았거나 모른다
-        Err(Error::Other(e)) if e.contains("unknown command") || e.contains("unknown subcommand") || e.starts_with("NOPERM") => {}
-        Err(e) => return Err(e),
-    }
-    let max = MAX_ROWS.to_string();
-    match typ.as_str() {
-        "string" => {
-            let size = int(&r.value(&args(&["STRLEN", &key])).await?);
-            let v = text(
-                &r.value(&args(&["GETRANGE", &key, "0", &(MAX_STRING_BYTES - 1).to_string()]))
-                    .await?,
-            );
-            res.text.push_str(&format!("\n\n{}", idb_sources::redis::pretty_json(&v)));
-            if size > MAX_STRING_BYTES {
-                res.truncated = true;
-                res.text
-                    .push_str(&format!("\n\n… {size}바이트 중 앞 {MAX_STRING_BYTES}바이트만 보여 줌"));
-            }
-        }
-        "hash" | "set" => {
-            // HGETALL·SMEMBERS 는 큰 값에서 상한이 없어 HSCAN·SSCAN 으로 MAX_ROWS 근처까지만 읽는다
-            let hash = typ == "hash";
-            res.cols = if hash { args(&["field", "value"]) } else { args(&["member"]) };
-            let mut cursor = "0".to_string();
-            loop {
-                let cmd = if hash { "HSCAN" } else { "SSCAN" };
-                let (next, items) = scan_reply(r.value(&args(&[cmd, &key, &cursor, "MATCH", "*", "COUNT", "500"])).await?)?;
-                if hash {
-                    res.rows
-                        .extend(items.as_chunks::<2>().0.iter().map(|[k, v]| vec![cell(k), cell(v)]));
-                } else {
-                    res.rows.extend(items.iter().map(|v| vec![cell(v)]));
-                }
-                cursor = next;
-                if cursor == "0" || res.rows.len() >= MAX_ROWS {
-                    res.truncated = cursor != "0";
-                    break;
-                }
-            }
-            res.rows.sort_by(|a, b| a[0].cmp(&b[0]));
-        }
-        "list" => {
-            // 하나 더 받아 정확히 1,000개와 잘림을 가른다
-            let RValue::Array(mut vs) = r.value(&args(&["LRANGE", &key, "0", &max])).await? else {
-                return Err(Error::msg("unexpected LRANGE reply"));
-            };
-            if vs.len() > MAX_ROWS {
-                vs.truncate(MAX_ROWS);
-                res.truncated = true;
-            }
-            res.cols = args(&["#", "value"]);
-            res.rows = vs.iter().enumerate().map(|(i, v)| vec![i.to_string(), cell(v)]).collect();
-        }
-        "zset" => {
-            let RValue::Array(vs) = r.value(&args(&["ZRANGE", &key, "0", &max, "WITHSCORES"])).await? else {
-                return Err(Error::msg("unexpected ZRANGE reply"));
-            };
-            // RESP2 는 [멤버, 점수, …], RESP3 는 [[멤버, 점수], …] 다
-            let mut pairs: Vec<(RValue, RValue)> = Vec::new();
-            let mut flat = Vec::new();
-            for v in vs {
-                match v {
-                    RValue::Array(mut p) if p.len() == 2 => {
-                        let s = p.pop().unwrap_or(RValue::Nil);
-                        pairs.push((p.pop().unwrap_or(RValue::Nil), s));
-                    }
-                    v => flat.push(v),
-                }
-            }
-            let mut it = flat.into_iter();
-            while let (Some(m), Some(s)) = (it.next(), it.next()) {
-                pairs.push((m, s));
-            }
-            if pairs.len() > MAX_ROWS {
-                pairs.truncate(MAX_ROWS);
-                res.truncated = true;
-            }
-            res.cols = args(&["member", "score"]);
-            res.rows = pairs
-                .iter()
-                .map(|(m, s)| {
-                    let score = match s {
-                        RValue::Float(f) => *f,
-                        other => text(other).parse().unwrap_or(0.0),
-                    };
-                    // Go strconv.FormatFloat(f, 'f', -1, 64): 지수 없이 가장 짧은 자릿수다
-                    vec![cell(m), format!("{score}")]
-                })
-                .collect();
-        }
-        "stream" => {
-            let RValue::Array(xs) = r.value(&args(&["XRANGE", &key, "-", "+", "COUNT", "200"])).await? else {
-                return Err(Error::msg("unexpected XRANGE reply"));
-            };
-            res.cols = args(&["id", "fields"]);
-            for x in xs {
-                let RValue::Array(parts) = x else { continue };
-                let (Some(id), Some(RValue::Array(fv))) = (parts.first(), parts.get(1)) else {
-                    continue;
-                };
-                // Go json.Marshal(map[string]any): 키 순서로 정렬한다
-                let mut kv: Vec<(String, String)> = fv.as_chunks::<2>().0.iter().map(|[k, v]| (text(k), text(v))).collect();
-                kv.sort();
-                kv.dedup_by(|a, b| a.0 == b.0);
-                let mut obj = String::from("{");
-                for (i, (k, v)) in kv.iter().enumerate() {
-                    if i > 0 {
-                        obj.push(',');
-                    }
-                    idb_core::gojson::write_str(&mut obj, k);
-                    obj.push(':');
-                    idb_core::gojson::write_str(&mut obj, v);
-                }
-                obj.push('}');
-                res.rows.push(vec![text(id), cap_cell(obj.as_bytes())]);
-            }
-        }
-        "none" => res.text.push_str("\n\n(키 없음)"),
-        _ => res.text.push_str("\n\n(보기 미지원 타입)"),
-    }
-    res.elapsed = start.elapsed();
-    Ok(ResultSet::from_query(res))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    #[test]
-    fn 바이트_크기는_Go_HumanBytes_와_같다() {
-        assert_eq!(human_bytes(1023), "1023B");
-        assert_eq!(human_bytes(1536), "1.5KB");
-        assert_eq!(human_bytes(5 << 20), "5.0MB");
+    /// PING·HELLO 에 답하고, 첫 GET 에서는 연결을 끊고 그 뒤 GET 에는 "x" 를 답하는 Redis 흉내다.
+    async fn flaky_redis() -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = l.accept().await.unwrap();
+                let gets = gets.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 {
+                            return;
+                        }
+                        let t = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                        let reply: &[u8] = if t.contains("hello") {
+                            b"-ERR unknown command 'hello'\r\n"
+                        } else if t.contains("ping") {
+                            b"+PONG\r\n"
+                        } else if gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                            return; // 첫 GET: 끊는다
+                        } else {
+                            b"$1\r\nx\r\n"
+                        };
+                        if s.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn Redis_세션이_끊기면_다음_한_번은_알리고_그다음은_새_연결로_돈다() {
+        let port = flaky_redis().await;
+        let proj = Project {
+            dir: Default::default(),
+            conns: vec![Conn {
+                name: "r-local".into(),
+                uuid: "u1".into(),
+                kind: Some(Kind::Redis),
+                host: "127.0.0.1".into(),
+                port,
+                ..Default::default()
+            }],
+            mapping: Default::default(),
+            warnings: vec![],
+            aes_env: Default::default(),
+        };
+        let e = LocalEngine::new(proj, None);
+        let get = || e.redis_run("r-local", vec!["GET".into(), "a".into()], false, false);
+        assert_eq!(get().await.unwrap_err().code, CODE_RUN, "끊긴 명령 자체는 실행 오류");
+        assert_eq!(get().await.unwrap_err().error, REDIS_SESSION_LOST);
+        assert_eq!(get().await.unwrap().text, "x");
+        // 풀 칸(값 보기·트리)은 알리지 않고 다시 붙는다
+        assert!(
+            e.redis_do(&e.conn("r-local", Kind::Redis).unwrap(), RedisUse::Pool, |r| Box::pin(async move {
+                r.run(&["GET".into(), "a".into()]).await
+            }))
+            .await
+            .is_ok()
+        );
     }
 
     #[test]

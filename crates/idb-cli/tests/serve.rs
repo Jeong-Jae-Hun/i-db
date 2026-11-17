@@ -339,3 +339,256 @@ async fn 원격_엔진과_로컬_엔진은_같은_답을_내고_버린_요청은
     assert!(r.error.starts_with("remote loop: "), "{r:?}");
     drop(hang);
 }
+
+#[test]
+fn live_결과_편집_반영과_되돌리기와_운영_조회를_프로토콜로_돈다() {
+    let Some(vars) = common::live_vars() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    common::copy_project(&common::root().join("testdata/golden/live"), tmp.path(), &vars);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let conn = "golden-local";
+    let ok = |r: &Value| -> Value {
+        assert_eq!(r["ok"], true, "{r}");
+        r["result"].clone()
+    };
+    let run = |s: &mut Serve, sql: &str| s.call(json!({"op": "run", "conn": conn, "sql": sql, "confirm_danger": true}));
+    for sql in [
+        "drop schema if exists serve_e cascade",
+        "create schema serve_e",
+        "create type serve_e.mood as enum ('happy', 'sad')",
+        "create table serve_e.p (id int generated always as identity primary key, name text not null, note text, twice int generated always as (length(name) * 2) stored, m serve_e.mood)",
+        "create table serve_e.c (id int primary key, p_id int references serve_e.p(id))",
+        "insert into serve_e.p (name, note) values ('a', null), ('bb', 'x')",
+        "create function serve_e.f() returns int language sql as 'select 1'",
+    ] {
+        ok(&run(&mut s, sql));
+    }
+    // 출처: PK 가 다 있으면 편집할 수 있고, 생성 열·식 열은 이름이 빈다
+    let r = ok(&run(&mut s, "select id, name, note, twice, 1 as k from serve_e.p order by id"));
+    let origin = r["origin"].clone();
+    assert_eq!(origin["table"], json!({"schema": "serve_e", "table": "p"}), "{r}");
+    assert_eq!(origin["pk"], json!(["id"]));
+    assert_eq!(origin["cols"], json!(["id", "name", "note", "", ""]));
+    assert_eq!(origin["always"], json!(["id"]));
+    assert!(
+        ok(&run(&mut s, "select name from serve_e.p")).get("origin").is_none(),
+        "PK 없는 결과는 읽기 전용"
+    );
+    assert!(
+        ok(&run(&mut s, "select a.id, b.name from serve_e.p a, serve_e.p b limit 1"))
+            .get("origin")
+            .is_some()
+    );
+    // 반영: UPDATE·DELETE 는 정확히 한 행, 옛값 확인
+    let cs = json!({"table": {"schema": "serve_e", "table": "p"}, "pk": ["id"], "changes": [
+        {"op": "update", "key": {"id": "1"}, "values": {"name": "q"}, "old": {"name": "a"}},
+        {"op": "delete", "key": {"id": "2"}, "old": {"name": "bb", "note": "x"}},
+        {"op": "insert", "values": {"name": "new"}},
+    ]});
+    let a = ok(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": cs})));
+    assert_eq!(a["result"]["text"], "UPDATE 1 · INSERT 1 · DELETE 1", "{a}");
+    assert_eq!(a["result"]["rows"][0][1], "new");
+    assert_eq!(a["applied"]["generated"], json!(["twice"]));
+    assert_eq!(a["applied"]["rows"][1]["note"], "x");
+    assert!(
+        a["sql"][0]
+            .as_str()
+            .unwrap()
+            .starts_with(r#"UPDATE "serve_e"."p" SET "name" = 'q' WHERE "id" = '1'"#)
+    );
+    let names = |s: &mut Serve| ok(&run(s, "select id, name from serve_e.p order by id"))["rows"].clone();
+    let new_id = a["applied"]["rows"][2]["id"].as_str().unwrap().to_string();
+    assert_eq!(names(&mut s), json!([["1", "q"], [new_id.clone(), "new"]]));
+    // 옛값이 그새 바뀌었으면 묶음째 되돌린다
+    let stale = json!({"table": {"schema": "serve_e", "table": "p"}, "pk": ["id"], "changes": [
+        {"op": "update", "key": {"id": "1"}, "values": {"name": "z"}, "old": {"name": "a"}}]});
+    let r = s.call(json!({"op": "apply_changes", "conn": conn, "changes": stale}));
+    assert!(err(&r).1.starts_with("UPDATE failed: row (id=1) changed since it was read"), "{r}");
+    // PK 가 아닌 열로 행을 찾는 묶음은 거절한다
+    let fake = json!({"table": {"schema": "serve_e", "table": "p"}, "pk": ["name"], "changes": [
+        {"op": "delete", "key": {"name": "q"}}]});
+    assert_eq!(err(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": fake}))).0, 2);
+    // 되돌리기: 미리 보기와 실행, 지운 행은 IDENTITY 키 그대로 되살린다
+    let p = ok(&s.call(json!({"op": "changes_sql", "changes": cs, "applied": a["applied"]})));
+    assert!(p["sql"][1].as_str().unwrap().contains("OVERRIDING SYSTEM VALUE"), "{p}");
+    let u = ok(&s.call(json!({"op": "undo_changes", "conn": conn, "changes": cs, "applied": a["applied"]})));
+    assert_eq!(u["result"]["text"], "UPDATE 1 · INSERT 1 · DELETE 1", "{u}");
+    assert_eq!(names(&mut s), json!([["1", "a"], ["2", "bb"]]));
+    // 열린 트랜잭션 안의 반영은 SAVEPOINT 라 트랜잭션이 이어진다
+    ok(&s.call(json!({"op": "tx_begin", "conn": conn})));
+    let one = json!({"table": {"schema": "serve_e", "table": "p"}, "pk": ["id"], "changes": [
+        {"op": "update", "key": {"id": "1"}, "values": {"note": "t"}, "old": {"note": null}}]});
+    let a = ok(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": one})));
+    assert_eq!(a["result"]["in_tx"], true);
+    ok(&s.call(json!({"op": "tx_rollback", "conn": conn})));
+    assert_eq!(
+        ok(&run(&mut s, "select note from serve_e.p where id = 1"))["rows"],
+        json!([["NULL"]])
+    );
+    // search_path·정의로 이동·FK·목록·enum·추정
+    let st = ok(&s.call(json!({"op": "set_search_path", "conn": conn, "schema": "serve_e"})));
+    assert_eq!(st["search_path"], "serve_e");
+    assert_eq!(ok(&run(&mut s, "select count(*) from p"))["rows"], json!([["2"]]));
+    let o = ok(&s.call(json!({"op": "resolve", "conn": conn, "name": "P"})));
+    assert_eq!(o, json!({"kind": "table", "schema": "serve_e", "name": "p"}));
+    let o = ok(&s.call(json!({"op": "resolve", "conn": conn, "name": "f"})));
+    assert_eq!(o["kind"], "function");
+    assert!(
+        ok(&s.call(json!({"op": "function_def", "conn": conn, "schema": "serve_e", "name": "f"})))
+            .as_str()
+            .unwrap()
+            .contains("select 1")
+    );
+    assert!(
+        err(&s.call(json!({"op": "resolve", "conn": conn, "name": "nope_zz"})))
+            .1
+            .starts_with("definition not found")
+    );
+    let fks = ok(&s.call(json!({"op": "foreign_keys", "conn": conn, "schema": "serve_e", "table": "c"})));
+    assert_eq!(fks[0]["ref"], json!({"schema": "serve_e", "table": "p"}), "{fks}");
+    assert_eq!(
+        (fks[0]["cols"].clone(), fks[0]["ref_cols"].clone()),
+        (json!(["p_id"]), json!(["id"]))
+    );
+    let fks = ok(&s.call(json!({"op": "foreign_keys", "conn": conn, "schema": "serve_e", "table": "p", "incoming": true})));
+    assert_eq!(fks[0]["table"]["table"], "c");
+    let cat = ok(&s.call(json!({"op": "catalog", "conn": conn})));
+    let se = cat["schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "serve_e")
+        .unwrap()
+        .clone();
+    assert!(
+        se["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "p" && t["columns"][0]["name"] == "id"),
+        "{se}"
+    );
+    let en = ok(&s.call(json!({"op": "enum_labels", "conn": conn, "types": ["serve_e.mood", "int4"]})));
+    assert_eq!(en, json!({"serve_e.mood": ["happy", "sad"], "int4": []}));
+    let est =
+        ok(&s.call(json!({"op": "estimate_rows", "conn": conn, "sql": "delete from serve_e.p where id = :id", "params": {"id": "1"}})));
+    assert!(est["rows"].as_i64().unwrap() >= 0, "{est}");
+    assert_eq!(err(&s.call(json!({"op": "estimate_rows", "conn": conn, "sql": "select 1"}))).0, 1);
+    // CSV 가져오기는 COPY 한 번이고 실패하면 한 행도 남지 않는다
+    let imp = ok(&s.call(
+        json!({"op": "import_csv", "conn": conn, "schema": "serve_e", "table": "c", "columns": ["id", "p_id"],
+        "rows": [["1", "1"], ["2", null]]}),
+    ));
+    assert_eq!(imp["rows"], 2);
+    let bad = s.call(
+        json!({"op": "import_csv", "conn": conn, "schema": "serve_e", "table": "c", "columns": ["id", "p_id"],
+        "rows": [["3", "1"], ["4", "999"]]}),
+    );
+    assert_eq!(err(&bad).0, 1);
+    assert_eq!(ok(&run(&mut s, "select count(*) from serve_e.c"))["rows"], json!([["2"]]));
+    // 운영 화면과 백엔드 신호
+    let act = ok(&s.call(json!({"op": "activity", "conn": conn})));
+    assert_eq!(act["cols"][0], "pid");
+    let locks = ok(&s.call(json!({"op": "locks", "conn": conn})));
+    assert!(locks["text"].as_str().unwrap().starts_with("pg_locks: "), "{locks}");
+    let sizes = ok(&s.call(json!({"op": "table_sizes", "conn": conn})));
+    assert!(sizes["rows"].as_array().unwrap().iter().any(|r| r[0] == "serve_e"), "{sizes}");
+    let r = s.call(json!({"op": "signal_backend", "conn": conn, "pid": 1}));
+    assert_eq!(err(&r), (3, "golden-local pid 1 쿼리 취소: y/N", "confirm"));
+    let r = s.call(json!({"op": "signal_backend", "conn": conn, "pid": 2147483000, "confirm": true}));
+    assert!(err(&r).1.contains("was not signaled"), "{r}");
+    // DB 바꾸기: 다른 DB 로 열고 돌아온다
+    let dbs = ok(&s.call(json!({"op": "databases", "conn": conn})));
+    assert!(dbs.as_array().unwrap().contains(&json!("postgres")), "{dbs}");
+    let st = ok(&s.call(json!({"op": "switch_db", "conn": conn, "db": "template1_missing_zz"})));
+    assert_eq!(
+        (st["db"].clone(), st["search_path"].clone()),
+        (json!("template1_missing_zz"), json!(""))
+    );
+    assert_eq!(err(&s.call(json!({"op": "schemas", "conn": conn}))).0, 1);
+    ok(&s.call(json!({"op": "switch_db", "conn": conn, "db": ""})));
+    // 여러 접속 조회도 op 로
+    let l = ok(&s.call(json!({"op": "linked", "conn": conn, "column": "p_id", "value": "1"})));
+    assert!(l["result"]["text"].as_str().unwrap().starts_with("연결된 곳"), "{l}");
+    let d = ok(&s.call(json!({"op": "schema_diff", "conn": conn, "to": conn, "schema": "serve_e"})));
+    assert!(d["rows"].as_array().unwrap().is_empty(), "{d}");
+    ok(&run(&mut s, "drop schema serve_e cascade"));
+    // Redis: 원값·값 편집·모니터·패턴 삭제
+    let rc = "golden-local-redis";
+    ok(&s.call(json!({"op": "redis_run", "conn": rc, "args": ["RPUSH", "serve:e:l", "a", "b", "a"]})));
+    ok(&s.call(json!({"op": "redis_run", "conn": rc, "args": ["SET", "serve:e:s", "v"]})));
+    let raw = ok(&s.call(json!({"op": "redis_raw_value", "conn": rc, "key": "serve:e:l"})));
+    assert_eq!(
+        (raw["type"].clone(), raw["items"].clone(), raw["ttl_secs"].clone()),
+        (json!("list"), json!(["a", "b", "a"]), json!(-1))
+    );
+    let e = ok(&s.call(
+        json!({"op": "redis_edit", "conn": rc, "edit": {"key": "serve:e:l", "type": "list", "op": "delete", "index": 2, "old": "a"}}),
+    ));
+    assert_eq!(e["status"], "반영함", "{e}");
+    let raw = ok(&s.call(json!({"op": "redis_raw_value", "conn": rc, "key": "serve:e:l"})));
+    assert_eq!(raw["items"], json!(["a", "b"]));
+    let e = ok(
+        &s.call(json!({"op": "redis_edit", "conn": rc, "edit": {"key": "serve:e:l", "type": "list", "op": "rename", "text": "serve:e:s"}}))
+    );
+    assert_eq!(
+        (e["key"].clone(), e["status"].clone()),
+        (json!("serve:e:l"), json!("같은 이름의 키가 있어 바꾸지 않음"))
+    );
+    let e = ok(&s.call(json!({"op": "redis_edit", "conn": rc, "edit": {"key": "serve:e:l", "type": "list", "op": "ttl", "text": "100"}})));
+    assert_eq!(e["results"][0]["text"], "1");
+    assert_eq!(
+        err(&s.call(json!({"op": "redis_raw_value", "conn": rc, "key": "serve:e:none"}))).1,
+        "key does not exist"
+    );
+    let info = ok(&s.call(json!({"op": "redis_info", "conn": rc})));
+    assert_eq!(info["rows"][0][0], "버전");
+    let sl = ok(&s.call(json!({"op": "redis_slowlog", "conn": rc})));
+    assert_eq!(sl["cols"], json!(["시각", "걸린 시간", "명령", "클라이언트"]));
+    let big = ok(&s.call(json!({"op": "redis_big_keys", "conn": rc})));
+    assert!(big["text"].as_str().unwrap().starts_with("표본 "), "{big}");
+    let keys = ok(&s.call(json!({"op": "redis_pattern_keys", "conn": rc, "pattern": "serve:e:*"})));
+    let mut got: Vec<String> = serde_json::from_value(keys["keys"].clone()).unwrap();
+    got.sort();
+    assert_eq!(got, ["serve:e:l", "serve:e:s"]);
+    let r = s.call(json!({"op": "redis_unlink", "conn": rc, "keys": got}));
+    assert_eq!(err(&r), (3, "golden-local-redis 키 2개 지움: y/N", "confirm"));
+    let n = ok(&s.call(json!({"op": "redis_unlink", "conn": rc, "keys": got, "confirm": true})));
+    assert_eq!(n["rows"], 2);
+    s.finish(&secrets(tmp.path()));
+}
+
+#[test]
+fn prod_편집_반영_가져오기_신호_일괄_삭제는_잠금과_확인을_거친다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let cs = json!({"table": {"schema": "public", "table": "t"}, "pk": ["id"], "changes": [
+        {"op": "delete", "key": {"id": "1"}}]});
+    for req in [
+        json!({"op": "apply_changes", "conn": "app-prod", "changes": cs, "confirm_prod": true}),
+        json!({"op": "undo_changes", "conn": "app-prod", "changes": cs, "applied": {"rows": [{"id": "1"}]}, "confirm_prod": true}),
+        json!({"op": "import_csv", "conn": "app-prod", "schema": "public", "table": "t", "columns": ["id"], "rows": [["1"]], "confirm_prod": true}),
+        json!({"op": "signal_backend", "conn": "app-prod", "pid": 1, "confirm": true, "confirm_prod": true}),
+        json!({"op": "redis_unlink", "conn": "app-prod-redis", "keys": ["a"], "confirm": true, "confirm_prod": true}),
+        json!({"op": "redis_edit", "conn": "app-prod-redis", "edit": {"key": "a", "type": "string", "op": "delete_key"}, "confirm_prod": true}),
+    ] {
+        let r = s.call(req.clone());
+        assert_eq!(err(&r).2, "prod_locked", "{req} → {r}");
+    }
+    s.call(json!({"op": "prod_lock", "conn": "app-prod", "unlock": true}));
+    let r = s.call(json!({"op": "apply_changes", "conn": "app-prod", "changes": cs}));
+    assert_eq!(err(&r), (3, "prod(app-prod)에 제출 1건: y/N", "confirm_prod"));
+    let r = s.call(json!({"op": "signal_backend", "conn": "app-prod", "pid": 7, "terminate": true}));
+    assert_eq!(err(&r), (3, "prod(app-prod) pid 7 연결 종료: y/N", "confirm_prod"));
+    let r = s.call(json!({"op": "changes_sql", "changes": cs}));
+    assert_eq!(
+        r["result"]["sql"],
+        json!([r#"DELETE FROM "public"."t" WHERE "id" = '1' RETURNING *;"#])
+    );
+    // user360 op: 닿지 않는 접속의 오류도 가린다
+    let r = s.call(json!({"op": "user360", "query": "a@example.com"}));
+    assert!(r["result"].as_array().is_some_and(|a| !a.is_empty()), "{r}");
+    s.finish(&secrets(tmp.path()));
+}

@@ -6,7 +6,7 @@
 
 한 줄에 JSON 하나다. 요청은 `{"id":N,"op":"…",…}`이고 응답은 `{"id":N,"ok":true,"result":…}` 또는 `{"id":N,"ok":false,"code":3,"error":"…","reason":"…"}`이다. id 는 클라이언트가 고르는 양의 정수이고 진행 중인 요청끼리 겹치면 안 된다. 요청은 동시에 돌고 응답은 끝난 순서로 온다. 모르는 필드는 무시한다.
 
-code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`)다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
+code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`), `confirm`(백엔드 신호·패턴 일괄 삭제처럼 환경과 상관없이 늘 묻는 것, `confirm:true`)이다. error 글은 그대로 확인 창에 보일 수 있는 질문(`prod(app-prod)에 제출 2건: y/N`)이다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
 
 어느 메시지에도 비밀번호·AES 키를 싣지 않는다. 오류 글은 serve 가 그 접속의 비밀번호와 모든 AES 키·IV 를 지우고 제어 문자를 바꾼 것이다. 단, staticEncrypt 암호문은 형식상 앞에 IV 를 싣는다(`IV^|^…`).
 
@@ -15,6 +15,8 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 첫 요청은 `{"id":1,"op":"hello","version":1}`이어야 한다. 답은 `{"version":1,"server":"db-rs"}`다. 그 전 요청과 다른 판은 code 2 다.
 
 `{"id":9,"op":"cancel","target":5}`는 진행 중인 5 를 멈춘다. 5 는 code 1 `canceled`로 끝나고 9 의 답은 `{"canceled":true}`다(이미 끝났으면 false). PostgreSQL 실행을 멈추면 세션 연결이 닫히고 다음 실행은 한 번 R3.6 세션 유실 오류를 낸다. 단, `cli`는 serve 안에서 막는 작업이라 응답만 끊기고 명령은 `--timeout`까지 돈다.
+
+판 1 은 op 를 더하기만 한다. 옛 클라이언트는 새 op 를 쓰지 않으면 그대로 돌고, 새 클라이언트가 옛 serve 에 새 op 를 보내면 code 2 `bad request: unknown variant …`다.
 
 입력이 닫히면 serve 는 남은 요청을 60초까지 기다려 답한 뒤 멈추고, 세션을 닫아 열린 트랜잭션을 서버가 되돌리게 한 뒤 끝난다.
 
@@ -37,8 +39,39 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 | `redis_value` | conn, key | ResultSet(머리 글은 text, 컬렉션은 표) |
 | `redis_run` | conn, args, confirm_prod, confirm_danger | ResultSet |
 | `cli` | args, input(`{"text":…}`·`{"error":…}`), tty | `{stdout, stderr, code}` |
+| `databases` | conn | `["postgres",…]`(R27.1) |
+| `switch_db` | conn, db(빈 글이면 프로젝트 DB) | SessionState `{conn, db, search_path, in_tx}`. 열린 트랜잭션이면 code 2 |
+| `set_search_path` | conn, schema | SessionState(R27.2, 세션이 다시 열리거나 트랜잭션이 끝나면 다시 보냄) |
+| `activity`·`locks`·`table_sizes` | conn | ResultSet(R22.1, 쿼리 글 열의 비밀번호 문장은 가림) |
+| `signal_backend` | conn, pid, terminate, confirm, confirm_prod | `{}`(pg_cancel_backend·pg_terminate_backend) |
+| `foreign_keys` | conn, schema, table, incoming | `[{name, table, cols, ref, ref_cols}]`(R36) |
+| `resolve` | conn, name | `{kind, schema, name}`(R26, 못 찾으면 `definition not found: …`) |
+| `function_def` | conn, schema, name | 정의 글 |
+| `catalog` | conn | `{schemas:[{name, tables:[{name, view, columns:[{name,type}]}]}], functions}` |
+| `enum_labels` | conn, types | `{타입: [값…]}`(enum 이 아니면 빈 목록) |
+| `estimate_rows` | conn, sql, params | `{rows}`(R39, UPDATE·DELETE 하나, 실행하지 않음) |
+| `apply_changes` | conn, changes(ChangeSet), confirm_prod | `{result, applied, sql}`(R15.2) |
+| `undo_changes` | conn, changes, applied, confirm_prod | `{result, applied, sql}`(R50) |
+| `changes_sql` | changes, applied? | `{changes, sql}`(미리 보기. applied 가 있으면 되돌리기 묶음) |
+| `import_csv` | conn, schema, table, columns, rows, confirm_prod | `{rows}`(COPY 한 번, 10만 행·50MiB 상한) |
+| `linked` | conn, column, value, table | `{result, failed}`(R73) |
+| `schema_diff` | conn, to, schema, to_schema | ResultSet |
+| `user360` | query | `[{title, conn, result?, error?}]`(R51) |
+| `redis_raw_value` | conn, key | `{key, type, ttl_secs, string, fields, items, members, zmembers, truncated}` |
+| `redis_edit` | conn, edit, confirm_prod, confirm_danger | `{results, key, status}` |
+| `redis_info`·`redis_slowlog`(n=50)·`redis_big_keys`(sample=1000, top=50) | conn | ResultSet(R34.1) |
+| `redis_pattern_keys` | conn, pattern | `{keys, truncated}`(R42, 100,000개까지) |
+| `redis_unlink` | conn, keys, confirm, confirm_prod | `{rows}`(지운 수) |
 
-ResultSet 은 `{cols, types?, rows, text, truncated, elapsed_ms, in_tx?, note?}`다. NULL 칸은 `"NULL"`, 64KiB 넘는 칸은 `…(N바이트)`로 잘린다.
+ResultSet 은 `{cols, types?, rows, text, truncated, elapsed_ms, in_tx?, note?, origin?}`다. NULL 칸은 `"NULL"`, 64KiB 넘는 칸은 `…(N바이트)`로 잘린다. origin 은 편집기 결과가 한 테이블에서 왔고 PK 열이 모두 있을 때만 있다(`{table:{schema,table}, pk, cols, always}`, cols[i] 는 결과 i 열의 테이블 열 이름이고 식·생성 열은 빈 글). 같은 열이 두 번 나오거나 시스템 열이 섞이면 없다.
+
+## 결과 표 편집
+
+ChangeSet 은 `{table:{schema,table}, pk:[…], changes:[{op:"update"|"insert"|"delete", key:{pk열:값}, values:{열:값|null}, old:{열:값|null}}], override?}`다. 화면은 결과의 origin 으로 이것을 만든다. serve 는 pk 가 그 테이블의 진짜 PK 와 같은지 확인하고(아니면 code 2) 편집기 세션에서 한 트랜잭션(열린 트랜잭션이면 SAVEPOINT)으로 바꿈마다 하나씩 보낸다. UPDATE·DELETE 가 정확히 한 행이 아니거나 old 가 지금 값과 다르면 묶음 전체를 되돌린다. 답의 applied(`{rows, generated, no_returning}`)를 그대로 `undo_changes`에 넘기면 되돌린다. RETURNING 권한이 없으면 no_returning 이 켜지고 되돌릴 수 없다.
+
+## Redis 연결
+
+편집기 명령(`redis_run`·`redis_edit`)은 세션 연결이고 값 보기·트리·모니터·일괄 삭제는 따로 연결이다. 세션 연결이 끊기면 그 명령은 실행 오류이고, 다음 세션 요청 한 번은 실행하지 않고 `이전 Redis 세션 연결이 끊겨 SELECT 한 DB 같은 세션 상태가 사라졌다…`를 알린 뒤 그다음부터 새 연결로 돈다. 취소로 끊은 것은 알리지 않는다.
 
 편집기 길(`run`·`explain`·`table_page`·`tx_*`)은 접속마다 연결 하나를 계속 쓰는 세션이라 `BEGIN`·`SET`이 다음 요청까지 이어진다. prod 의 읽기 전용이 아닌 문장은 잠겨 있으면 `prod_locked`, 열려 있어도 `confirm_prod`가 없으면 거절이다. `commit`·`rollback`·`end`·`abort`만의 문장은 잠금에 막히지 않는다(R54.2). 잠긴 prod 의 읽기는 READ ONLY 트랜잭션(열린 트랜잭션이면 SAVEPOINT)으로 감싼다. `prod_lock` 상태는 serve 프로세스 안에만 있고, 열리는 시간은 serve 쪽 `DB_PROD_UNLOCK_MIN`이다.
 
