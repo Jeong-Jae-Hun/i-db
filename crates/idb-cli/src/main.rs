@@ -1,9 +1,13 @@
+#![allow(non_snake_case)]
 //! db-rs: i-db 의 Rust 판. 지금은 화면 없는 하위 명령(R58)만 옮기는 중이다.
 
 mod cli;
 mod command;
+mod conn_cmd;
 mod goflag;
+mod history_cmd;
 mod output;
+mod update_cmd;
 mod usage_text;
 
 use std::io::{IsTerminal, Write};

@@ -26,7 +26,7 @@ const CLI_MAX_ROWS: i64 = 10000;
 const MAX_FLAG_DAYS: i64 = 3650;
 /// 저장소 질의의 기본 한도다(R62.2). --max-rows 를 주면 그 값이다
 const SOURCE_DEFAULT_ROWS: i64 = 1000;
-const PROJECT_USAGE: &str = "DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더";
+pub(crate) const PROJECT_USAGE: &str = "DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더";
 
 const FORMATS: [&str; 4] = ["table", "tsv", "csv", "json"];
 
@@ -165,7 +165,7 @@ pub fn is_cli_command(name: &str) -> bool {
     name == "help" || find_command(name).is_some()
 }
 
-fn default_project_dir() -> String {
+pub(crate) fn default_project_dir() -> String {
     std::env::var("DBTUI_PROJECT")
         .ok()
         .filter(|d| !d.is_empty())
@@ -216,7 +216,7 @@ fn check_value(name: &str, v: &str) -> Result<(), String> {
 }
 
 /// --since·--until 값이다. Go 기간 꼴(1h·15m)에 더해 날짜(7d)를 받는다. 날짜는 10년까지다.
-fn parse_day_duration(s: &str) -> Result<i64, String> {
+pub(crate) fn parse_day_duration(s: &str) -> Result<i64, String> {
     if let Some(n) = s.strip_suffix('d') {
         return match project::go_atoi(n) {
             Some(days) if (0..=MAX_FLAG_DAYS).contains(&days) => Ok(days * 24 * 3600 * 1_000_000_000),
@@ -431,10 +431,13 @@ pub fn run_cli(args: &[String], stdin: Option<Box<dyn Read + Send>>, stdout: &mu
     let cmd = args[0].as_str();
     match cmd {
         "help" => return cli_help(&args[1..], stdout, stderr),
-        "conn" | "update" | "history" => {
-            stderr.push_str(&format!("db {cmd}: not yet ported to db-rs\n"));
-            return EXIT_ERR;
+        "history" => return crate::history_cmd::run_history(&args[1..], stdout, stderr, tty),
+        "conn" => {
+            let tty = stdin.is_none();
+            let stdin = crate::conn_cmd::Stdin { reader: stdin, tty };
+            return crate::conn_cmd::run_conn(&args[1..], stdin, stdout, stderr);
         }
+        "update" => return crate::update_cmd::run_update(&crate::update_cmd::default_updater(), &args[1..], stdout, stderr),
         _ => {}
     }
     let mut o = match parse_cli(cmd, &args[1..], tty, stderr) {
@@ -512,7 +515,7 @@ pub fn run_cli(args: &[String], stdin: Option<Box<dyn Read + Send>>, stdout: &mu
     output::write_results(stdout, stderr, &o, results)
 }
 
-fn load_project(dir: &str) -> Result<Project, String> {
+pub(crate) fn load_project(dir: &str) -> Result<Project, String> {
     let abs = std::path::absolute(Path::new(dir)).map_err(|e| e.to_string())?;
     // Go filepath.Abs 는 결과를 Clean 한다(./a/../b → b)
     project::load_project(&clean_path(&abs)).map_err(|e| e.to_string())
