@@ -795,9 +795,9 @@ impl LocalEngine {
         let c = match fields {
             None => self.conn_any(name)?,
             Some(f) => {
-                if !f.password.is_empty() {
-                    self.local_only()?;
-                }
+                // 창의 값으로 시험하는 것은 이 기계에서만이다. 원격에서 받으면 빈 비밀번호 + 저장된 이름 + 고른 호스트로
+                // 저장된 비밀번호를 남의 호스트에 보낼 수 있다. serve 는 저장된 접속 이름(conn_test{name})만 시험한다
+                self.local_only()?;
                 let stored = if old_name.is_empty() {
                     f.name.clone()
                 } else {
@@ -1936,7 +1936,11 @@ mod tests {
         assert_eq!(refused(e.conn_delete("dg-stg").await.unwrap_err()), want);
         assert_eq!(refused(e.conn_get("dg-stg").unwrap_err()), want);
         assert_eq!(refused(e.conn_test("", Some(fields("x", "pw")), "").await.unwrap_err()), want);
-        // 비밀번호 없는 시험과 폴더 옮기기는 된다
+        // 빈 비밀번호 + 저장된 접속 이름 + 고른 호스트로 저장된 비밀번호를 남의 호스트에 보내지 못한다
+        let mut evil = fields("dg-stg", "");
+        evil.host = "attacker.example".into();
+        assert_eq!(refused(e.conn_test("", Some(evil), "dg-stg").await.unwrap_err()), want);
+        // 저장된 접속 이름으로만 시험하고 폴더 옮기기는 된다
         assert_eq!(e.conn_test("dg-stg", None, "").await.unwrap_err().code, CODE_RUN);
         e.conn_folder(&["dg-stg".into()], "ops").await.unwrap();
         assert!(!dir.path().join(".dbtui/connections.json").exists());
