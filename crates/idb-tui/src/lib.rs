@@ -256,14 +256,62 @@ fn event_loop(app: &mut App, runner: &mut Runner) -> std::io::Result<()> {
     }
 }
 
-/// OSC 52 로 터미널 클립보드에 넣는다(R14.2·R71.4). DB_CLIPBOARD=system 이면 보내지 않는다.
+/// OSC 52 와 시스템 클립보드 명령에 같이 쓴다(R71.4). DB_CLIPBOARD=osc52 면 OSC 52 만, system 이면 명령만이다.
+/// 명령은 2초 제한으로 화면 밖 스레드에서 돈다. OSC 52 를 막은 터미널에서도 복사가 사라지지 않게 하려는 것이다.
 fn copy_osc52(s: &str) {
-    if std::env::var("DB_CLIPBOARD").as_deref() == Ok("system") {
-        return;
+    let mode = std::env::var("DB_CLIPBOARD").unwrap_or_default();
+    if mode != "system" {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b]52;c;{}\x07", base64(s.as_bytes()));
+        let _ = out.flush();
     }
-    let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b]52;c;{}\x07", base64(s.as_bytes()));
-    let _ = out.flush();
+    if mode != "osc52" {
+        let text = s.to_string();
+        std::thread::spawn(move || system_copy(&text));
+    }
+}
+
+/// 맥 pbcopy, WSL·Windows clip(UTF-8), 리눅스 wl-copy·xclip 가운데 PATH 에 있는 것이다.
+fn system_copy(text: &str) {
+    use std::process::{Command, Stdio};
+    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some() || std::path::Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists();
+    let cands: Vec<(String, Vec<&str>)> = if cfg!(target_os = "macos") {
+        vec![("pbcopy".into(), vec![])]
+    } else if wsl {
+        vec![
+            ("cmd.exe".into(), vec!["/c", "chcp 65001 >nul && clip"]),
+            ("/mnt/c/Windows/System32/cmd.exe".into(), vec!["/c", "chcp 65001 >nul && clip"]),
+        ]
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        vec![("wl-copy".into(), vec![]), ("xclip".into(), vec!["-selection", "clipboard"])]
+    } else {
+        vec![("xclip".into(), vec!["-selection", "clipboard"]), ("wl-copy".into(), vec![])]
+    };
+    for (cmd, args) in cands {
+        let Ok(mut child) = Command::new(&cmd)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if start.elapsed() < Duration::from_secs(2) => std::thread::sleep(Duration::from_millis(20)),
+                _ => {
+                    let _ = child.kill();
+                    return;
+                }
+            }
+        }
+    }
 }
 
 fn base64(b: &[u8]) -> String {

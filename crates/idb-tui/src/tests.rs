@@ -579,3 +579,42 @@ fn 패턴_일괄_삭제는_세고_미리_보인_뒤_500개씩_지운다() {
     assert!(a.overlay.is_none());
     assert_eq!(a.status, "키가 100,000개를 넘어 지우지 않음 (패턴을 좁히세요)");
 }
+
+#[test]
+fn 복사_꼴_고르기는_대상과_꼴을_고르고_마지막_꼴을_기억한다() {
+    let mut a = app();
+    a.open_table(
+        0,
+        idb_engine::TableRef {
+            schema: "public".into(),
+            table: "t".into(),
+        },
+        String::new(),
+    );
+    let (pid, _) = jobs(&mut a).into_iter().find(|(_, r)| r["op"] == "table_page").unwrap();
+    let mut page = rs(&["id", "name"], &[&["1", "a|b"], &["2", "c"]]);
+    page["types"] = json!(["int4", "text"]);
+    page["origin"] = json!({"table": {"schema": "public", "table": "t"}, "pk": ["id"], "cols": ["id", "name"]});
+    a.on_done(pid, Ok(json!({"result": page, "sql": ""})));
+    a.on_key("ctrl+k");
+    let s = screen(&mut a);
+    assert!(
+        s.contains("현재 행 · TSV (헤더)") && s.contains("현재 열 · IN 목록") && !s.contains("현재 열 · SQL INSERT"),
+        "{s}"
+    );
+    typed(&mut a, "보이는 markdown");
+    a.on_key("enter");
+    assert_eq!(a.clips.pop().unwrap(), "| id | name |\n| ---: | --- |\n| 1 | a\\|b |\n| 2 | c |");
+    assert_eq!(a.status, "복사함 (4줄) · 보이는 행 전체 · Markdown 표");
+    a.on_key("ctrl+k");
+    let Overlay::Picker { items, sel, .. } = &a.overlay else { panic!() };
+    assert_eq!(items[*sel], "현재 행 · Markdown 표", "기본 대상의 마지막 꼴에 커서");
+    a.on_key("esc");
+    a.on_key("ctrl+k");
+    typed(&mut a, "보이는 insert");
+    a.on_key("enter");
+    assert_eq!(
+        a.clips.pop().unwrap(),
+        "INSERT INTO \"public\".\"t\" (\"id\", \"name\") VALUES ('1', 'a|b'), ('2', 'c');"
+    );
+}

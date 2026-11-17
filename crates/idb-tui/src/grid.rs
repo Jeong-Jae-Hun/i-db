@@ -821,25 +821,135 @@ impl Grid {
     }
 
     pub fn json(&self) -> String {
-        let rows: Vec<serde_json::Value> = self
-            .visible_values()
-            .into_iter()
+        let rows: Vec<Vec<String>> = self.visible_values();
+        self.json_of(&rows, &(0..self.res.cols.len()).collect::<Vec<_>>())
+    }
+
+    /// 숫자·bool·json 타입은 JSON 값, NULL 은 null, 나머지는 문자열이다(R71.1).
+    fn json_value(&self, c: usize, v: &str) -> serde_json::Value {
+        use serde_json::Value as J;
+        if is_null(v) {
+            return J::Null;
+        }
+        match self.kind(c) {
+            Kind::Number => v
+                .parse::<serde_json::Number>()
+                .map(J::Number)
+                .unwrap_or_else(|_| J::String(v.into())),
+            Kind::Bool => match v {
+                "t" | "true" => J::Bool(true),
+                "f" | "false" => J::Bool(false),
+                _ => J::String(v.into()),
+            },
+            Kind::Json => serde_json::from_str(v).unwrap_or_else(|_| J::String(v.into())),
+            _ => J::String(v.into()),
+        }
+    }
+
+    fn json_of(&self, rows: &[Vec<String>], cols: &[usize]) -> String {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
             .map(|row| {
                 let mut m = serde_json::Map::new();
-                for (c, v) in row.into_iter().enumerate() {
-                    m.insert(
-                        self.res.cols[c].clone(),
-                        if is_null(&v) {
-                            serde_json::Value::Null
-                        } else {
-                            serde_json::Value::String(v)
-                        },
-                    );
+                for &c in cols {
+                    m.insert(self.res.cols[c].clone(), self.json_value(c, cell(row, c)));
                 }
                 serde_json::Value::Object(m)
             })
             .collect();
-        serde_json::to_string_pretty(&rows).unwrap_or_default() + "\n"
+        serde_json::to_string_pretty(&out).unwrap_or_default() + "\n"
+    }
+
+    /// 복사 꼴 고르기(R71.1)의 글과 줄 수다. 대상은 row·select·visible·column, 꼴은 tsv·csv·json·md·insert·in 이다.
+    pub fn copy_text(&self, target: &str, fmt: &str) -> Result<(String, usize), String> {
+        let (r0, r1, c0, c1) = match target {
+            "row" => (self.row, self.row, 0, self.res.cols.len().saturating_sub(1)),
+            "select" => self.sel_rect(),
+            _ => (0, self.view.len().saturating_sub(1), 0, self.res.cols.len().saturating_sub(1)),
+        };
+        let cols: Vec<usize> = if target == "column" { vec![self.col] } else { (c0..=c1).collect() };
+        let idx: Vec<usize> = (r0..=r1).filter_map(|r| self.view.get(r).copied()).collect();
+        if idx.is_empty() {
+            return Err("복사할 행 없음".into());
+        }
+        let size: usize = idx
+            .iter()
+            .map(|&i| cols.iter().map(|&c| cell(&self.current(i), c).len()).sum::<usize>())
+            .sum();
+        if size > 10 << 20 {
+            return Err("너무 커서 복사하지 않음".into());
+        }
+        let shown: Vec<Vec<String>> = idx.iter().map(|&i| self.current(i)).collect();
+        let n = idx.len();
+        let head = |f: &dyn Fn(&str) -> String| cols.iter().map(|&c| f(&self.res.cols[c])).collect::<Vec<_>>();
+        let text = match fmt {
+            "tsv" if target == "column" => shown.iter().map(|r| tsv_cell(cell(r, self.col))).collect::<Vec<_>>().join("\n"),
+            "tsv" | "csv" => {
+                let esc: fn(&str) -> String = if fmt == "tsv" { tsv_cell } else { csv_cell };
+                let sep = if fmt == "tsv" { "\t" } else { "," };
+                let mut lines = vec![head(&|c| esc(c)).join(sep)];
+                lines.extend(
+                    shown
+                        .iter()
+                        .map(|r| cols.iter().map(|&c| esc(cell(r, c))).collect::<Vec<_>>().join(sep)),
+                );
+                lines.join("\n")
+            }
+            "json" => self.json_of(&shown, &cols),
+            "md" => {
+                let md = |v: &str| v.replace('|', "\\|").replace('\n', "<br>");
+                let mut lines = vec![format!("| {} |", head(&|c| md(c)).join(" | "))];
+                let align: Vec<&str> = cols
+                    .iter()
+                    .map(|&c| if self.kind(c) == Kind::Number { "---:" } else { "---" })
+                    .collect();
+                lines.push(format!("| {} |", align.join(" | ")));
+                for r in &shown {
+                    lines.push(format!(
+                        "| {} |",
+                        cols.iter().map(|&c| md(cell(r, c))).collect::<Vec<_>>().join(" | ")
+                    ));
+                }
+                lines.join("\n")
+            }
+            "insert" => {
+                let o = self.res.origin.as_ref().ok_or("SQL INSERT: 원본 테이블을 모르는 결과")?;
+                let q = idb_core::sqlsafe::quote_ident;
+                let lit = |v: &str| {
+                    if is_null(v) {
+                        "NULL".to_string()
+                    } else {
+                        idb_core::sqlsafe::quote_literal(v)
+                    }
+                };
+                let all: Vec<usize> = (0..self.res.cols.len()).collect();
+                // DB 값이다. 추가 행은 뺀다
+                let vals: Vec<String> = idx
+                    .iter()
+                    .filter(|&&i| i < self.res.rows.len())
+                    .map(|&i| {
+                        format!(
+                            "({})",
+                            all.iter().map(|&c| lit(cell(&self.res.rows[i], c))).collect::<Vec<_>>().join(", ")
+                        )
+                    })
+                    .collect();
+                if vals.is_empty() {
+                    return Err("복사할 행 없음".into());
+                }
+                format!(
+                    "INSERT INTO {} ({}) VALUES {};",
+                    o.table.quoted(),
+                    self.res.cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", "),
+                    vals.join(", ")
+                )
+            }
+            "in" => self.in_list().0,
+            _ => return Err(format!("모르는 꼴 {fmt}")),
+        };
+        let lines = text.lines().count().max(1);
+        let _ = n;
+        Ok((text, lines))
     }
 
     fn sel_rect(&self) -> (usize, usize, usize, usize) {

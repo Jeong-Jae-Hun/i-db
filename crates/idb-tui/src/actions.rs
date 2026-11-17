@@ -1063,10 +1063,7 @@ impl App {
             "K" | "X" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.signal(k == "X"),
             "+" | "-" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.cell_where(k == "-"),
             "ctrl+b" => return self.find_linked(),
-            "ctrl+k" => {
-                self.status = "복사 꼴 고르기(Ctrl+K)는 Rust 화면에 아직 옮기지 않음 · y Y C i U e E 를 쓰세요".into();
-                return;
-            }
+            "ctrl+k" => return self.copy_menu(),
             "c" | "D" | "t" | "=" | "r" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => {
                 self.status = format!("{k} 는 Rust 화면에 아직 옮기지 않음");
                 return;
@@ -1083,8 +1080,7 @@ impl App {
                 "pgup" => t.text_top = t.text_top.saturating_sub(10),
                 "y" if !t.text.is_empty() => {
                     let s = t.text.clone();
-                    self.clips.push(s);
-                    self.status = "복사함".into();
+                    self.copy(s, "복사함".into());
                 }
                 _ => {}
             }
@@ -1198,13 +1194,74 @@ impl App {
         });
     }
 
+    /// 복사 꼴 고르기 창(R71.1). 항목은 `대상 · 꼴`이고 커서는 기본 대상의 마지막 꼴이다.
+    fn copy_menu(&mut self) {
+        let Some(g) = self.cur().shown() else { return };
+        if g.view_len() == 0 || !matches!(g.screen, Screen::Table | Screen::Select) {
+            return;
+        }
+        let select = g.screen == Screen::Select;
+        let origin = g.res.origin.is_some();
+        let mut targets = Vec::new();
+        if select {
+            targets.push(("select", "선택"));
+        }
+        targets.extend([("row", "현재 행"), ("visible", "보이는 행 전체"), ("column", "현재 열")]);
+        let mut items = Vec::new();
+        let mut keys = Vec::new();
+        for (t, tl) in &targets {
+            for (f, fl) in [
+                ("tsv", "TSV (헤더)"),
+                ("csv", "CSV (헤더)"),
+                ("json", "JSON"),
+                ("md", "Markdown 표"),
+                ("insert", "SQL INSERT"),
+                ("in", "IN 목록"),
+            ] {
+                if (f == "insert" && (!origin || *t == "column")) || (f == "in" && *t != "column") {
+                    continue;
+                }
+                items.push(format!("{tl} · {fl}"));
+                keys.push((*t, f));
+            }
+        }
+        let default_t = if select { "select" } else { "row" };
+        let last = self.last_copy_fmt;
+        let sel = keys
+            .iter()
+            .position(|&(t, f)| t == default_t && f == last)
+            .or_else(|| keys.iter().position(|&(_, f)| f == last))
+            .unwrap_or(0);
+        let pairs = keys.clone();
+        let names = items.clone();
+        self.picker("복사 꼴", items, move |a, label| {
+            let Some(i) = names.iter().position(|n| *n == label) else { return };
+            let (t, f) = pairs[i];
+            a.last_copy_fmt = f;
+            let Some(g) = a.cur_mut().shown_mut() else { return };
+            match g.copy_text(t, f) {
+                Ok((text, n)) => {
+                    let mut st = format!("복사함 ({n}줄) · {label}");
+                    if f == "in" {
+                        st.push_str(&format!(" · IN 목록 {}개", g.in_list().1));
+                    }
+                    if g.screen == Screen::Select {
+                        g.screen = Screen::Table;
+                    }
+                    a.copy(text, st);
+                }
+                Err(e) => a.status = e,
+            }
+        });
+        if let Overlay::Picker { sel: s, .. } = &mut self.overlay {
+            *s = sel;
+        }
+    }
+
     pub(crate) fn grid_act(&mut self, act: Act) {
         match act {
             Act::None | Act::Ignored => {}
-            Act::Copy(s, what) => {
-                self.clips.push(s);
-                self.status = format!("{what} 복사함");
-            }
+            Act::Copy(s, what) => self.copy(s, format!("{what} 복사함")),
             Act::Status(s) => self.status = s,
             Act::Export(kind) => self.export(kind),
             Act::FilterDone(f) => {

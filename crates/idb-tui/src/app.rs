@@ -387,6 +387,8 @@ pub struct App {
     pub history: Option<crate::history::History>,
     pub history_view: Option<crate::history::HistoryView>,
     pub deleting: Option<crate::ops::Deleting>,
+    /// 이 세션에 마지막으로 고른 복사 꼴(R71.1)
+    pub last_copy_fmt: &'static str,
 }
 
 impl App {
@@ -435,6 +437,7 @@ impl App {
             history: None,
             history_view: None,
             deleting: None,
+            last_copy_fmt: "tsv",
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));
@@ -608,6 +611,19 @@ impl App {
             g.screen = crate::grid::Screen::Table;
         }
         self.focus = f;
+    }
+
+    /// 복사한다(R71.4·R71.5). 10MiB 를 넘는 글은 어디에도 쓰지 않는다.
+    pub fn copy(&mut self, s: String, status: String) {
+        if s.len() > 10 << 20 {
+            self.status = format!(
+                "너무 커서 복사하지 않음 ({:.1} MB) — e/E 로 내보내기",
+                s.len() as f64 / (1 << 20) as f64
+            );
+            return;
+        }
+        self.clips.push(s);
+        self.status = status;
     }
 
     pub fn label(&self, s: &str) -> String {
@@ -1126,10 +1142,7 @@ impl App {
         }
         let eff = self.cur_mut().editor.key(k);
         match eff {
-            crate::editor::Effect::Copy(s) => {
-                self.clips.push(s);
-                self.status = "복사함".into();
-            }
+            crate::editor::Effect::Copy(s) => self.copy(s, "복사함".into()),
             crate::editor::Effect::Complete => self.complete(),
             crate::editor::Effect::Changed => self.edited(),
             _ => {}
