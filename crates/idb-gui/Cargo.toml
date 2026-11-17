@@ -26,6 +26,11 @@ gpui-kit-assets = "=0.8.0"
 # 자동 완성 꼴(gpui-component 0.8 이 쓰는 판)
 lsp-types = { version = "0.97", features = ["proposed"] }
 anyhow = "1"
+# AppKit Touch Bar 종료 버그 우회(ui::appkit_guard). GPUI 가 이미 쓰는 판이다
+objc2 = { version = "0.6.5", features = ["exception"] }
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+raw-window-handle = "0.6.2"
 
 [dev-dependencies]
 tempfile.workspace = true
