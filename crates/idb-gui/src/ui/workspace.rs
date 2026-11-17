@@ -33,6 +33,7 @@ use super::{
 };
 use crate::vm::font::FontChoice;
 use crate::vm::picker;
+use crate::vm::queries::{self, QueryFile};
 use crate::vm::runtime::{Canceler, Prefs, Runtime, Target, connect};
 use crate::vm::safety::{Ask, Confirms, Gate, Tone, lock_label, tone};
 use crate::vm::tabs::{Tabs, target_sql};
@@ -100,6 +101,13 @@ pub struct Workspace {
     /// switch_db·set_search_path 뒤의 세션(R27)
     sessions: HashMap<String, SessionState>,
     databases: HashMap<String, Vec<String>>,
+    /// 로컬 프로젝트의 `queries/` 파일(R43). 원격이면 None
+    queries: Option<Vec<QueryFile>>,
+    /// 파일 탭마다 마지막으로 읽거나 쓴 내용(R45.2 자동 저장이 밖의 바뀜을 가른다)
+    file_text: HashMap<u64, String>,
+    /// 자동 저장을 멈춘 탭과 까닭
+    autosave_stopped: HashMap<u64, String>,
+    autosave_tasks: HashMap<u64, gpui::Task<()>>,
     /// 데이터베이스 바꾸기 요청이 도는 접속. 원격이면 엔진은 이미 바꿨는데 답이 안 왔을 수 있어
     /// 그동안 그 접속 결과의 고치기·반영·되돌리기·다음 쪽을 막는다
     switching: std::collections::HashSet<String>,
@@ -211,6 +219,10 @@ impl Workspace {
             databases: HashMap::new(),
             db_gen: HashMap::new(),
             switching: Default::default(),
+            queries: None,
+            file_text: HashMap::new(),
+            autosave_stopped: HashMap::new(),
+            autosave_tasks: HashMap::new(),
             selected_table: None,
             dir_input,
             remotes: crate::vm::runtime::remote_names(),
@@ -431,6 +443,8 @@ impl Workspace {
         }
         let warn = info.warnings.join("; ");
         self.tree = ConnTree::new(info.conns);
+        self.target = Some(target.clone());
+        self.refresh_queries();
         self.engine = Some(engine);
         self.target = Some(target);
         self.new_tab(None, window, cx);
@@ -459,6 +473,10 @@ impl Workspace {
         self.databases.clear();
         self.db_gen.clear();
         self.switching.clear();
+        self.queries = None;
+        self.file_text.clear();
+        self.autosave_stopped.clear();
+        self.autosave_tasks.clear();
         self.selected_table = None;
         cx.notify();
     }
@@ -942,10 +960,12 @@ impl Workspace {
         let sub = cx.subscribe_in(&editor, window, move |this, _, ev: &InputEvent, _, cx| {
             if let InputEvent::Change = ev
                 && let Some(i) = this.tabs.index_of(id)
-                && !this.tabs.tabs[i].dirty
             {
-                this.tabs.tabs[i].dirty = true;
-                cx.notify();
+                if !this.tabs.tabs[i].dirty {
+                    this.tabs.tabs[i].dirty = true;
+                    cx.notify();
+                }
+                this.schedule_autosave(id, cx);
             }
         });
         self._subs.push(sub);
@@ -961,10 +981,144 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        // 닫기 전에 자동 저장한다(R45.2)
+        if let Some(id) = self.tabs.tabs.get(i).map(|t| t.id) {
+            self.autosave(id, cx);
+        }
         if let Some(t) = self.tabs.close(i) {
             self.bodies.remove(&t.id);
+            self.file_text.remove(&t.id);
+            self.autosave_stopped.remove(&t.id);
+            self.autosave_tasks.remove(&t.id);
         }
         cx.notify();
+    }
+
+    // ─── 쿼리 파일(R43·R45) ───
+
+    fn project_dir(&self) -> Option<PathBuf> {
+        match &self.target {
+            Some(Target::Local(d)) => Some(std::path::absolute(d).unwrap_or_else(|_| d.clone())),
+            _ => None,
+        }
+    }
+
+    /// 로컬 프로젝트의 queries/ 를 다시 훑는다. 매핑은 프로젝트를 다시 읽어 얻는다.
+    pub(super) fn refresh_queries(&mut self) {
+        self.queries = self.project_dir().map(|dir| {
+            let mapping = idb_core::project::load_project(&dir).map(|p| p.mapping).unwrap_or_default();
+            queries::scan(&dir, &mapping, &self.tree.conns)
+        });
+    }
+
+    /// 쿼리 파일을 연다. 이미 열린 탭이면 그 탭으로 간다. 붙은 접속이 있으면 그 접속으로 연다.
+    pub(super) fn open_query(&mut self, rel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.project_dir() else { return };
+        let path = dir.join(&rel);
+        if let Some(i) = self.tabs.tabs.iter().position(|t| t.path.as_deref() == Some(path.as_path())) {
+            self.tabs.activate(i);
+            cx.notify();
+            return;
+        }
+        let conn = self
+            .queries
+            .as_ref()
+            .and_then(|q| q.iter().find(|f| f.rel == rel))
+            .and_then(|f| f.conn.clone());
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let id = self.tabs.open(conn.clone(), Some(path));
+                self.file_text.insert(id, text.clone());
+                self.insert_sql_body(id, text, window, cx);
+                if let Some(c) = conn {
+                    self.ensure_catalog(&c, window, cx);
+                }
+                self.sync_catalog_cells();
+                cx.notify();
+            }
+            Err(e) => self.set_status(format!("열기 실패: {e}"), true, cx),
+        }
+    }
+
+    fn schedule_autosave(&mut self, id: u64, cx: &mut Context<Self>) {
+        let has_file = self.tabs.index_of(id).is_some_and(|i| self.tabs.tabs[i].path.is_some());
+        if !has_file || self.autosave_stopped.contains_key(&id) || !self.file_text.contains_key(&id) {
+            return;
+        }
+        // 마지막 고침 1초 뒤(R45.2). 새 고침이 오면 앞 작업을 버린다
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |ws, cx| ws.autosave(id, cx));
+        });
+        self.autosave_tasks.insert(id, task);
+    }
+
+    /// 파일 탭을 저장한다. 밖에서 바뀌었으면 멈추고 알린다(내용으로 가른다).
+    pub(super) fn autosave(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.autosave_tasks.remove(&id);
+        if self.autosave_stopped.contains_key(&id) {
+            return;
+        }
+        let Some(i) = self.tabs.index_of(id) else { return };
+        let Some(path) = self.tabs.tabs[i].path.clone() else { return };
+        let Some(last) = self.file_text.get(&id).cloned() else { return };
+        let Some(Body::Sql { editor, .. }) = self.bodies.get(&id) else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        let disk = std::fs::read_to_string(&path).ok();
+        match queries::before_autosave(disk.as_deref(), &last, &text) {
+            queries::SaveDecision::Skip => {
+                self.file_text.insert(id, text);
+                self.tabs.tabs[i].dirty = false;
+            }
+            queries::SaveDecision::Write => match queries::write_query(&path, &text) {
+                Ok(()) => {
+                    self.file_text.insert(id, text);
+                    self.tabs.tabs[i].dirty = false;
+                }
+                Err(e) => self.set_status(format!("자동 저장 실패: {e}"), true, cx),
+            },
+            queries::SaveDecision::Stop(why) => {
+                self.autosave_stopped.insert(id, why.clone());
+                self.set_status(why, true, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 파일 없는 탭의 첫 실행이면 queries/<그룹>/<접속>-<시각>.sql 로 저장하고 매핑에 붙인다(R45.1).
+    fn save_new_query_on_run(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.project_dir() else { return };
+        let Some(t) = self.tabs.active().cloned() else { return };
+        if t.path.is_some() || t.name.is_some() {
+            return;
+        }
+        let Some(c) = t.conn.as_ref().and_then(|c| self.conn(c)).cloned() else {
+            return;
+        };
+        if c.kind != "postgresql" {
+            return;
+        }
+        let Some(Body::Sql { editor, .. }) = self.bodies.get(&t.id) else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        match queries::save_new_query(&dir, &c.group, &c.name, &c.uuid, &text) {
+            Ok(rel) => {
+                if let Some(i) = self.tabs.index_of(t.id) {
+                    self.tabs.tabs[i].path = Some(dir.join(&rel));
+                    self.tabs.tabs[i].dirty = false;
+                }
+                self.file_text.insert(t.id, text);
+                self.refresh_queries();
+                self.set_status(format!("새 쿼리를 저장함: {rel}"), false, cx);
+            }
+            Err(e) => self.set_status(format!("새 쿼리 저장 실패: {e}"), true, cx),
+        }
     }
 
     fn open_table(&mut self, conn: String, schema: String, table: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1012,6 +1166,7 @@ impl Workspace {
             self.set_status("실행할 문장이 없다", true, cx);
             return;
         };
+        self.save_new_query_on_run(cx);
         let (_, names) = idb_core::params::bind(&sql);
         if names.is_empty() {
             self.run_sql(conn, sql, BTreeMap::new(), explain, window, cx);
@@ -1309,6 +1464,7 @@ impl Workspace {
                 Ok(text) => {
                     let conn = ws.active_conn();
                     let id = ws.tabs.open(conn, Some(path));
+                    ws.file_text.insert(id, text.clone());
                     ws.insert_sql_body(id, text, window, cx);
                     ws.sync_catalog_cells();
                     cx.notify();
@@ -1340,12 +1496,16 @@ impl Workspace {
     }
 
     fn write_file(&mut self, id: u64, path: PathBuf, text: String, cx: &mut Context<Self>) {
-        match std::fs::write(&path, text) {
+        // ⌘S 는 밖에서 바뀌었어도 덮어쓰고 자동 저장을 다시 켠다(R45.2)
+        match queries::write_query(&path, &text) {
             Ok(()) => {
                 if let Some(i) = self.tabs.index_of(id) {
                     self.tabs.tabs[i].dirty = false;
                     self.tabs.tabs[i].path = Some(path.clone());
                 }
+                self.file_text.insert(id, text);
+                self.autosave_stopped.remove(&id);
+                self.refresh_queries();
                 self.set_status(format!("저장함: {}", path.display()), false, cx);
             }
             Err(e) => self.set_status(format!("저장 실패: {e}"), true, cx),
@@ -1640,6 +1800,7 @@ impl Workspace {
             }
         }
 
+        let queries_el = self.render_queries(&filter, cx);
         let section = |title: &'static str| div().px_3().pt_3().pb_1().text_xs().text_color(theme.muted_foreground).child(title);
         v_flex()
             .size_full()
@@ -1667,6 +1828,8 @@ impl Workspace {
                     .child(section("접속"))
                     .child(list)
                     .when(has_catalog, |d| d.child(section("테이블")).child(objects))
+                    .child(section("쿼리"))
+                    .child(queries_el)
                     .when(active.is_some() && !has_catalog, |d| {
                         d.child(
                             div()
@@ -1678,6 +1841,68 @@ impl Workspace {
                         )
                     }),
             )
+    }
+
+    fn render_queries(&self, filter: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme().clone();
+        let Some(files) = &self.queries else {
+            return div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("원격 접속에서는 serve 쪽 queries/ 를 열지 않는다 (⌘O 로 이 Mac 의 파일을 연다)")
+                .into_any_element();
+        };
+        let shown: Vec<QueryFile> = files
+            .iter()
+            .filter(|f| filter.is_empty() || f.name.to_lowercase().contains(filter))
+            .cloned()
+            .collect();
+        if shown.is_empty() {
+            return div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(if files.is_empty() {
+                    "queries/ 에 파일이 없다 — 새 탭에서 처음 실행하면 저장된다"
+                } else {
+                    "맞는 파일이 없다"
+                })
+                .into_any_element();
+        }
+        let mut list = v_flex().py_1().gap_px();
+        let mut i = 0usize;
+        for (conn, group) in queries::group(&shown, &self.tree.conns) {
+            list = list.child(
+                div()
+                    .px_3()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(conn.clone().unwrap_or_else(|| "접속 없음".into())),
+            );
+            for f in group {
+                i += 1;
+                let rel = f.rel.clone();
+                let open = self.tabs.tabs.iter().any(|t| t.path.as_ref().is_some_and(|p| p.ends_with(&f.rel)));
+                list = list.child(
+                    h_flex()
+                        .id(("query", i))
+                        .mx_1()
+                        .px_3()
+                        .h(rems(1.75))
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .when(open, |d| d.bg(theme.sidebar_accent))
+                        .hover(|st| st.bg(theme.sidebar_accent))
+                        .child(div().flex_1().truncate().child(f.name.clone()))
+                        .on_click(cx.listener(move |ws, _, window, cx| ws.open_query(rel.clone(), window, cx))),
+                );
+            }
+        }
+        list.into_any_element()
     }
 
     fn conn_label(&self) -> String {
@@ -1917,6 +2142,10 @@ impl Workspace {
                     )
                     .on_mouse_down(MouseButton::Middle, cx.listener(move |ws, _, _, cx| ws.close_tab(i, cx)))
                     .on_click(cx.listener(move |ws, _, _, cx| {
+                        // 탭을 옮길 때 자동 저장한다(R45.2)
+                        if let Some(id) = ws.tabs.active().map(|t| t.id) {
+                            ws.autosave(id, cx);
+                        }
                         ws.tabs.activate(i);
                         cx.notify();
                     })),
@@ -2471,6 +2700,84 @@ mod tests {
             })
         });
         assert_eq!(*log.borrow(), vec!["cancel", "fail", "fail-only"]);
+    }
+
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let (src, dst) = (e.path(), to.join(e.file_name()));
+            if e.file_type().unwrap().is_dir() {
+                copy_dir(&src, &dst);
+            } else {
+                std::fs::copy(&src, &dst).unwrap();
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn 쿼리_파일을_매핑된_접속으로_열고_자동_저장은_밖의_바뀜에서_멈춘다(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&offline_project(), dir.path());
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let (rel, conn) = cx.update(|_, cx| {
+            let q = ws.read(cx).queries.clone().expect("로컬이면 쿼리 목록이 있다");
+            let f = q.iter().find(|f| f.rel == "queries/app/a.sql").expect("a.sql").clone();
+            (f.rel, f.conn)
+        });
+        assert!(conn.is_some(), "매핑으로 접속을 잇는다");
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_query(rel.clone(), window, cx)));
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_query(rel.clone(), window, cx)));
+        draw(cx);
+        let id = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            let opened: Vec<_> = w
+                .tabs
+                .tabs
+                .iter()
+                .filter(|t| t.path.as_ref().is_some_and(|p| p.ends_with(&rel)))
+                .collect();
+            assert_eq!(opened.len(), 1, "이미 열린 파일은 그 탭으로 간다");
+            assert_eq!(opened[0].conn, conn);
+            opened[0].id
+        });
+        let file = dir.path().join(&rel);
+        // 편집기 글을 바꾸고 자동 저장
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id) {
+                    editor.update(cx, |e, cx| e.set_value("select 42", window, cx));
+                }
+                w.autosave(id, cx);
+            })
+        });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "select 42");
+        // 밖에서 바꾸면 멈춘다
+        std::fs::write(&file, "-- 다른 편집기").unwrap();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id) {
+                    editor.update(cx, |e, cx| e.set_value("select 43", window, cx));
+                }
+                w.autosave(id, cx);
+            })
+        });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- 다른 편집기", "밖의 바뀜을 덮지 않는다");
+        cx.update(|_, cx| assert!(ws.read(cx).autosave_stopped.contains_key(&id)));
+    }
+
+    #[gpui::test]
+    fn 원격이면_쿼리_목록이_없다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|_, cx| {
+            ws.update(cx, |w, _| {
+                w.target = Some(Target::Remote("devbox".into()));
+                w.refresh_queries();
+                assert!(w.queries.is_none());
+            })
+        });
     }
 
     /// 리뷰 3: 모두 실행 중 탭을 바꾸면 남은 결과가 새 탭에 붙었다.
