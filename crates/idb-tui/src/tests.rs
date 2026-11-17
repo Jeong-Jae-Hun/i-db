@@ -1737,3 +1737,65 @@ fn 원격에서는_접속_창을_열지_않고_까닭을_알린다() {
     assert!(jobs(&mut a).is_empty());
     assert!(!screen(&mut a).contains("N 새 접속"));
 }
+
+/// CSV 가져오기 준비 일감을 손으로 걸어 둔다(파일·스레드 없이).
+fn fake_csv_job(a: &mut App, conn: usize) -> std::sync::mpsc::Sender<Result<crate::export::CsvPrep, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let c = &a.conns[conn];
+    a.csv_job = Some(crate::export::CsvJob {
+        rx,
+        conn_uuid: c.uuid.clone(),
+        conn_name: c.name.clone(),
+        table: idb_engine::TableRef {
+            schema: "public".into(),
+            table: "t".into(),
+        },
+        path: "/x.csv".into(),
+    });
+    tx
+}
+
+#[test]
+fn CSV_를_읽는_사이_접속이_바뀌면_다른_접속에_가져오지_않는다() {
+    let mut a = app();
+    let tx = fake_csv_job(&mut a, 1);
+    // 읽는 사이 접속 목록이 바뀌어 shop-prod 가 지워졌다
+    a.conns.remove(1);
+    tx.send(Ok(crate::export::CsvPrep {
+        columns: vec!["id".into()],
+        data: vec![vec![Some("1".into())]],
+        preview: vec![],
+    }))
+    .unwrap();
+    a.poll_bg();
+    assert!(a.overlay.is_none());
+    assert_eq!(a.status, "가져오기를 멈춤: 읽는 사이 접속이 바뀌거나 지워짐 (shop-prod)");
+    // 자리만 옮겼으면 uuid 로 다시 찾아 그 접속에 묻는다
+    let tx = fake_csv_job(&mut a, 1);
+    a.conns.swap(0, 1);
+    tx.send(Ok(crate::export::CsvPrep {
+        columns: vec!["id".into()],
+        data: vec![vec![Some("1".into())]],
+        preview: vec![],
+    }))
+    .unwrap();
+    a.poll_bg();
+    assert!(matches!(&a.overlay, Overlay::Confirm { q, .. } if q.contains("에 1행 가져오기")));
+}
+
+#[test]
+fn CSV_를_읽는_중에는_새_가져오기를_받지_않는다() {
+    let mut a = app();
+    let _tx = fake_csv_job(&mut a, 0);
+    a.csv_preview(
+        0,
+        idb_engine::TableRef {
+            schema: "public".into(),
+            table: "t".into(),
+        },
+        vec!["id".into()],
+        "/other.csv".into(),
+    );
+    assert_eq!(a.status, "CSV 를 읽는 중 — 끝난 뒤 다시 I");
+    assert_eq!(a.csv_job.as_ref().unwrap().path, "/x.csv");
+}

@@ -296,7 +296,12 @@ impl App {
     }
 
     /// 파일 읽기·풀기는 화면 밖 스레드에서 한다. 큰 파일이 화면을 멈추지 않게 하려는 것이다.
-    fn csv_preview(&mut self, conn: usize, table: TableRef, cols: Vec<String>, path: String) {
+    pub(crate) fn csv_preview(&mut self, conn: usize, table: TableRef, cols: Vec<String>, path: String) {
+        // 앞 일감이 남아 있으면 받지 않는다. 받으면 앞 스레드가 버려진 채 돌아 입력할수록 일이 쌓인다
+        if self.csv_job.is_some() {
+            self.status = "CSV 를 읽는 중 — 끝난 뒤 다시 I".into();
+            return;
+        }
         let path = match path.strip_prefix("~/") {
             Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
             None => path,
@@ -306,7 +311,14 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send(prepare_csv(&p, &cols));
         });
-        self.csv_job = Some(CsvJob { rx, conn, table, path });
+        let c = &self.conns[conn];
+        self.csv_job = Some(CsvJob {
+            rx,
+            conn_uuid: c.uuid.clone(),
+            conn_name: c.name.clone(),
+            table,
+            path,
+        });
         self.status = "CSV 를 읽는 중…".into();
     }
 
@@ -318,7 +330,22 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("CSV 를 읽지 못함".into()),
         };
-        let CsvJob { conn, table, path, .. } = self.csv_job.take().unwrap();
+        let CsvJob {
+            conn_uuid,
+            conn_name,
+            table,
+            path,
+            ..
+        } = self.csv_job.take().unwrap();
+        // 읽는 사이 접속 목록이 바뀌었을 수 있다(접속 고치기·지우기). 자리 번호가 아니라 uuid·이름으로 다시 찾는다
+        let Some(conn) = self
+            .conns
+            .iter()
+            .position(|c| c.name == conn_name && (conn_uuid.is_empty() || c.uuid == conn_uuid))
+        else {
+            self.status = format!("가져오기를 멈춤: 읽는 사이 접속이 바뀌거나 지워짐 ({conn_name})");
+            return;
+        };
         let prep = match prep {
             Ok(p) => p,
             Err(e) => {
@@ -378,7 +405,9 @@ pub const MAX_CSV_CELLS: usize = 5_000_000;
 /// 화면 밖 스레드의 CSV 준비 일감이다.
 pub struct CsvJob {
     pub rx: std::sync::mpsc::Receiver<Result<CsvPrep, String>>,
-    pub conn: usize,
+    /// 접속은 자리 번호가 아니라 uuid·이름으로 든다. 읽는 사이 접속 목록이 바뀌면 끝날 때 다시 찾는다
+    pub conn_uuid: String,
+    pub conn_name: String,
     pub table: TableRef,
     pub path: String,
 }
