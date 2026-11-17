@@ -64,9 +64,21 @@ fn lead_flags_after_command(args: Vec<String>) -> Vec<String> {
             // 끝(`--` 가 있으면 그 앞)에 붙인다. 바로 뒤에 넣으면 `conn test` 같은 하위 명령 자리를 밀어낸다
             let rest = &args[i + 1..];
             let at = rest.iter().position(|a| a == "--").unwrap_or(rest.len());
+            // 뒤에서 같은 플래그를 다시 주면(`dbw conns --remote other`) 그 값이 이기게 앞 것은 버린다
+            let flag_name = |a: &str| a.trim_start_matches('-').split('=').next().unwrap_or("").to_string();
+            let later: Vec<String> = rest[..at].iter().filter(|a| a.starts_with('-')).map(|a| flag_name(a)).collect();
+            let mut lead = Vec::new();
+            let mut j = 0;
+            while j < i {
+                let step = if args[j].contains('=') { 1 } else { 2 };
+                if !later.contains(&flag_name(&args[j])) {
+                    lead.extend_from_slice(&args[j..(j + step).min(i)]);
+                }
+                j += step;
+            }
             let mut out = vec![cmd.clone()];
             out.extend_from_slice(&rest[..at]);
-            out.extend_from_slice(&args[..i]);
+            out.extend(lead);
             out.extend_from_slice(&rest[at..]);
             out
         }
@@ -151,6 +163,18 @@ mod lead_flag_tests {
         assert_eq!(
             lead_flags_after_command(v(&["--remote", "devbox", "mcp"])),
             v(&["mcp", "--remote", "devbox"])
+        );
+    }
+
+    #[test]
+    fn 뒤에서_다시_준_플래그가_앞_것을_이긴다() {
+        assert_eq!(
+            lead_flags_after_command(v(&["-p", "/A", "conns", "-p", "/B"])),
+            v(&["conns", "-p", "/B"])
+        );
+        assert_eq!(
+            lead_flags_after_command(v(&["--remote", "devbox", "conns", "--remote=other", "-p", "x"])),
+            v(&["conns", "--remote=other", "-p", "x"])
         );
     }
 
