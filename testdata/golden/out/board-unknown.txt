@@ -1,0 +1,5 @@
+args: ["board","-p","{P}","nope"]
+exit: 2
+--- stdout
+--- stderr
+db board: 보드 없음: nope (.dbtui/boards)

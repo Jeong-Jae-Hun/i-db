@@ -1,0 +1,5 @@
+args: ["tables","-p","{P}","-c","metrics-prod","--prod"]
+exit: 1
+--- stdout
+--- stderr
+Get "http://127.0.0.1:1/api/v1/label/__name__/values?limit=1000": dial tcp 127.0.0.1:1: connect: connection refused

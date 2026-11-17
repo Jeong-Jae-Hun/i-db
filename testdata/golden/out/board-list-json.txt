@@ -1,0 +1,5 @@
+args: ["board","-p","{P}","--format","json"]
+exit: 0
+--- stdout
+[{"name":"app-stg","title":"app stg","panels":1}]
+--- stderr

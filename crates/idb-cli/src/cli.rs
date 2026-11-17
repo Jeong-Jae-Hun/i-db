@@ -2,25 +2,32 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use idb_core::project::{self, Conn, Project, SOURCE_DB, folder_of, go_quote};
+use idb_core::project::{self, Conn, Kind, Project, SOURCE_DB, folder_of, go_quote};
 use idb_core::result::QueryResult;
 
+use crate::command::{self, Env};
 use crate::goflag::{FlagDef, FlagSet, FlagType, ParseError, Parsed};
 use crate::output::{self, CliResult};
 use crate::usage_text::{CONN_USAGE, HISTORY_USAGE, UPDATE_USAGE};
-use idb_core::gostrconv::{duration_string, parse_duration};
+use idb_core::gostrconv::{duration_string, parse_day_duration};
+use idb_core::textutil::printable;
+use idb_engine::{CliInput, CliRequest, CliResponse, Engine, EngineError, RemoteEngine, RemoteSpec};
+use idb_sources::Clients;
+use tokio::time::Instant;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERR: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
-#[allow(dead_code)] // 안전장치 거절은 query·redis 를 옮기는 다음 PR 에서 쓴다
 pub const EXIT_REFUSED: i32 = 3;
 
 const CLI_DEFAULT_ROWS: i64 = 200;
 const CLI_MAX_ROWS: i64 = 10000;
-const MAX_FLAG_DAYS: i64 = 3650;
-const PROJECT_USAGE: &str = "DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더";
+/// 저장소 질의의 기본 한도다(R62.2). --max-rows 를 주면 그 값이다
+const SOURCE_DEFAULT_ROWS: i64 = 1000;
+pub(crate) const PROJECT_USAGE: &str = "DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더";
 
 const FORMATS: [&str; 4] = ["table", "tsv", "csv", "json"];
 
@@ -159,15 +166,14 @@ pub fn is_cli_command(name: &str) -> bool {
     name == "help" || find_command(name).is_some()
 }
 
-fn default_project_dir() -> String {
+pub(crate) fn default_project_dir() -> String {
     std::env::var("DBTUI_PROJECT")
         .ok()
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| ".".into())
 }
 
-// 칸 대부분은 query·redis·저장소 명령을 옮기는 다음 PR 에서 읽는다
-#[allow(dead_code)]
+#[derive(Default)]
 pub struct Opts {
     pub cmd: String,
     pub dir: String,
@@ -194,6 +200,8 @@ pub struct Opts {
     pub since_ns: Option<i64>,
     pub until_ns: Option<i64>,
     pub args: Vec<String>,
+    /// serve 가 받은 클라이언트 입력(-f 파일·표준 입력을 클라이언트가 읽은 글, 또는 읽다 난 오류)
+    pub input: Option<Result<String, String>>,
 }
 
 /// Value 형 플래그의 값 검사(Go paramFlag·durFlag·namesFlag 의 Set).
@@ -205,20 +213,6 @@ fn check_value(name: &str, v: &str) -> Result<(), String> {
         },
         "since" | "until" => parse_day_duration(v).map(|_| ()),
         _ => Ok(()),
-    }
-}
-
-/// --since·--until 값이다. Go 기간 꼴(1h·15m)에 더해 날짜(7d)를 받는다. 날짜는 10년까지다.
-fn parse_day_duration(s: &str) -> Result<i64, String> {
-    if let Some(n) = s.strip_suffix('d') {
-        return match project::go_atoi(n) {
-            Some(days) if (0..=MAX_FLAG_DAYS).contains(&days) => Ok(days * 24 * 3600 * 1_000_000_000),
-            _ => Err(format!("invalid duration {} (days 0..{MAX_FLAG_DAYS})", go_quote(s))),
-        };
-    }
-    match parse_duration(s) {
-        Some(ns) if ns >= 0 => Ok(ns),
-        _ => Err(format!("invalid duration {}", go_quote(s))),
     }
 }
 
@@ -360,6 +354,7 @@ fn parse_cli(cmd: &str, args: &[String], tty: bool, stderr: &mut String) -> Resu
         since_ns: vals("since").last().and_then(|v| parse_day_duration(v).ok()),
         until_ns: vals("until").last().and_then(|v| parse_day_duration(v).ok()),
         args: pos,
+        input: None,
     };
     let fail = |stderr: &mut String, msg: String| {
         stderr.push_str(&format!("db {cmd}: {msg}\n"));
@@ -419,21 +414,256 @@ fn cli_help(args: &[String], stdout: &mut String, stderr: &mut String) -> i32 {
 }
 
 /// `db <명령> …` 을 실행하고 종료 코드를 돌려준다. stdin 이 None 이면(터미널) 표준 입력에서 SQL 을 읽지 않는다.
-/// tty 는 표준 출력이 터미널인지다(기본 출력 형식).
-pub fn run_cli(args: &[String], _stdin: Option<&mut dyn Read>, stdout: &mut String, stderr: &mut String, tty: bool) -> i32 {
-    let cmd = args[0].as_str();
-    match cmd {
-        "help" => return cli_help(&args[1..], stdout, stderr),
-        "conn" | "update" | "history" => {
-            stderr.push_str(&format!("db {cmd}: not yet ported to db-rs\n"));
-            return EXIT_ERR;
+/// tty 는 표준 출력이 터미널인지다(기본 출력 형식). `--remote 이름` 이 있으면 원격 `db serve` 에서 돌린다.
+pub fn run_cli(args: &[String], stdin: Option<Box<dyn Read + Send>>, stdout: &mut String, stderr: &mut String, tty: bool) -> i32 {
+    let args = match take_remote(args) {
+        Ok((args, Some(name))) if args[0] != "help" => return run_remote(&args, &name, stdin, stdout, stderr, tty),
+        Ok((args, _)) => args,
+        Err(msg) => {
+            stderr.push_str(&format!("db {}: {msg}\n", args[0]));
+            return EXIT_USAGE;
         }
-        _ => {}
+    };
+    run_cli_with(&args, stdin, stdout, stderr, tty, None)
+}
+
+/// serve 가 `cli` 요청으로 돌리는 명령이다. 읽기 명령과 안전장치를 거치는 쓰기(query·redis --write)만 받는다.
+/// conn·update·history 같은 원격 기계의 파일을 바꾸거나 읽는 명령은 받지 않는다.
+const REMOTE_COMMANDS: &[&str] = &[
+    "conns",
+    "schemas",
+    "tables",
+    "describe",
+    "ddl",
+    "query",
+    "explain",
+    "search",
+    "redis",
+    "linked",
+    "schema-diff",
+    "user360",
+    "logs",
+    "metrics",
+    "status",
+    "flows",
+    "board",
+];
+
+/// 인자에서 `--remote 이름`(`-remote`, `=` 꼴도)을 떼어 낸다. `--` 뒤는 명령 인자라 보지 않는다.
+fn take_remote(args: &[String]) -> Result<(Vec<String>, Option<String>), String> {
+    let (mut out, mut name) = (vec![args[0].clone()], None);
+    let mut it = args[1..].iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            out.push(a.clone());
+            out.extend(it.cloned());
+            break;
+        }
+        match a.as_str() {
+            "--remote" | "-remote" => match it.next() {
+                Some(v) if !v.is_empty() => name = Some(v.clone()),
+                _ => return Err("--remote needs a remote name (~/.config/db/remote.json)".into()),
+            },
+            _ => match a.strip_prefix("--remote=").or_else(|| a.strip_prefix("-remote=")) {
+                Some("") => return Err("--remote needs a remote name (~/.config/db/remote.json)".into()),
+                Some(v) => name = Some(v.into()),
+                None => out.push(a.clone()),
+            },
+        }
+    }
+    Ok((out, name))
+}
+
+/// `--remote`: 플래그를 여기서 한 번 읽어 사용법 오류는 바로 알리고, -f 파일·표준 입력은 이 기계에서 읽어 보낸다.
+/// 나머지(접속 고르기·안전장치·실행·가리기·출력 글)는 원격 serve 가 이 명령 그대로 만든다.
+fn run_remote(
+    args: &[String],
+    name: &str,
+    stdin: Option<Box<dyn Read + Send>>,
+    stdout: &mut String,
+    stderr: &mut String,
+    tty: bool,
+) -> i32 {
+    let cmd = args[0].as_str();
+    if !REMOTE_COMMANDS.contains(&cmd) {
+        stderr.push_str(&format!("db {cmd}: not available with --remote\n"));
+        return EXIT_USAGE;
     }
     let o = match parse_cli(cmd, &args[1..], tty, stderr) {
         Ok(o) => o,
         Err(code) => return code,
     };
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            stderr.push_str(&format!("{e}\n"));
+            return EXIT_ERR;
+        }
+    };
+    let timeout = Duration::from_nanos(o.timeout_ns as u64);
+    let res = rt.block_on(async {
+        let input = if matches!(cmd, "query" | "explain" | "redis" | "logs" | "metrics") && o.args.is_empty() {
+            Some(match command::fetch_input(&o, stdin, Instant::now() + timeout).await {
+                Ok(t) => CliInput::Text(t),
+                Err(e) => CliInput::Error(e.to_string()),
+            })
+        } else {
+            None
+        };
+        let spec = RemoteSpec::resolve(name).map_err(EngineError::run)?;
+        let eng = Engine::Remote(Arc::new(RemoteEngine::connect(&spec).await?));
+        let req = CliRequest {
+            args: args.to_vec(),
+            input,
+            tty,
+        };
+        // 원격도 --timeout 으로 끝나므로 ssh 가 멈춘 경우만 막는다
+        let r = tokio::time::timeout(timeout + Duration::from_secs(60), eng.cli(req))
+            .await
+            .unwrap_or_else(|_| Err(EngineError::run(format!("remote {name}: no answer"))));
+        eng.close().await;
+        r
+    });
+    match res {
+        Ok(r) => {
+            stdout.push_str(&r.stdout);
+            stderr.push_str(&r.stderr);
+            r.code
+        }
+        Err(e) => {
+            stderr.push_str(&format!("db {cmd}: {}\n", printable(&e.error, true)));
+            e.code
+        }
+    }
+}
+
+/// serve 의 `cli` 요청을 돌린다. 프로젝트는 serve 의 -p 이고, 클라이언트가 준 -p·-f 는 쓰지 않는다.
+pub fn run_cli_serve(req: CliRequest, dir: &str) -> CliResponse {
+    let (mut out, mut err) = (String::new(), String::new());
+    let Some(cmd) = req.args.first().filter(|c| REMOTE_COMMANDS.contains(&c.as_str())) else {
+        let cmd = req.args.first().map_or("", String::as_str);
+        return CliResponse {
+            stdout: out,
+            stderr: format!("db {cmd}: not available with --remote\n"),
+            code: EXIT_USAGE,
+        };
+    };
+    let args = match take_remote(&req.args) {
+        Ok((args, _)) => args,
+        Err(msg) => {
+            return CliResponse {
+                stdout: out,
+                stderr: format!("db {cmd}: {msg}\n"),
+                code: EXIT_USAGE,
+            };
+        }
+    };
+    let serve = Serve {
+        dir: dir.to_string(),
+        input: req.input.map(|i| match i {
+            CliInput::Text(t) => Ok(t),
+            CliInput::Error(e) => Err(e),
+        }),
+    };
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_cli_with(&args, None, &mut out, &mut err, req.tty, Some(serve))
+    }));
+    let code = run.unwrap_or_else(|_| {
+        err.push_str("internal error\n");
+        EXIT_ERR
+    });
+    CliResponse {
+        stdout: out,
+        stderr: err,
+        code,
+    }
+}
+
+/// `db serve [-p 폴더]`: 표준 입출력으로 serve 프로토콜을 받는다(docs/serve-protocol.md). 포트를 열지 않는다.
+/// 표준 출력은 프로토콜 줄만 쓰므로 오류는 stderr 에 쓴다.
+pub fn run_serve(args: &[String]) -> i32 {
+    let mut dir = default_project_dir();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-p" | "--p" => match it.next() {
+                Some(v) => dir = v.clone(),
+                None => {
+                    eprintln!("db serve: flag needs an argument: -p");
+                    return EXIT_USAGE;
+                }
+            },
+            _ => match a.strip_prefix("-p=").or_else(|| a.strip_prefix("--p=")) {
+                Some(v) => dir = v.into(),
+                None => {
+                    eprintln!("사용법: db serve [-p 경로]  (stdio 로 엔진 프로토콜, docs/serve-protocol.md)");
+                    return EXIT_USAGE;
+                }
+            },
+        }
+    }
+    let proj = match load_project(&dir) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return EXIT_ERR;
+        }
+    };
+    let dir = proj.dir.to_string_lossy().into_owned();
+    let cli: idb_engine::CliHandler = Arc::new(move |req| run_cli_serve(req, &dir));
+    let engine = Arc::new(idb_engine::LocalEngine::new(proj, Some(cli)));
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("{e}");
+            return EXIT_ERR;
+        }
+    };
+    let input = tokio::io::BufReader::new(tokio::io::stdin());
+    match rt.block_on(idb_engine::serve::serve(engine, input, tokio::io::stdout())) {
+        Ok(()) => EXIT_OK,
+        Err(e) => {
+            eprintln!("db serve: {e}");
+            EXIT_ERR
+        }
+    }
+}
+
+/// serve 로 도는 명령의 고정값이다.
+struct Serve {
+    dir: String,
+    input: Option<Result<String, String>>,
+}
+
+fn run_cli_with(
+    args: &[String],
+    stdin: Option<Box<dyn Read + Send>>,
+    stdout: &mut String,
+    stderr: &mut String,
+    tty: bool,
+    serve: Option<Serve>,
+) -> i32 {
+    let cmd = args[0].as_str();
+    match cmd {
+        "help" => return cli_help(&args[1..], stdout, stderr),
+        "history" => return crate::history_cmd::run_history(&args[1..], stdout, stderr, tty),
+        "conn" => {
+            let tty = stdin.is_none();
+            let stdin = crate::conn_cmd::Stdin { reader: stdin, tty };
+            return crate::conn_cmd::run_conn(&args[1..], stdin, stdout, stderr);
+        }
+        "update" => return crate::update_cmd::run_update(&crate::update_cmd::default_updater(), &args[1..], stdout, stderr),
+        _ => {}
+    }
+    let mut o = match parse_cli(cmd, &args[1..], tty, stderr) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    if let Some(s) = serve {
+        o.dir = s.dir;
+        o.file.clear();
+        o.input = s.input;
+    }
     let proj = match load_project(&o.dir) {
         Ok(p) => p,
         Err(e) => {
@@ -441,17 +671,77 @@ pub fn run_cli(args: &[String], _stdin: Option<&mut dyn Read>, stdout: &mut Stri
             return EXIT_ERR;
         }
     };
-    let results = match o.cmd.as_str() {
-        "conns" => vec![conns_result(&proj, &o)],
-        _ => {
-            stderr.push_str(&format!("db {cmd}: not yet ported to db-rs\n"));
+    let source = proj.conn_by_name(&o.conn).is_some_and(|c| c.kind.is_some_and(Kind::is_source));
+    // 저장소 결과 한도는 따로 주지 않으면 1,000행이다(R62.2)
+    if source && !o.max_rows_set {
+        o.max_rows = SOURCE_DEFAULT_ROWS;
+    }
+    if o.cmd == "conns" {
+        return output::write_results(stdout, stderr, &o, vec![conns_result(&proj, &o)]);
+    }
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            stderr.push_str(&format!("{e}\n"));
             return EXIT_ERR;
         }
     };
+    let env = Env {
+        o: &o,
+        proj: &proj,
+        clients: Arc::new(Clients::new()),
+        deadline: Instant::now() + Duration::from_nanos(o.timeout_ns as u64),
+    };
+    let sub = match o.cmd.as_str() {
+        "status" => Some(rt.block_on(crate::status_cmd::run_status(&env, stdout, stderr))),
+        "flows" => Some(rt.block_on(crate::flows_cmd::run_flows(&env, stdout, stderr))),
+        "board" => Some(rt.block_on(crate::board_cmd::run_board(&env, stdout, stderr))),
+        _ => None,
+    };
+    if let Some(code) = sub {
+        rt.block_on(env.clients.close());
+        return code;
+    }
+    let start = std::time::Instant::now();
+    let results = rt.block_on(command::run_command(&env, stdin, stderr));
+    let elapsed = start.elapsed();
+    rt.block_on(env.clients.close());
+    let mut results = match results {
+        Ok(r) => r,
+        Err(e) => {
+            stderr.push_str(&env.err_text(&e, &[&o.conn, &o.to]));
+            stderr.push('\n');
+            return e.code();
+        }
+    };
+    if o.decrypt
+        && let Err(e) = command::decrypt_results(&proj, &mut results, stderr)
+    {
+        stderr.push_str(&env.err_text(&command::CmdError::Run(idb_sources::Error::msg(e)), &[&o.conn, &o.to]));
+        stderr.push('\n');
+        return EXIT_ERR;
+    }
+    for r in &mut results {
+        if let Some(err) = &r.err {
+            let text = env.err_text(&command::CmdError::Run(idb_sources::Error::msg(err.clone())), &[&r.conn]);
+            stderr.push_str(&format!("{}: {text}\n", r.title));
+            r.err = Some(text);
+            continue;
+        }
+        let Some(res) = r.res.as_mut() else { continue };
+        if res.elapsed.is_zero() {
+            res.elapsed = elapsed;
+        }
+        let max = o.max_rows as usize;
+        if res.rows.len() > max {
+            res.rows.truncate(max);
+            res.truncated = true;
+        }
+    }
     output::write_results(stdout, stderr, &o, results)
 }
 
-fn load_project(dir: &str) -> Result<Project, String> {
+pub(crate) fn load_project(dir: &str) -> Result<Project, String> {
     let abs = std::path::absolute(Path::new(dir)).map_err(|e| e.to_string())?;
     // Go filepath.Abs 는 결과를 Clean 한다(./a/../b → b)
     project::load_project(&clean_path(&abs)).map_err(|e| e.to_string())
@@ -507,5 +797,42 @@ pub fn conn_label(c: &Conn) -> String {
         format!("{} (db)", c.name)
     } else {
         c.name.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn remote_플래그는_어디에_있든_떼고_대시_대시_뒤는_둔다() {
+        let (args, name) = take_remote(&v(&["query", "-c", "a", "--remote", "devbox", "select 1"])).unwrap();
+        assert_eq!((args, name.as_deref()), (v(&["query", "-c", "a", "select 1"]), Some("devbox")));
+        let (args, name) = take_remote(&v(&["redis", "-remote=h", "-c", "r", "--", "GET", "--remote"])).unwrap();
+        assert_eq!(
+            (args, name.as_deref()),
+            (v(&["redis", "-c", "r", "--", "GET", "--remote"]), Some("h"))
+        );
+        assert!(take_remote(&v(&["conns", "--remote"])).is_err());
+        assert!(take_remote(&v(&["conns", "--remote="])).is_err());
+    }
+
+    #[test]
+    fn serve_는_허용하지_않은_명령을_사용법_오류로_돌려준다() {
+        let r = run_cli_serve(
+            CliRequest {
+                args: v(&["update", "--force"]),
+                ..Default::default()
+            },
+            "/nonexistent",
+        );
+        assert_eq!(
+            (r.code, r.stderr.as_str()),
+            (EXIT_USAGE, "db update: not available with --remote\n")
+        );
     }
 }

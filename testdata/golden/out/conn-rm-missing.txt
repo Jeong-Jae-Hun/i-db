@@ -1,0 +1,5 @@
+args: ["conn","rm","nope","--yes","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn rm: 접속 없음: nope (db conns)

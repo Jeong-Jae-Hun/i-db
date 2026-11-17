@@ -1,0 +1,5 @@
+args: ["conn","add","x","--kind","loki","--url","ftp://h","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn add: invalid url (https://host[:port])

@@ -1,0 +1,5 @@
+args: ["conn","add","app-stg","--url","postgres://u@h/d","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn add: 접속이 이미 있음: app-stg

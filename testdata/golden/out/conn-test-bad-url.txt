@@ -1,0 +1,5 @@
+args: ["conn","test","--url","postgres://u:sekrit@h:99999/d"]
+exit: 2
+--- stdout
+--- stderr
+db conn test: invalid connection url (postgres://user:pw@host:5432/db, redis://:pw@host:6379/0)

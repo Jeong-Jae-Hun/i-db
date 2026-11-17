@@ -1,0 +1,5 @@
+args: ["flows","-p","{P}","-f","nope"]
+exit: 2
+--- stdout
+--- stderr
+db flows: 흐름 없음: nope (.dbtui/flows.json)

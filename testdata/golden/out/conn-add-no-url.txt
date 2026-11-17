@@ -1,0 +1,5 @@
+args: ["conn","add","x","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn add: --url 이 필요함

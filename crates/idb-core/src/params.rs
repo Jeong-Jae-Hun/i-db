@@ -1,7 +1,9 @@
 //! SQL 의 :name·$n 자리표시를 찾아 PostgreSQL 바인딩 형식($n)으로 맞춘다. Go `internal/params` 와 같다.
-//! 토큰은 Go `internal/sqlfmt` 의 `Tokenize` 를 옮긴 것으로 읽는다. sqlfmt 를 옮기면 그쪽으로 뺀다.
+//! 토큰은 sqlfmt 의 tokenize 로 읽는다.
 
 use crate::project::go_atoi;
+use crate::sqlfmt::{Kind, Token, tokenize};
+use crate::sqlsafe::quote_literal;
 
 /// PostgreSQL 이 한 문장에 받는 바인딩 인자의 상한이다. 넘거나 정수로 못 읽는 $n 은 이름 목록을 만들지 않는다
 const MAX_PARAMS: i64 = 65535;
@@ -67,151 +69,31 @@ pub fn bind(sql: &str) -> (String, Vec<String>) {
     (b, names)
 }
 
-// ─── 토큰 ───
-
-/// 토큰 종류다. 연산자·괄호·쉼표 같은 기호는 모두 한 바이트짜리 Punct 다.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    Word,
-    Number,
-    String,
-    Quoted,
-    Param,
-    LineComment,
-    BlockComment,
-    Punct,
-}
-
-/// `sql[start..end]` 조각이다. 토큰 사이 빈틈은 언제나 공백뿐이다. 경계는 늘 ASCII 바이트 자리다.
-#[derive(Debug)]
-struct Token {
-    kind: Kind,
-    start: usize,
-    end: usize,
-}
-
-const SPACE_BYTES: &[u8] = b" \t\n\r\x0c\x0b";
-/// 문자열 바로 앞에 붙는 PostgreSQL 접두사(E·B·X·N). E 만 역슬래시 이스케이프를 쓴다
-const STRING_PREFIXES: &[u8] = b"eEbBxXnN";
-
-/// sql 을 공백 밖의 토큰으로 나눈다. 닫히지 않은 문자열·주석은 끝까지 한 토큰이다.
-fn tokenize(sql: &str) -> Vec<Token> {
-    let s = sql.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < s.len() {
-        let c = s[i];
-        if SPACE_BYTES.contains(&c) {
-            i += 1;
+/// sql 의 $n 자리마다 repl(n, "$n") 이 준 글로 바꾼다. None 이면 그대로 둔다. 문자열·주석 안의 $n 은 토큰이 아니라 건드리지 않는다.
+pub fn replace_params(sql: &str, mut repl: impl FnMut(i64, &str) -> Option<String>) -> String {
+    let mut b = String::new();
+    let mut last = 0;
+    for t in tokenize(sql).iter().filter(|t| t.kind == Kind::Param) {
+        let text = &sql[t.start..t.end];
+        let Some(with) = go_atoi(&text[1..]).and_then(|n| repl(n, text)) else {
             continue;
-        }
-        let start = i;
-        let mut kind = Kind::Punct;
-        if s[i..].starts_with(b"--") {
-            i += 2;
-            kind = Kind::LineComment;
-            while i < s.len() && s[i] != b'\n' {
-                i += 1;
-            }
-        } else if s[i..].starts_with(b"/*") {
-            // PostgreSQL 블록 주석은 중첩된다
-            let mut depth = 0;
-            while i < s.len() {
-                if s[i..].starts_with(b"/*") {
-                    depth += 1;
-                    i += 2;
-                } else if s[i..].starts_with(b"*/") {
-                    depth -= 1;
-                    i += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-            kind = Kind::BlockComment;
-        } else if c == b'\'' {
-            i += quoted_len(&s[i..], false);
-            kind = Kind::String;
-        } else if c == b'"' {
-            i += quoted_len(&s[i..], false);
-            kind = Kind::Quoted;
-        } else if STRING_PREFIXES.contains(&c) && s.get(i + 1) == Some(&b'\'') {
-            i += 1 + quoted_len(&s[i + 1..], c == b'e' || c == b'E');
-            kind = Kind::String;
-        } else if c == b'$' && s.get(i + 1).is_some_and(u8::is_ascii_digit) {
-            i += 1;
-            while i < s.len() && s[i].is_ascii_digit() {
-                i += 1;
-            }
-            kind = Kind::Param;
-        } else if c == b'$' {
-            // $태그$ ... $태그$ 인용. 태그 모양이 아니면 '$' 한 글자짜리 기호다
-            let mut j = i + 1;
-            while j < s.len() && (s[j] == b'_' || s[j].is_ascii_alphabetic() || j > i + 1 && s[j].is_ascii_digit()) {
-                j += 1;
-            }
-            if j >= s.len() || s[j] != b'$' {
-                i += 1;
-            } else {
-                let tag = &s[i..=j];
-                kind = Kind::String;
-                i = match crate::sqlsafe::find(&s[j + 1..], tag) {
-                    Some(end) => j + 1 + end + tag.len(),
-                    None => s.len(),
-                };
-            }
-        } else if c.is_ascii_digit() || c == b'.' && s.get(i + 1).is_some_and(u8::is_ascii_digit) {
-            i += 1;
-            while i < s.len() {
-                if (s[i] == b'e' || s[i] == b'E') && matches!(s.get(i + 1), Some(b'+' | b'-')) {
-                    i += 2;
-                    continue;
-                }
-                if !is_ident_byte(s[i]) && s[i] != b'.' {
-                    break;
-                }
-                i += 1;
-            }
-            kind = Kind::Number;
-        } else if is_ident_start(c) {
-            // 0x80 이상 바이트는 모두 식별자 글자로 본다(PostgreSQL 과 같다). 덕분에 UTF-8 글자가 쪼개지지 않는다
-            i += 1;
-            while i < s.len() && is_ident_byte(s[i]) {
-                i += 1;
-            }
-            kind = Kind::Word;
-        } else {
-            i += 1;
-        }
-        out.push(Token { kind, start, end: i });
+        };
+        b.push_str(&sql[last..t.start]);
+        b.push_str(&with);
+        last = t.end;
     }
-    out
+    b.push_str(&sql[last..]);
+    b
 }
 
-/// s[0] 을 여는 따옴표로 보고 닫는 따옴표까지의 길이다. 같은 따옴표 두 개는 이스케이프다.
-fn quoted_len(s: &[u8], backslash: bool) -> usize {
-    let mark = s[0];
-    let mut i = 1;
-    while i < s.len() {
-        // 이스케이프한 백슬래시와 같은 따옴표 두 개는 다음 바이트까지 건너뛴다
-        if backslash && s[i] == b'\\' || s[i] == mark && s.get(i + 1) == Some(&mark) {
-            i += 1;
-        } else if s[i] == mark {
-            return i + 1;
-        }
-        i += 1;
-    }
-    s.len()
-}
-
-fn is_ident_start(c: u8) -> bool {
-    c == b'_' || c.is_ascii_alphabetic() || c >= 0x80
-}
-
-fn is_ident_byte(c: u8) -> bool {
-    is_ident_start(c) || c.is_ascii_digit() || c == b'$'
+/// sql 의 $n 자리를 args[n-1] 리터럴(None 은 NULL)로 바꾼다. 읽기 전용 실행이 바인딩을 받지 않아서다.
+/// 값은 quote_literal 로 감싸 문장을 바꾸지 못한다.
+pub fn inline_args(sql: &str, args: &[Option<String>]) -> String {
+    replace_params(sql, |n, _| {
+        let i = usize::try_from(n).ok()?.checked_sub(1)?;
+        let v = args.get(i)?;
+        Some(v.as_deref().map_or_else(|| "NULL".to_string(), quote_literal))
+    })
 }
 
 #[cfg(test)]
@@ -278,5 +160,14 @@ mod tests {
     fn 닫히지_않은_E_문자열은_끝까지_한_토큰이다() {
         let toks = tokenize("e'\\");
         assert_eq!((toks.len(), toks[0].kind, toks[0].end), (1, Kind::String, 3));
+    }
+
+    #[test]
+    fn 번호_자리를_리터럴로_넣고_문자열_안은_두다() {
+        let args = [Some("a'b".to_string()), None, Some("c\\d".to_string())];
+        assert_eq!(
+            inline_args("select $1, $2, '$1', $3, $4 -- $1", &args),
+            "select 'a''b', NULL, '$1', E'c\\\\d', $4 -- $1"
+        );
     }
 }

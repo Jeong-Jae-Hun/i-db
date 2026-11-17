@@ -1,0 +1,9 @@
+args: ["status","-p","{P}","-c","app-prod","-c","metrics-prod","--format","table"]
+exit: 0
+--- stdout
+group  name          env   kind        ok  latency_ms  version  metrics
+-----  ------------  ----  ----------  --  ----------  -------  --------------
+grp    app-prod      prod  postgresql  -                        --prod 로 확인
+mon    metrics-prod  prod  prometheus  -                        --prod 로 확인
+(2행)
+--- stderr
