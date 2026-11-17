@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 idb-core.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
@@ -15,3 +15,12 @@ rustls-native-certs.workspace = true
 postgres-protocol.workspace = true
 bytes.workspace = true
 fallible-iterator.workspace = true
+chrono.workspace = true
+percent-encoding.workspace = true
+url.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sigv4.workspace = true
+aws-smithy-http-client.workspace = true

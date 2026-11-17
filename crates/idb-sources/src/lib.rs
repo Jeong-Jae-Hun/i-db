@@ -1,16 +1,22 @@
 #![allow(non_snake_case)]
-//! PostgreSQL·Redis 클라이언트. Go `internal/db` 의 CLI 가 쓰는 쪽(backend·readonly·meta·export·schemadiff·linked)을 옮긴다.
+//! PostgreSQL·Redis 클라이언트와 읽기 전용 HTTP 저장소(OpenSearch·Loki·Prometheus·Grafana, R60~R63). Go `internal/db` 의 CLI 가 쓰는 쪽(backend·readonly·meta·export·schemadiff·linked)을 옮긴다.
 //! 결과 글은 Go 판과 같아야 해서 PostgreSQL 은 텍스트 형식으로 받고 명령 태그를 그대로 싣는 작은 프로토콜 구현을 둔다
 //! (tokio-postgres 는 결과를 바이너리로만 받고 명령 태그를 내주지 않는다).
 
 mod dns;
+#[cfg(test)]
+mod fakehttp;
+mod httpc;
 pub mod linked;
 #[cfg(test)]
 mod live_tests;
 mod net;
+pub mod obs;
+pub mod opensearch;
 pub mod pg;
 pub mod redis;
 pub mod schemadiff;
+pub mod source;
 mod tls;
 
 use std::fmt;
