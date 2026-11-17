@@ -22,9 +22,8 @@ use crate::usage_text::UPDATE_USAGE;
 const EXIT_NEWER: i32 = 10;
 pub const DEFAULT_API: &str = "https://api.github.com";
 pub const DEFAULT_REPO: &str = "Jeong-Jae-Hun/i-db";
-/// 릴리스 묶음과 그 안 실행 파일의 이름이다(묶음은 `<이름>_<os>_<arch>.tar.gz`). release.yml 이 올리는 Go 판 `db` 와 같다.
-/// 넘기기(전환 계획 11번) 전까지 db-rs 로 바꾸면 Go 판 db 를 받아 db-rs 자리에 끼운다는 점을 안다. 넘기는 날 release.yml 이
-/// Rust 판을 `db` 로 올리면 이 값은 그대로 둔다.
+/// 릴리스 묶음과 그 안 실행 파일의 이름이다(묶음은 `<이름>_<os>_<arch>.tar.gz`). v0.x Go 판 묶음과 같은 꼴이라
+/// `db update --version v0.<판> --force` 로 Go 판으로 되돌릴 수도 있다.
 pub const RELEASE_BIN: &str = "db";
 /// 받는 묶음과 꺼낸 바이너리의 상한이다
 const MAX_ARCHIVE: u64 = 100 << 20;

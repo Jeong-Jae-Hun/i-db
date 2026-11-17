@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! db-rs 를 띄워 보는 conn·status·flows·board·저장소(DynamoDB) 명령 시험. Go `conncli_test.go`·`folders_test.go`·
+//! db 를 띄워 보는 conn·status·flows·board·저장소(DynamoDB) 명령 시험. Go `conncli_test.go`·`folders_test.go`·
 //! `board_test.go`·`flow_test.go` 의 CLI 쪽을 옮겼다. 통합 시험은 DBTUI_TEST_PG_URL·DBTUI_TEST_DYNAMO_URL 이 있을 때만 돈다.
 
 use std::fs;
@@ -29,7 +29,7 @@ fn project() -> tempfile::TempDir {
 }
 
 fn run(stdin: &str, args: &[&str]) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_db-rs"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_db"))
         .args(args)
         .env("DBTUI_PROJECT", "/nonexistent")
         .stdin(Stdio::piped())
@@ -452,7 +452,7 @@ fn 통합_DynamoDB_Local_은_요금_막음_없이_트리와_PartiQL_을_본다()
     )
     .unwrap();
     let run_aws = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_db-rs"))
+        let out = Command::new(env!("CARGO_BIN_EXE_db"))
             .args(with_p(args, d.path()))
             .env("AWS_ACCESS_KEY_ID", "x")
             .env("AWS_SECRET_ACCESS_KEY", "x")

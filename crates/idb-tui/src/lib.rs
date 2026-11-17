@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! db 의 터미널 화면(ratatui + crossterm). `db-rs` 를 하위 명령 없이 켜면 이 화면이다.
+//! db 의 터미널 화면(ratatui + crossterm). `db` 를 하위 명령 없이 켜면 이 화면이다.
 //! 데이터는 모두 idb_engine::Engine(Local 또는 ssh 너머 Remote)으로 읽고 쓴다. 화면은 접속 정의·비밀번호를 보지 않는다.
 
 mod actions;

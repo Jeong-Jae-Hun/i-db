@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! `db-rs mcp` 표준 입출력 왕복 시험. JSON-RPC 줄을 보내 initialize·tools/list·tools/call 이 MCP 클라이언트(Claude)가
+//! `db mcp` 표준 입출력 왕복 시험. JSON-RPC 줄을 보내 initialize·tools/list·tools/call 이 MCP 클라이언트(Claude)가
 //! 보는 꼴로 오는지 본다. tools/list 는 Go 판이 내던 목록(src/mcp/tools.json)과 같아야 한다.
 //! Go `billed_test.go`(요금 막음, R72)도 여기서 옮긴다. 실제 AWS 저장소를 열지만 요청을 만들기 전에 막혀 네트워크에 나가지 않는다.
 
@@ -54,7 +54,7 @@ struct Mcp {
 impl Mcp {
     /// 자격 증명 파일은 비워 SDK 가 이 기계 설정을 읽지 않게 한다(막힘 판정은 요청을 만들기 전이다).
     fn start(dir: &Path, args: &[&str], remote: bool) -> Mcp {
-        let bin = env!("CARGO_BIN_EXE_db-rs");
+        let bin = env!("CARGO_BIN_EXE_db");
         let mut cmd = Command::new(bin);
         cmd.arg("mcp")
             .args(args)
@@ -222,14 +222,14 @@ fn remote_는_원격_serve_의_접속으로_같은_도구를_돌린다() {
 
 #[test]
 fn 사용법_오류는_stderr_로_알리고_2_로_끝난다() {
-    let out = Command::new(env!("CARGO_BIN_EXE_db-rs"))
+    let out = Command::new(env!("CARGO_BIN_EXE_db"))
         .args(["mcp", "-max-rows", "-1"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty() && String::from_utf8_lossy(&out.stderr).contains("max-rows must not be negative: -1"));
-    let out = Command::new(env!("CARGO_BIN_EXE_db-rs"))
+    let out = Command::new(env!("CARGO_BIN_EXE_db"))
         .args(["mcp", "extra"])
         .stdin(Stdio::null())
         .output()

@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::*;
 
-/// 시험 전용: 설정 파일과 ssh 대신 이 명령을 띄운다(`db-rs serve -p 폴더` 처럼 공백으로 나눈다).
+/// 시험 전용: 설정 파일과 ssh 대신 이 명령을 띄운다(`db serve -p 폴더` 처럼 공백으로 나눈다).
 pub const REMOTE_CMD_ENV: &str = "DB_REMOTE_CMD";
 /// 응답 한 줄의 상한. 결과는 1,000행 × 64KiB 칸이 넘지 않는다
 const MAX_RESPONSE_LINE: usize = 256 << 20;
