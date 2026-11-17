@@ -3,6 +3,7 @@
 mod brand;
 mod dashboard;
 mod dialogs;
+mod kit;
 mod redis;
 mod results;
 mod source;
@@ -300,9 +301,9 @@ mod tests {
             let t = cx.theme();
             assert_eq!(t.font_family.as_ref(), "D2Coding");
             assert_eq!(t.mono_font_family.as_ref(), "D2Coding");
-            assert_eq!((t.font_size, t.mono_font_size), (px(13.), px(13.)));
+            assert_eq!((t.font_size, t.mono_font_size), (px(14.), px(14.)));
             apply_font(&f, 1.25, cx);
-            assert_eq!(cx.theme().font_size, px(16.));
+            assert_eq!(cx.theme().font_size, px(18.));
         });
     }
 
@@ -326,7 +327,13 @@ mod tests {
     fn 자산은_브랜드_마크와_아이콘을_함께_준다() {
         use gpui::AssetSource as _;
         let a = brand::Assets;
-        for p in ["brand/mark-body.svg", "brand/mark-dot.svg", "icons/play.svg"] {
+        for p in [
+            "brand/mark-body.svg",
+            "brand/mark-dot.svg",
+            "icons/play.svg",
+            "kind/postgresql.svg",
+            "kind/aws.svg",
+        ] {
             assert!(a.load(p).unwrap().is_some_and(|b| !b.is_empty()), "{p}");
         }
         let body = String::from_utf8(a.load("brand/mark-body.svg").unwrap().unwrap().to_vec()).unwrap();

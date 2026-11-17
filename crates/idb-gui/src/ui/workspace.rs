@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use super::kit;
 use crate::vm::brand;
 use crate::vm::palette;
 use gpui::{
@@ -257,6 +258,11 @@ impl Workspace {
             busy: None,
             _subs: subs,
         }
+    }
+
+    /// 화면 눈금(확대 배율 × 설정 글자 크기)
+    pub(super) fn scale(&self) -> crate::vm::layout::Scale {
+        crate::vm::layout::Scale::with_font(self.prefs.zoom, self.font.size)
     }
 
     pub(super) fn save_prefs(&self) {
@@ -1318,20 +1324,13 @@ impl Workspace {
                     .child(div().flex_1())
                     .child(
                         Button::new("params-cancel")
-                            .small()
                             .label("취소")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
-                    .child(
-                        Button::new("params-ok")
-                            .small()
-                            .primary()
-                            .label("실행")
-                            .on_click(move |_, window, cx| {
-                                ok2(window, cx);
-                                window.close_dialog(cx);
-                            }),
-                    ),
+                    .child(Button::new("params-ok").primary().label("실행").on_click(move |_, window, cx| {
+                        ok2(window, cx);
+                        window.close_dialog(cx);
+                    })),
             )
             .on_ok(move |_, window, cx| {
                 ok(window, cx);
@@ -1639,11 +1638,13 @@ impl Focusable for Workspace {
 impl Workspace {
     fn render_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
+        let sc = self.scale();
         // Orca 첫 화면 문법: 가운데 마크·글자표·한 줄 소개, 아래 고를 것들은 둥근 줄(28px)
         let row = |id: (&'static str, usize), label: String, detail: &'static str| {
             h_flex()
                 .id(id)
-                .h(rems(1.9))
+                .min_h(px(sc.row()))
+                .py(px(sc.s4()))
                 .px_3()
                 .gap_2()
                 .rounded(theme.radius)
@@ -1713,10 +1714,9 @@ impl Workspace {
                         h_flex()
                             .px_3()
                             .gap_2()
-                            .child(div().flex_1().child(Input::new(&self.dir_input).small()))
+                            .child(div().flex_1().child(Input::new(&self.dir_input)))
                             .child(
                                 Button::new("pick-dir")
-                                    .small()
                                     .label(picker::PICK_DIR)
                                     .on_click(cx.listener(|_, _, window, cx| {
                                         let rx = cx.prompt_for_paths(PathPromptOptions {
@@ -1735,7 +1735,6 @@ impl Workspace {
                             )
                             .child(
                                 Button::new("open-dir")
-                                    .small()
                                     .primary()
                                     .label(picker::OPEN)
                                     .loading(self.connecting)
@@ -1765,7 +1764,8 @@ impl Workspace {
         let theme = cx.theme().clone();
         let dark = theme.is_dark();
         let active = self.active_conn();
-        let mut list = v_flex().id("conn-tree").py_1().gap_px();
+        let sc = self.scale();
+        let mut list = v_flex().id("conn-tree").py(px(sc.s4())).gap(px(sc.row_gap()));
         let rows = self.tree.rows();
         if rows.is_empty() {
             list = list.child(
@@ -1778,90 +1778,109 @@ impl Workspace {
             );
         }
         for (i, row) in rows.into_iter().enumerate() {
-            let el = match row.kind {
-                RowKind::Folder { expanded, count } => {
-                    let label = row.label.clone();
-                    h_flex()
-                        .id(("folder", i))
-                        .mx_1()
-                        .px_2()
-                        .h(rems(1.75))
-                        .gap_1()
-                        .rounded(theme.radius)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.sidebar_accent))
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
-                        .child(div().flex_1().truncate().child(row.label))
-                        .child(
-                            // 개수 알약(Orca 의 18px 배지)
-                            div()
-                                .min_w(px(18.))
-                                .h(px(18.))
-                                .px_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .bg(theme.secondary)
-                                .child(count.to_string()),
-                        )
-                        .on_click(cx.listener(move |ws, _, _, cx| {
-                            ws.tree.toggle(&label);
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                }
-                RowKind::Conn(ci) => {
-                    let c = self.tree.conns[ci].clone();
-                    let selected = active.as_deref() == Some(c.name.as_str());
-                    let (n_open, n_ref, n_copy) = (c.name.clone(), c.name.clone(), c.name.clone());
-                    let tip = format!("{} · {} {}\n{}", c.kind, c.host, c.db, c.group);
-                    let ws = cx.entity().downgrade();
-                    h_flex()
-                        .id(("conn", i))
-                        .mx_1()
-                        .pl(rems(1.2))
-                        .pr_2()
-                        .h(rems(2.0))
-                        .gap_2()
-                        .rounded(theme.radius)
-                        .cursor_pointer()
-                        .when(selected, |d| d.bg(theme.sidebar_accent))
-                        .hover(|s| s.bg(theme.sidebar_accent))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().truncate().child(c.name.clone()))
-                                .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(row.detail)),
-                        )
-                        .child(env_pill(&c.env, dark))
-                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                        .on_click(cx.listener(move |ws, _, window, cx| ws.select_conn(n_open.clone(), window, cx)))
-                        .context_menu(move |menu, _, _| {
-                            let (ws1, ws2) = (ws.clone(), ws.clone());
-                            let (n1, n2, n3) = (n_ref.clone(), n_ref.clone(), n_copy.clone());
-                            menu.item(PopupMenuItem::new("열기").on_click(move |_, window, cx| {
-                                let _ = ws1.update(cx, |ws, cx| ws.select_conn(n1.clone(), window, cx));
+            let el =
+                match row.kind {
+                    RowKind::Folder { expanded, count } => {
+                        let label = row.label.clone();
+                        // 묶음 머리: 12px 굵게, 펼침 화살표, 오른쪽 개수 알약. 묶음 사이 위 여백 12
+                        kit::row(&sc, &theme, false)
+                            .id(("folder", i))
+                            .mx(px(sc.s4()))
+                            .when(i > 0, |d| d.mt(px(sc.s12())))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.sidebar_accent))
+                            .text_size(px(sc.group()))
+                            .line_height(px(sc.line(sc.group())))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(if row.tone == Tone::Prod {
+                                theme.danger
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .debug_selector(move || format!("folder-row-{i}"))
+                            .child(div().flex_shrink_0().size(px(sc.icon())).child(
+                                Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(sc.icon())),
+                            ))
+                            .child(div().flex_1().min_w_0().truncate().child(row.label))
+                            .child(kit::pill(&sc, theme.secondary, theme.muted_foreground, count.to_string()))
+                            .on_click(cx.listener(move |ws, _, _, cx| {
+                                ws.tree.toggle(&label);
+                                cx.notify();
                             }))
-                            .item(PopupMenuItem::new("새로 고침(테이블 목록)").on_click(move |_, window, cx| {
-                                let _ = ws2.update(cx, |ws, cx| ws.refresh_catalog(&n2, window, cx));
-                            }))
-                            .separator()
-                            .item(PopupMenuItem::new("이름 복사").on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(n3.clone()));
-                            }))
-                        })
-                        .into_any_element()
-                }
-            };
+                            .into_any_element()
+                    }
+                    RowKind::Conn(ci) => {
+                        let c = self.tree.conns[ci].clone();
+                        let selected = active.as_deref() == Some(c.name.as_str());
+                        let (n_open, n_ref, n_copy) = (c.name.clone(), c.name.clone(), c.name.clone());
+                        let tip = format!("{} · {} {}\n{}", c.kind, c.host, c.db, c.group);
+                        let ws = cx.entity().downgrade();
+                        let (pbg, pfg) = palette::pill(tone(&c.env), dark);
+                        let name_color = if tone(&c.env) == Tone::Prod {
+                            theme.danger
+                        } else {
+                            theme.foreground
+                        };
+                        // 접속 줄: 아이콘·이름(14 중간 굵기)·환경 알약이 한 줄, 아래 12px 호스트 줄. 높이는 내용에서 셈한다.
+                        // 사이드바가 좁으면 둘째 줄을 빼고 툴팁에만 둔다
+                        let two_line = self.prefs.sidebar_width >= NARROW_SIDEBAR;
+                        v_flex()
+                            .id(("conn", i))
+                            .mx(px(sc.s4()))
+                            .min_h(px(if two_line { sc.row2() } else { sc.row() }))
+                            .py(px(if two_line { sc.s8() } else { sc.s4() }))
+                            .px(px(sc.s8()))
+                            .gap(px(sc.line_gap()))
+                            .justify_center()
+                            .rounded(theme.radius)
+                            .cursor_pointer()
+                            .when(selected, |d| d.bg(theme.sidebar_accent))
+                            .hover(|s| s.bg(theme.sidebar_accent))
+                            .debug_selector(move || format!("conn-row-{i}"))
+                            .child(
+                                h_flex()
+                                    .gap(px(sc.s8()))
+                                    .debug_selector(move || format!("conn-line1-{i}"))
+                                    .child(kit::kind_icon(&sc, &c.kind, theme.muted_foreground))
+                                    .child(
+                                        kit::text(&sc, sc.text(), name_color, c.name.clone())
+                                            .flex_1()
+                                            .min_w_0()
+                                            .font_weight(gpui::FontWeight::MEDIUM),
+                                    )
+                                    .child(kit::pill(&sc, hex(pbg), hex(pfg), c.env.clone())),
+                            )
+                            .when(two_line, |d| {
+                                d.child(
+                                    kit::text(&sc, sc.small(), theme.muted_foreground, row.detail.clone())
+                                        .pl(px(sc.icon() + sc.s8()))
+                                        .debug_selector(move || format!("conn-line2-{i}")),
+                                )
+                            })
+                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                            .on_click(cx.listener(move |ws, _, window, cx| ws.select_conn(n_open.clone(), window, cx)))
+                            .context_menu(move |menu, _, _| {
+                                let (ws1, ws2) = (ws.clone(), ws.clone());
+                                let (n1, n2, n3) = (n_ref.clone(), n_ref.clone(), n_copy.clone());
+                                menu.item(PopupMenuItem::new("열기").on_click(move |_, window, cx| {
+                                    let _ = ws1.update(cx, |ws, cx| ws.select_conn(n1.clone(), window, cx));
+                                }))
+                                .item(PopupMenuItem::new("새로 고침(테이블 목록)").on_click(move |_, window, cx| {
+                                    let _ = ws2.update(cx, |ws, cx| ws.refresh_catalog(&n2, window, cx));
+                                }))
+                                .separator()
+                                .item(PopupMenuItem::new("이름 복사").on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(n3.clone()));
+                                }))
+                            })
+                            .into_any_element()
+                    }
+                };
             list = list.child(el);
         }
 
         // 지금 접속의 테이블(카탈로그). 한 번 누르면 고르고 두 번 누르면 데이터를 연다
-        let mut objects = v_flex().id("objects").py_1().gap_px();
+        let mut objects = v_flex().id("objects").py(px(sc.s4())).gap(px(sc.row_gap()));
         let filter = self.tree_filter.read(cx).value().to_lowercase();
         let has_catalog = active.as_ref().is_some_and(|c| self.catalogs.contains_key(c));
         if let Some(conn) = &active
@@ -1878,13 +1897,9 @@ impl Workspace {
                     continue;
                 }
                 objects = objects.child(
-                    div()
-                        .px_3()
-                        .pt_2()
-                        .pb_0p5()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(s.name.clone()),
+                    kit::text(&sc, sc.small(), theme.muted_foreground, s.name.clone())
+                        .px(px(sc.s12()))
+                        .pt(px(sc.s8())),
                 );
                 for t in tables {
                     i += 1;
@@ -1895,20 +1910,14 @@ impl Workspace {
                     let ws = cx.entity().downgrade();
                     let tip = format!("{}.{} · 열 {}개 · 두 번 눌러 데이터 보기", s.name, t.name, t.columns.len());
                     objects = objects.child(
-                        h_flex()
+                        kit::row(&sc, &theme, selected)
                             .id(("table", i))
-                            .mx_1()
-                            .px_3()
-                            .h(rems(1.75))
-                            .gap_2()
-                            .rounded(theme.radius)
+                            .mx(px(sc.s4()))
                             .cursor_pointer()
-                            .when(selected, |d| d.bg(theme.sidebar_accent))
                             .hover(|st| st.bg(theme.sidebar_accent))
-                            .child(div().flex_1().truncate().child(t.name.clone()))
-                            .when(t.view, |d| {
-                                d.child(div().text_xs().text_color(theme.muted_foreground).child("view"))
-                            })
+                            .debug_selector(move || format!("table-row-{i}"))
+                            .child(div().flex_1().min_w_0().truncate().child(t.name.clone()))
+                            .when(t.view, |d| d.child(kit::pill(&sc, theme.secondary, theme.muted_foreground, "view")))
                             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                             .on_click(cx.listener(move |ws, ev: &ClickEvent, window, cx| {
                                 ws.selected_table = Some(k_click.clone());
@@ -1945,16 +1954,7 @@ impl Workspace {
         }
 
         let queries_el = self.render_queries(&filter, cx);
-        let section = |title: &'static str| {
-            div()
-                .px_4()
-                .pt_3()
-                .pb_1()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.muted_foreground)
-                .child(title)
-        };
+        let section = |title: &'static str| kit::section(&sc, &theme, title);
         v_flex()
             .size_full()
             .bg(theme.sidebar)
@@ -1962,10 +1962,9 @@ impl Workspace {
                 h_flex()
                     .p_2()
                     .gap_1()
-                    .child(div().flex_1().child(Input::new(&self.tree_filter).small().cleanable(true)))
+                    .child(div().flex_1().child(Input::new(&self.tree_filter).cleanable(true)))
                     .child(
                         Button::new("dashboard")
-                            .xsmall()
                             .ghost()
                             .icon(IconName::LayoutDashboard)
                             .tooltip("대시보드 (⌘G)")
@@ -1973,7 +1972,6 @@ impl Workspace {
                     )
                     .child(
                         Button::new("switch-conn")
-                            .xsmall()
                             .ghost()
                             .icon(IconName::Folder)
                             .tooltip("접속 바꾸기 (⇧⌘O)")
@@ -2033,32 +2031,32 @@ impl Workspace {
                 })
                 .into_any_element();
         }
-        let mut list = v_flex().py_1().gap_px();
+        let sc = self.scale();
+        let mut list = v_flex().py(px(sc.s4())).gap(px(sc.row_gap()));
         let mut i = 0usize;
         for (conn, group) in queries::group(&shown, &self.tree.conns) {
             list = list.child(
-                div()
-                    .px_3()
-                    .pt_1()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(conn.clone().unwrap_or_else(|| "접속 없음".into())),
+                kit::text(
+                    &sc,
+                    sc.small(),
+                    theme.muted_foreground,
+                    conn.clone().unwrap_or_else(|| "접속 없음".into()),
+                )
+                .px(px(sc.s12()))
+                .pt(px(sc.s8())),
             );
             for f in group {
                 i += 1;
                 let rel = f.rel.clone();
                 let open = self.tabs.tabs.iter().any(|t| t.path.as_ref().is_some_and(|p| p.ends_with(&f.rel)));
                 list = list.child(
-                    h_flex()
+                    kit::row(&sc, &theme, open)
                         .id(("query", i))
-                        .mx_1()
-                        .px_3()
-                        .h(rems(1.75))
-                        .rounded(theme.radius)
+                        .mx(px(sc.s4()))
                         .cursor_pointer()
-                        .when(open, |d| d.bg(theme.sidebar_accent))
                         .hover(|st| st.bg(theme.sidebar_accent))
-                        .child(div().flex_1().truncate().child(f.name.clone()))
+                        .debug_selector(move || format!("query-row-{i}"))
+                        .child(div().flex_1().min_w_0().truncate().child(f.name.clone()))
                         .on_click(cx.listener(move |ws, _, window, cx| ws.open_query(rel.clone(), window, cx))),
                 );
             }
@@ -2101,7 +2099,6 @@ impl Workspace {
         let ws = cx.entity().downgrade();
         let cur = conn.clone();
         let selector = Button::new("conn-selector")
-            .xsmall()
             .ghost()
             .icon(IconName::ChevronsUpDown)
             .label(self.conn_label())
@@ -2161,13 +2158,14 @@ impl Workspace {
         });
         let locked = lock.is_none_or(|(l, _)| l);
         let busy = self.busy.is_some();
+        let sc = self.scale();
         h_flex()
             .gap_0p5()
             .pr_2()
             .when(is_pg, |d| {
                 d.child(
                     Button::new("run")
-                        .xsmall()
+                        .with_size(px(sc.hit()))
                         .ghost()
                         .icon(IconName::Play)
                         .tooltip("커서 문장 또는 선택 실행 (⌘↵)")
@@ -2175,7 +2173,7 @@ impl Workspace {
                 )
                 .child(
                     Button::new("run-all")
-                        .xsmall()
+                        .with_size(px(sc.hit()))
                         .ghost()
                         .icon(IconName::ArrowRight)
                         .tooltip("편집기 문장 모두 실행 (⇧⌘↵)")
@@ -2183,7 +2181,7 @@ impl Workspace {
                 )
                 .child(
                     Button::new("explain")
-                        .xsmall()
+                        .with_size(px(sc.hit()))
                         .ghost()
                         .icon(IconName::Search)
                         .tooltip("실행 계획 (⌘E)")
@@ -2192,7 +2190,7 @@ impl Workspace {
             })
             .child(
                 Button::new("stop")
-                    .xsmall()
+                    .with_size(px(sc.hit()))
                     .ghost()
                     .icon(IconName::Square)
                     .disabled(!busy)
@@ -2203,7 +2201,7 @@ impl Workspace {
                 d.child(div().w_px().h(rems(1.0)).bg(theme.border).mx_1())
                     .child(
                         Button::new("tx")
-                            .xsmall()
+                            .h(px(sc.hit()))
                             .with_variant(if in_tx { ButtonVariant::Warning } else { ButtonVariant::Ghost })
                             .label(if in_tx { "트랜잭션 중" } else { "BEGIN" })
                             .tooltip(if in_tx {
@@ -2220,7 +2218,7 @@ impl Workspace {
                     .when(in_tx, |d| {
                         d.child(
                             Button::new("commit")
-                                .xsmall()
+                                .with_size(px(sc.hit()))
                                 .ghost()
                                 .icon(IconName::Check)
                                 .tooltip("COMMIT")
@@ -2228,7 +2226,7 @@ impl Workspace {
                         )
                         .child(
                             Button::new("rollback")
-                                .xsmall()
+                                .with_size(px(sc.hit()))
                                 .ghost()
                                 .icon(IconName::Undo2)
                                 .tooltip("ROLLBACK")
@@ -2243,7 +2241,7 @@ impl Workspace {
                 };
                 d.child(
                     Button::new("lock")
-                        .xsmall()
+                        .h(px(sc.hit()))
                         .with_variant(if locked { ButtonVariant::Ghost } else { ButtonVariant::Danger })
                         .icon(IconName::TriangleAlert)
                         .label(label)
@@ -2254,7 +2252,7 @@ impl Workspace {
             .child(div().w_px().h(rems(1.0)).bg(theme.border).mx_1())
             .child(
                 Button::new("dashboard-top")
-                    .xsmall()
+                    .with_size(px(sc.hit()))
                     .ghost()
                     .icon(IconName::LayoutDashboard)
                     .tooltip("대시보드 (⌘G)")
@@ -2262,7 +2260,7 @@ impl Workspace {
             )
             .child(
                 Button::new("settings-top")
-                    .xsmall()
+                    .with_size(px(sc.hit()))
                     .ghost()
                     .icon(IconName::Settings)
                     .tooltip("설정 (⌘,)")
@@ -2272,6 +2270,7 @@ impl Workspace {
 
     fn render_tabs(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
+        let sc = self.scale();
         // 제목 줄 안의 탭(Orca): 작은 높이, 고른 탭만 바탕을 깔고 아래 강조선을 둔다
         let mut bar = h_flex().id("tabs").h_full().gap_0p5().items_center().overflow_x_scroll();
         for (i, t) in self.tabs.tabs.iter().enumerate() {
@@ -2287,7 +2286,7 @@ impl Workspace {
                 h_flex()
                     .id(("tab", i))
                     .group(SharedString::from(format!("tab-{i}")))
-                    .h(rems(1.6))
+                    .min_h(px(sc.tab()))
                     .pl_2p5()
                     .pr_1()
                     .gap_1()
@@ -2306,8 +2305,7 @@ impl Workspace {
                     .child(
                         div()
                             .id(("close", i))
-                            .w(rems(1.0))
-                            .h(rems(1.0))
+                            .size(px(sc.icon() + sc.s4()))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -2337,7 +2335,7 @@ impl Workspace {
         }
         bar.child(
             Button::new("new-tab")
-                .xsmall()
+                .with_size(px(sc.hit()))
                 .ghost()
                 .icon(IconName::Plus)
                 .tooltip("새 탭 (⌘T)")
@@ -2410,9 +2408,10 @@ impl Workspace {
         });
         let pill = |text: String, bg: gpui::Hsla, fg: gpui::Hsla| div().px_2().rounded_full().bg(bg).text_color(fg).child(text);
         let selector = self.render_conn_selector(cx);
+        let sc = self.scale();
         h_flex()
             .px_1()
-            .h(rems(1.6))
+            .min_h(px(sc.status_bar()))
             .gap_3()
             .border_t_1()
             .border_color(theme.border)
@@ -2427,7 +2426,6 @@ impl Workspace {
             .when_some(self.busy.as_ref().map(|b| b.0.clone()), |d, label| {
                 d.child(div().child(format!("{label} 중…"))).child(
                     Button::new("cancel")
-                        .xsmall()
                         .ghost()
                         .label("멈춤 ⌘.")
                         .on_click(cx.listener(|ws, _, _, cx| ws.cancel(cx))),
@@ -2447,6 +2445,9 @@ impl Workspace {
             })
     }
 }
+
+/// 이보다 좁은 사이드바는 접속 줄을 한 줄로 접는다(호스트는 툴팁)
+const NARROW_SIDEBAR: f32 = 220.0;
 
 /// 환경 알약 배지. prod 빨강·stg 호박색 기운, local 은 무채색이다(vm::palette).
 fn env_pill(env: &str, dark: bool) -> impl IntoElement + use<> {
@@ -2517,7 +2518,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &About, w, cx| super::dialogs::open_about(w, cx)))
             .on_action(cx.listener(|_, _: &Minimize, w, _| w.minimize_window()));
         if self.engine.is_none() {
-            let bar = TitleBar::new().child(
+            let bar = TitleBar::new().h(px(self.scale().titlebar())).child(
                 h_flex()
                     .gap_2()
                     .child(super::brand::mark(px(14.), theme.foreground, super::brand::accent()))
@@ -2536,13 +2537,14 @@ impl Render for Workspace {
         let body = self.render_body(cx);
         let status = self.render_status(cx);
         // 제목 줄(Orca): 신호등 자리 뒤에 사이드바 단추·마크, 가운데 탭, 오른쪽 작은 아이콘 단추
-        let titlebar = TitleBar::new().child(
+        let sc = self.scale();
+        let titlebar = TitleBar::new().h(px(sc.titlebar())).child(
             h_flex()
                 .size_full()
                 .gap_1()
                 .child(
                     Button::new("toggle-sidebar")
-                        .xsmall()
+                        .with_size(px(sc.hit()))
                         .ghost()
                         .icon(if self.show_sidebar {
                             IconName::PanelLeftClose
@@ -2776,6 +2778,67 @@ mod tests {
             );
             assert!(ws.read(cx).busy.is_none(), "대시보드 확인은 작업 공간 요청 칸을 쓰지 않는다");
         });
+    }
+
+    fn bounds(cx: &mut VisualTestContext, sel: String) -> Option<gpui::Bounds<gpui::Pixels>> {
+        cx.debug_bounds(Box::leak(sel.into_boxed_str()))
+    }
+
+    /// v1.1.0 사이드바: 두 줄 접속 줄을 28px 로 묶어 둘째 줄이 다음 줄 이름과 겹쳤다.
+    /// 배율마다 줄이 내용(두 줄)을 담고, 줄끼리 겹치지 않고, 눌리기에 충분한지 실제 배치로 본다.
+    #[gpui::test]
+    fn 사이드바_줄은_배율마다_내용을_담고_서로_겹치지_않는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.simulate_resize(gpui::size(px(1600.), px(4000.)));
+        let n_rows = cx.update(|_, cx| ws.read(cx).tree.rows().len());
+        let conn_rows: Vec<usize> = cx.update(|_, cx| {
+            ws.read(cx)
+                .tree
+                .rows()
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| matches!(r.kind, RowKind::Conn(_)))
+                .map(|(i, _)| i)
+                .collect()
+        });
+        assert!(conn_rows.len() >= 3, "시험할 접속 줄이 모자라다");
+        for z in crate::vm::zoom::STEPS {
+            cx.update(|window, cx| ws.update(cx, |w, cx| w.set_zoom(z, window, cx)));
+            draw(cx);
+            let sc = cx.update(|_, cx| ws.read(cx).scale());
+            let mut prev_bottom: Option<gpui::Pixels> = None;
+            for i in 0..n_rows {
+                let row = bounds(cx, format!("conn-row-{i}")).or_else(|| bounds(cx, format!("folder-row-{i}")));
+                let Some(row) = row else { continue };
+                assert!(
+                    f32::from(row.size.height) + 0.5 >= sc.hit(),
+                    "{z}배 {i}번 줄 높이 {:?} < {}",
+                    row.size.height,
+                    sc.hit()
+                );
+                if let Some(pb) = prev_bottom {
+                    assert!(
+                        row.top() >= pb - px(0.5),
+                        "{z}배 {i}번 줄이 앞 줄과 겹친다: {:?} < {:?}",
+                        row.top(),
+                        pb
+                    );
+                }
+                prev_bottom = Some(row.bottom());
+                if conn_rows.contains(&i) {
+                    let l1 = bounds(cx, format!("conn-line1-{i}")).expect("첫 줄");
+                    let l2 = bounds(cx, format!("conn-line2-{i}")).expect("둘째 줄");
+                    assert!(
+                        l1.top() >= row.top() - px(0.5) && l2.bottom() <= row.bottom() + px(0.5),
+                        "{z}배 {i}번 줄 글이 줄 밖으로 나간다: {row:?} {l1:?} {l2:?}"
+                    );
+                    assert!(l1.bottom() <= l2.top() + px(0.5), "{z}배 {i}번 줄 두 줄이 겹친다: {l1:?} {l2:?}");
+                }
+            }
+            assert!(prev_bottom.is_some(), "{z}배: 줄을 하나도 못 쟀다");
+        }
     }
 
     fn redis_project() -> tempfile::TempDir {

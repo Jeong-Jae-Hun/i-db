@@ -2,7 +2,8 @@
 //! 설치된 글꼴을 먼저 쓰고, 고른 글꼴이 없으면 앱에 넣어 둔 D2Coding(SIL OFL 1.1, assets/fonts)을 등록해 쓴다.
 
 pub const DEFAULT_FONT: &str = "D2Coding";
-pub const DEFAULT_SIZE: f32 = 13.0;
+/// 화면 글 기본 크기(vm::layout 눈금의 14). v1.1.0 까지는 13 이었다
+pub const DEFAULT_SIZE: f32 = 14.0;
 const SIZE_RANGE: std::ops::RangeInclusive<f32> = 9.0..=24.0;
 
 /// 앱에 넣어 둔 D2Coding 1.3.2 정식 배포본(고치지 않음)
@@ -76,7 +77,7 @@ mod tests {
         assert_eq!(p.font_size, DEFAULT_SIZE);
         let c = resolve(&p.font, p.font_size, &[]);
         assert_eq!(c.family, "D2Coding");
-        assert_eq!(c.size, 13.0);
+        assert_eq!(c.size, 14.0);
         assert!(c.embed);
     }
 

@@ -184,6 +184,7 @@ impl SourceView {
 impl Render for SourceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let sc = super::kit::scale(&theme);
         let mut list = v_flex().id("source-tree").flex_1().min_h_0().overflow_y_scroll().py_1().gap_px();
         let rows = self.tree.rows();
         if rows.is_empty() {
@@ -199,7 +200,8 @@ impl Render for SourceView {
                     .mx_1()
                     .pl(rems(0.5 + row.depth as f32 * 0.9))
                     .pr_2()
-                    .h(rems(1.75))
+                    .min_h(px(sc.row()))
+                    .py(px(sc.s4()))
                     .gap_1()
                     .rounded(theme.radius)
                     .cursor_pointer()
@@ -236,7 +238,6 @@ impl Render for SourceView {
             for (i, (label, _)) in source::RANGES.iter().enumerate() {
                 ranges = ranges.child(
                     Button::new(("range", i))
-                        .xsmall()
                         .with_variant(if i == self.range {
                             ButtonVariant::Primary
                         } else {
@@ -268,7 +269,6 @@ impl Render for SourceView {
                             .child(div().flex_1().child(format!("{} · 읽기 전용", self.kind)))
                             .child(
                                 Button::new("src-refresh")
-                                    .xsmall()
                                     .ghost()
                                     .icon(IconName::RefreshCw)
                                     .tooltip("다시 읽기")
@@ -289,14 +289,13 @@ impl Render for SourceView {
                         h_flex()
                             .gap_1()
                             .px_2()
-                            .h(rems(2.25))
+                            .min_h(px(sc.hit() + sc.s8()))
                             .border_b_1()
                             .border_color(theme.border)
                             .child(ranges)
                             .child(div().flex_1())
                             .child(
                                 Button::new("src-run")
-                                    .small()
                                     .ghost()
                                     .icon(IconName::Play)
                                     .label("실행")

@@ -124,17 +124,24 @@ impl TableDelegate for GridDelegate {
     fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let ty = self.grid.types.get(col_ix).cloned().unwrap_or_default();
         let editable = self.edits.as_ref().is_some_and(|e| e.editable(col_ix));
+        let sc = super::kit::scale(cx.theme());
         v_flex()
             .size_full()
             .justify_center()
-            .child(div().child(self.grid.cols[col_ix].clone()))
+            .gap(px(sc.line_gap()))
+            .child(super::kit::text(
+                &sc,
+                sc.text(),
+                cx.theme().foreground,
+                self.grid.cols[col_ix].clone(),
+            ))
             .when(!ty.is_empty() || editable, |d| {
-                d.child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(if editable { format!("{ty} ✎") } else { ty }),
-                )
+                d.child(super::kit::text(
+                    &sc,
+                    sc.small(),
+                    cx.theme().muted_foreground,
+                    if editable { format!("{ty} ✎") } else { ty },
+                ))
             })
     }
 
@@ -149,9 +156,14 @@ impl TableDelegate for GridDelegate {
     fn render_td(&mut self, row_ix: usize, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let (text, mark) = self.display(row_ix, col_ix);
         let is_null = text == NULL;
+        let sc = super::kit::scale(cx.theme());
         div()
             .size_full()
             .overflow_hidden()
+            .flex()
+            .items_center()
+            .text_size(px(sc.text()))
+            .line_height(px(sc.line(sc.text())))
             .when(is_null, |d| d.text_color(cx.theme().muted_foreground).italic())
             .when(mark == CellMark::Edited, |d| d.bg(cx.theme().warning.opacity(0.25)))
             .when(mark == CellMark::Deleted, |d| d.bg(cx.theme().danger.opacity(0.2)).line_through())
@@ -552,33 +564,20 @@ impl ResultsView {
                     h_flex()
                         .pt_3()
                         .gap_2()
-                        .child(
-                            Button::new("set-null")
-                                .small()
-                                .ghost()
-                                .label("NULL 로")
-                                .on_click(move |_, window, cx| {
-                                    let _ = this3.update(cx, |v, cx| v.set_cell(src, col, None, &base3, cx));
-                                    window.close_dialog(cx);
-                                }),
-                        )
+                        .child(Button::new("set-null").ghost().label("NULL 로").on_click(move |_, window, cx| {
+                            let _ = this3.update(cx, |v, cx| v.set_cell(src, col, None, &base3, cx));
+                            window.close_dialog(cx);
+                        }))
                         .child(div().flex_1())
                         .child(
                             Button::new("cell-cancel")
-                                .small()
                                 .label("취소")
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
-                        .child(
-                            Button::new("cell-ok")
-                                .small()
-                                .primary()
-                                .label("확인")
-                                .on_click(move |_, window, cx| {
-                                    ok2(cx);
-                                    window.close_dialog(cx);
-                                }),
-                        ),
+                        .child(Button::new("cell-ok").primary().label("확인").on_click(move |_, window, cx| {
+                            ok2(cx);
+                            window.close_dialog(cx);
+                        })),
                 )
                 .on_ok(move |_, _, cx| {
                     ok(cx);
@@ -889,7 +888,6 @@ impl ResultsView {
         };
         let recent = |id: &'static str, input: Entity<InputState>, items: Vec<String>| {
             Button::new(id)
-                .xsmall()
                 .ghost()
                 .icon(gpui_component::IconName::ChevronDown)
                 .tooltip("최근 기록")
@@ -914,14 +912,13 @@ impl ResultsView {
                 .border_b_1()
                 .border_color(theme.border)
                 .child(div().text_xs().text_color(theme.muted_foreground).child("WHERE"))
-                .child(div().flex_1().child(Input::new(&wi).small()))
+                .child(div().flex_1().child(Input::new(&wi)))
                 .child(recent("where-recent", wi.clone(), wh))
                 .child(div().text_xs().text_color(theme.muted_foreground).child("ORDER BY"))
-                .child(div().w(px(220.)).child(Input::new(&oi).small()))
+                .child(div().w(px(220.)).child(Input::new(&oi)))
                 .child(recent("order-recent", oi.clone(), oh))
                 .child(
                     Button::new("table-apply")
-                        .xsmall()
                         .primary()
                         .label("적용 ↵")
                         .on_click(cx.listener(|v, _, w, cx| v.apply_table_query(w, cx))),
@@ -1039,6 +1036,7 @@ fn dirs_home() -> std::path::PathBuf {
 impl Render for ResultsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let grid_sc = super::kit::scale(&theme);
         let (rows, total, editable, has_cols, inserts) = {
             let d = self.table.read(cx).delegate();
             (
@@ -1070,27 +1068,24 @@ impl Render for ResultsView {
             .py_1()
             .border_b_1()
             .border_color(theme.border)
-            .child(div().w(px(220.)).child(Input::new(&self.filter).small().cleanable(true)))
+            .child(div().w(px(220.)).child(Input::new(&self.filter).cleanable(true)))
             .child(div().text_xs().text_color(theme.muted_foreground).px_2().child(info))
             .child(div().flex_1())
             .when(editable, |d| {
                 d.child(
                     Button::new("add-row")
-                        .xsmall()
                         .ghost()
                         .label("행 추가")
                         .on_click(cx.listener(|v, _, _, cx| v.add_row(cx))),
                 )
                 .child(
                     Button::new("del-row")
-                        .xsmall()
                         .ghost()
                         .label("행 삭제")
                         .on_click(cx.listener(|v, _, _, cx| v.toggle_delete(cx))),
                 )
                 .child(
                     Button::new("undo")
-                        .xsmall()
                         .ghost()
                         .label("되돌리기")
                         .on_click(cx.listener(|v, _, w, cx| v.undo(w, cx))),
@@ -1098,14 +1093,12 @@ impl Render for ResultsView {
                 .when(pending > 0, |d| {
                     d.child(
                         Button::new("discard")
-                            .xsmall()
                             .ghost()
                             .label("버리기")
                             .on_click(cx.listener(|v, _, _, cx| v.discard(cx))),
                     )
                     .child(
                         Button::new("apply")
-                            .xsmall()
                             .primary()
                             .label(format!("반영 ({pending})"))
                             .on_click(cx.listener(|v, _, w, cx| v.apply(w, cx))),
@@ -1115,7 +1108,6 @@ impl Render for ResultsView {
             .when(!matches!(self.source, Source::Static), |d| {
                 d.child(
                     Button::new("full-export")
-                        .xsmall()
                         .ghost()
                         .label("전체 내보내기")
                         .tooltip("1,000행 제한 없이 CSV 로 받는다")
@@ -1124,7 +1116,6 @@ impl Render for ResultsView {
             })
             .child(
                 Button::new("decrypt")
-                    .xsmall()
                     .with_variant(if decrypt_on {
                         gpui_component::button::ButtonVariant::Primary
                     } else {
@@ -1136,21 +1127,18 @@ impl Render for ResultsView {
             )
             .child(
                 Button::new("copy")
-                    .xsmall()
                     .ghost()
                     .label("복사")
                     .on_click(cx.listener(|v, _, _, cx| v.copy(cx))),
             )
             .child(
                 Button::new("csv")
-                    .xsmall()
                     .ghost()
                     .label("CSV")
                     .on_click(cx.listener(|v, _, _, cx| v.export(false, cx))),
             )
             .child(
                 Button::new("json")
-                    .xsmall()
                     .ghost()
                     .label("JSON")
                     .on_click(cx.listener(|v, _, _, cx| v.export(true, cx))),
@@ -1158,7 +1146,6 @@ impl Render for ResultsView {
             .when(!matches!(self.source, Source::Static), |d| {
                 d.child(
                     Button::new("reload")
-                        .xsmall()
                         .ghost()
                         .label("다시 읽기")
                         .on_click(cx.listener(|v, _, w, cx| v.reload(w, cx))),
@@ -1178,7 +1165,13 @@ impl Render for ResultsView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(DataTable::new(&self.table).stripe(false))
+                    // 줄·머리 높이를 눈금에서 셈한다(머리는 열 이름 + 타입 두 줄)
+                    .child(
+                        DataTable::new(&self.table)
+                            .stripe(false)
+                            .with_size(px(grid_sc.row()))
+                            .header_row_height(px(grid_sc.row2())),
+                    )
                     .into_any_element()
             } else {
                 div()

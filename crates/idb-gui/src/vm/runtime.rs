@@ -140,6 +140,9 @@ pub struct Prefs {
     pub editor_height: f32,
     /// 테이블 보기 WHERE·ORDER BY 기록. 테이블마다 두고 prod 접속 것은 남기지 않는다(R75.5).
     /// 옛 판의 전역 `where_history`·`order_history` 는 어느 접속 것인지 몰라 읽지 않고 버린다
+    /// 설정 판(옛 기본값을 옮길 때 쓴다)
+    #[serde(default)]
+    pub layout: u32,
     #[serde(default)]
     pub table_history: std::collections::BTreeMap<String, super::history::TableHistory>,
 }
@@ -180,9 +183,12 @@ impl Default for Prefs {
             sidebar_width: default_sidebar_width(),
             editor_height: default_editor_height(),
             table_history: Default::default(),
+            layout: LAYOUT_VERSION,
         }
     }
 }
+
+const LAYOUT_VERSION: u32 = 2;
 
 const MAX_RECENT: usize = 8;
 
@@ -192,10 +198,23 @@ impl Prefs {
     }
 
     pub fn load(path: &Path) -> Prefs {
-        std::fs::read(path)
+        let mut p: Prefs = std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        p.migrate();
+        p
+    }
+
+    /// 옛 판 설정을 맞춘다. 판 2(v1.1.1): 기본 글자 13 이 작다는 지적으로 기본을 14 로 올렸다. 옛 기본값(13) 그대로면 14 로 바꾸고
+    /// 사용자가 고른 다른 값은 그대로 둔다.
+    fn migrate(&mut self) {
+        if self.layout < LAYOUT_VERSION {
+            if self.font_size == 13.0 {
+                self.font_size = super::font::DEFAULT_SIZE;
+            }
+            self.layout = LAYOUT_VERSION;
+        }
     }
 
     /// 같은 폴더 임시 파일에 0600 으로 쓴 뒤 바꿔 끼운다(R75.1 과 같은 방식, 기록에 조건 글이 든다).
@@ -247,7 +266,7 @@ mod tests {
         assert_eq!((p.font.as_str(), p.font_size), ("Menlo", 14.0));
         std::fs::write(&path, r#"{"recent": []}"#).unwrap();
         let p = Prefs::load(&path);
-        assert_eq!((p.font.as_str(), p.font_size), ("D2Coding", 13.0));
+        assert_eq!((p.font.as_str(), p.font_size), ("D2Coding", 14.0));
     }
 
     #[test]
@@ -287,6 +306,19 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("secret"), "{raw}");
+    }
+
+    #[test]
+    fn 옛_기본_글자_13_은_14_로_올리고_고른_값은_둔다() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gui.json");
+        std::fs::write(&path, r#"{"font": "D2Coding", "font_size": 13.0}"#).unwrap();
+        assert_eq!(Prefs::load(&path).font_size, 14.0);
+        std::fs::write(&path, r#"{"font_size": 16.0}"#).unwrap();
+        assert_eq!(Prefs::load(&path).font_size, 16.0);
+        // 판 2 로 저장한 뒤 사용자가 다시 13 을 고르면 지킨다
+        std::fs::write(&path, r#"{"font_size": 13.0, "layout": 2}"#).unwrap();
+        assert_eq!(Prefs::load(&path).font_size, 13.0);
     }
 
     #[test]

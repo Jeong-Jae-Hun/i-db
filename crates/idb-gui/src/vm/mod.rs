@@ -10,6 +10,7 @@ pub mod font;
 pub mod grid;
 pub mod history;
 pub mod keymap;
+pub mod layout;
 pub mod palette;
 pub mod picker;
 pub mod queries;

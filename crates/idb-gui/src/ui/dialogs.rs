@@ -6,7 +6,7 @@ use std::rc::Rc;
 use gpui::{AppContext as _, Context, ParentElement as _, Styled as _, Window, div, px};
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 
 use super::workspace::Workspace;
 use crate::vm::keymap::{MenuName, display_key, entries_in};
@@ -28,7 +28,6 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
             let cell = theme.clone();
             themes = themes.child(
                 Button::new(("theme", i))
-                    .small()
                     .with_variant(if theme.get() == choice {
                         ButtonVariant::Primary
                     } else {
@@ -50,10 +49,10 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
         dialog
             .title("설정")
             .w(px(560.))
-            .child(row("글꼴").child(div().flex_1().child(Input::new(&font_i).small())))
-            .child(row("글자 크기(px)").child(div().w(px(100.)).child(Input::new(&size_i).small())))
+            .child(row("글꼴").child(div().flex_1().child(Input::new(&font_i))))
+            .child(row("글자 크기(px)").child(div().w(px(100.)).child(Input::new(&size_i))))
             .child(row("테마").child(themes))
-            .child(row("테이블 한 쪽 행 수").child(div().w(px(100.)).child(Input::new(&rows_i).small())))
+            .child(row("테이블 한 쪽 행 수").child(div().w(px(100.)).child(Input::new(&rows_i))))
             .child(div().pt_3().pb_1().text_color(t.muted_foreground).child("안전 규칙 (바꿀 수 없음)"))
             .child(rules)
             .child(
@@ -63,29 +62,22 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
                     .child(div().flex_1())
                     .child(
                         Button::new("settings-cancel")
-                            .small()
                             .label("취소")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
-                    .child(
-                        Button::new("settings-ok")
-                            .small()
-                            .primary()
-                            .label("저장")
-                            .on_click(move |_, window, cx| {
-                                let mut next = base.clone();
-                                next.font = font.read(cx).value().trim().to_string();
-                                if let Ok(v) = size.read(cx).value().trim().parse::<f32>() {
-                                    next.font_size = crate::vm::font::resolve(&next.font, v, &[]).size;
-                                }
-                                if let Some(n) = parse_row_limit(&rows.read(cx).value()) {
-                                    next.row_limit = n;
-                                }
-                                next.theme = theme.get();
-                                let _ = this.update(cx, |ws, cx| ws.apply_settings(next, window, cx));
-                                window.close_dialog(cx);
-                            }),
-                    ),
+                    .child(Button::new("settings-ok").primary().label("저장").on_click(move |_, window, cx| {
+                        let mut next = base.clone();
+                        next.font = font.read(cx).value().trim().to_string();
+                        if let Ok(v) = size.read(cx).value().trim().parse::<f32>() {
+                            next.font_size = crate::vm::font::resolve(&next.font, v, &[]).size;
+                        }
+                        if let Some(n) = parse_row_limit(&rows.read(cx).value()) {
+                            next.row_limit = n;
+                        }
+                        next.theme = theme.get();
+                        let _ = this.update(cx, |ws, cx| ws.apply_settings(next, window, cx));
+                        window.close_dialog(cx);
+                    })),
             )
     });
 }
