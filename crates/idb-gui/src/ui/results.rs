@@ -353,21 +353,50 @@ impl ResultsView {
             }
             let (this2, input2, base2) = (this.clone(), input.clone(), base.clone());
             let (this3, base3) = (this.clone(), base.clone());
+            // 확인 버튼과 Enter(on_ok)가 같은 일을 한다. 기본 Dialog 는 버튼을 그리지 않는다
+            let ok = Rc::new(move |cx: &mut App| {
+                let v = input2.read(cx).value().to_string();
+                let _ = this2.update(cx, |view, cx| view.set_cell(src, col, Some(v), &base2, cx));
+            });
+            let ok2 = ok.clone();
             dialog
                 .title(format!("{col_name} 고치기"))
                 .w(px(520.))
                 .child(Input::new(&input))
                 .child(
                     h_flex()
-                        .pt_2()
-                        .child(Button::new("set-null").small().label("NULL 로").on_click(move |_, window, cx| {
-                            let _ = this3.update(cx, |v, cx| v.set_cell(src, col, None, &base3, cx));
-                            window.close_dialog(cx);
-                        })),
+                        .pt_3()
+                        .gap_2()
+                        .child(
+                            Button::new("set-null")
+                                .small()
+                                .ghost()
+                                .label("NULL 로")
+                                .on_click(move |_, window, cx| {
+                                    let _ = this3.update(cx, |v, cx| v.set_cell(src, col, None, &base3, cx));
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("cell-cancel")
+                                .small()
+                                .label("취소")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("cell-ok")
+                                .small()
+                                .primary()
+                                .label("확인")
+                                .on_click(move |_, window, cx| {
+                                    ok2(cx);
+                                    window.close_dialog(cx);
+                                }),
+                        ),
                 )
                 .on_ok(move |_, _, cx| {
-                    let v = input2.read(cx).value().to_string();
-                    let _ = this2.update(cx, |view, cx| view.set_cell(src, col, Some(v), &base2, cx));
+                    ok(cx);
                     true
                 })
         });

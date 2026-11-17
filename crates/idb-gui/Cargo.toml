@@ -28,3 +28,7 @@ anyhow = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# 화면 시험: GPU 없는 시험 창에 그려 그리기·흐름이 넘어지지 않는지 본다
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }

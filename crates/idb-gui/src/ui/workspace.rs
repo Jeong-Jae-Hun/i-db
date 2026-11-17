@@ -540,12 +540,39 @@ impl Workspace {
                 );
             }
             let (this, inputs, conn, sql) = (this.clone(), inputs.clone(), conn.clone(), sql.clone());
-            d.on_ok(move |_, window, cx| {
+            // 실행 버튼과 Enter(on_ok)가 같은 일을 한다. 기본 Dialog 는 버튼을 그리지 않는다
+            let ok = Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
                 let vals: BTreeMap<String, String> = inputs.iter().map(|(n, i)| (n.clone(), i.read(cx).value().to_string())).collect();
                 let _ = this.update(cx, |ws, cx| {
                     ws.params.extend(vals.clone());
                     ws.run_sql(conn.clone(), sql.clone(), vals.clone(), explain, window, cx)
                 });
+            });
+            let ok2 = ok.clone();
+            d.child(
+                h_flex()
+                    .pt_3()
+                    .gap_2()
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("params-cancel")
+                            .small()
+                            .label("취소")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("params-ok")
+                            .small()
+                            .primary()
+                            .label("실행")
+                            .on_click(move |_, window, cx| {
+                                ok2(window, cx);
+                                window.close_dialog(cx);
+                            }),
+                    ),
+            )
+            .on_ok(move |_, window, cx| {
+                ok(window, cx);
                 true
             })
         });
@@ -1371,5 +1398,99 @@ impl Render for Workspace {
                 )
                 .child(status),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext, size};
+    use gpui_component::Root;
+
+    fn setup(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+        cx.update(gpui_component::init);
+        // 엔진 요청은 tokio 스레드에서 끝나므로 시험 실행기가 기다릴 수 있게 한다
+        cx.executor().allow_parking();
+        let rt = Rc::new(Runtime::new().unwrap());
+        let mut ws = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| Workspace::new(rt, window, cx));
+            ws = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        draw(cx);
+        (ws.unwrap(), cx)
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// tokio 쪽 요청이 끝날 때까지 돌린다.
+    fn wait(cx: &mut VisualTestContext, ws: &Entity<Workspace>, done: impl Fn(&Workspace) -> bool) {
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if cx.update(|_, cx| done(ws.read(cx))) {
+                draw(cx);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("시간 안에 끝나지 않았다: {:?}", cx.update(|_, cx| ws.read(cx).status.clone()));
+    }
+
+    fn offline_project() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/offline")
+    }
+
+    #[gpui::test]
+    fn 고르는_화면을_그리고_로컬_프로젝트를_열면_트리와_탭이_생긴다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(!w.tree.conns.is_empty());
+            assert_eq!(w.tabs.tabs.len(), 1);
+            assert!(matches!(w.bodies.get(&w.tabs.tabs[0].id), Some(Body::Sql { .. })));
+        });
+    }
+
+    #[gpui::test]
+    fn 결과와_편집_표시를_그린다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let rs: ResultSet = serde_json::from_value(serde_json::json!({
+            "cols": ["id", "name"], "types": ["int8", "text"],
+            "rows": [["1", "kim"], ["2", "NULL"]], "text": "", "truncated": false, "elapsed_ms": 3,
+            "origin": {"table": {"schema": "public", "table": "users"}, "pk": ["id"], "cols": ["id", "name"]}
+        }))
+        .unwrap();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                let id = w.tabs.tabs[0].id;
+                w.show_result(id, "x".into(), Source::Query { sql: "select 1".into() }, rs, false, window, cx);
+            })
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(matches!(w.bodies.get(&w.tabs.tabs[0].id), Some(Body::Sql { result: Some(_), .. })));
+        });
+    }
+
+    #[gpui::test]
+    fn 없는_폴더는_오류를_상태_줄에_남기고_고르는_화면에_머문다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local("/nonexistent/i-db".into()), window, cx)));
+        wait(cx, &ws, |w| !w.connecting);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(w.engine.is_none());
+            assert!(w.status.1, "{:?}", w.status);
+        });
     }
 }
