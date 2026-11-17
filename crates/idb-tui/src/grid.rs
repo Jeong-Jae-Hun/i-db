@@ -87,6 +87,8 @@ pub struct Grid {
     pub scroll: usize,
     /// 결과가 이미 서버에서 정렬·거른 것이라 받은 행에서 다시 하지 않는다(테이블 보기)
     pub server: bool,
+    json: Option<crate::jsontree::JsonTree>,
+    json_raw: bool,
     h: usize,
     /// 원래 PK 열 자리(origin.pk 순서). 결과에 PK 가 모두 없으면 None
     pk_cols: Option<Vec<usize>>,
@@ -230,6 +232,8 @@ impl Grid {
             anchor: (0, 0),
             scroll: 0,
             server: false,
+            json: None,
+            json_raw: false,
             h: 10,
             pk_cols: None,
         };
@@ -539,6 +543,20 @@ impl Grid {
             return Some("편집할 수 없음: 삭제 표시한 행 (u 로 되돌리기)");
         }
         None
+    }
+
+    /// 칸 값 보기를 연다. JSON 이면 나무로 연다(R32.1).
+    pub fn open_value(&mut self) {
+        self.screen = Screen::Value;
+        self.scroll = 0;
+        self.json_raw = false;
+        let v = self.cur_value().unwrap_or_default();
+        self.json = crate::jsontree::JsonTree::parse(&v, self.kind(self.col) == Kind::Json);
+    }
+
+    /// 값 보기가 JSON 나무인지·JSON 원문인지다(키 안내).
+    pub fn value_mode(&self) -> (bool, bool) {
+        (self.json.is_some() && !self.json_raw, self.json.is_some())
     }
 
     pub fn editable(&self) -> bool {
@@ -1116,11 +1134,31 @@ impl Grid {
                 return Act::None;
             }
             Screen::Value => {
+                // JSON 나무(R32): Enter·space 접기, y 값, Y 경로, t 원문
+                if let (Some(t), false) = (&mut self.json, self.json_raw) {
+                    match k {
+                        "esc" | "o" | "q" => self.screen = Screen::Table,
+                        "down" | "j" => t.move_by(1),
+                        "up" | "k" => t.move_by(-1),
+                        "enter" | "space" => t.toggle(),
+                        "t" => self.json_raw = true,
+                        "y" => {
+                            return Act::Copy(
+                                t.current().map(|n| crate::jsontree::copy_value(&n.value)).unwrap_or_default(),
+                                "값".into(),
+                            );
+                        }
+                        "Y" => return Act::Copy(t.current().map(|n| n.path.clone()).unwrap_or_default(), "경로".into()),
+                        _ => {}
+                    }
+                    return Act::None;
+                }
                 match k {
                     "esc" | "o" | "q" | "enter" => {
                         self.screen = Screen::Table;
                         self.scroll = 0;
                     }
+                    "t" if self.json.is_some() => self.json_raw = false,
                     "down" | "j" => self.scroll += 1,
                     "up" | "k" => self.scroll = self.scroll.saturating_sub(1),
                     "y" => return Act::Copy(self.cur_value().unwrap_or_default(), "칸".into()),
@@ -1180,7 +1218,7 @@ impl Grid {
                 self.scroll = self.col;
             }
             "o" if self.cur_index().is_some() => {
-                self.screen = Screen::Value;
+                self.open_value();
                 self.scroll = 0;
             }
             "enter" | "f2" => {
@@ -1190,12 +1228,12 @@ impl Grid {
                 if (k == "enter" && self.cell_block().is_some()) || (k == "f2" && self.cell_block().is_some()) {
                     if k == "f2" || self.edit_block().is_some() {
                         if self.edit_block().is_some() && k == "enter" && self.cur_index().is_some() {
-                            self.screen = Screen::Value;
+                            self.open_value();
                             return Act::None;
                         }
                         return Act::Status(self.cell_block().unwrap_or("").into());
                     }
-                    self.screen = Screen::Value;
+                    self.open_value();
                     return Act::None;
                 }
                 if self.col_type(self.col).bytes().all(|b| b.is_ascii_digit()) && !self.col_type(self.col).is_empty() {
@@ -1419,7 +1457,25 @@ impl Grid {
         }
     }
 
-    fn render_value(&self, area: Rect, buf: &mut Buffer) {
+    fn render_value(&mut self, area: Rect, buf: &mut Buffer) {
+        if let (Some(t), false) = (&mut self.json, self.json_raw) {
+            let h = area.height as usize;
+            if t.sel < t.top {
+                t.top = t.sel;
+            }
+            if t.sel >= t.top + h {
+                t.top = t.sel + 1 - h;
+            }
+            for (y, l) in t.lines().iter().enumerate().skip(t.top).take(h) {
+                let st = if y == t.sel {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new().fg(theme::TEXT)
+                };
+                buf.set_stringn(area.x, area.y + (y - t.top) as u16, printable(l, false), area.width as usize, st);
+            }
+            return;
+        }
         let v = self.cur_value().unwrap_or_default();
         let pretty = if self.kind(self.col) == Kind::Json || v.starts_with(['{', '[']) {
             serde_json::from_str::<serde_json::Value>(&v)

@@ -630,8 +630,11 @@ impl App {
             Screen::Select => return s(help::SELECT_HINTS),
             Screen::Record => return s(help::RECORD_HINTS),
             Screen::Value => {
-                let json = g.kind(g.col) == crate::grid::Kind::Json;
-                return s(if json { help::VALUE_JSON_HINTS } else { help::VALUE_HINTS });
+                return match g.value_mode() {
+                    (true, _) => s(&["Enter 접기·펴기", "y 값 복사", "Y 경로 복사", "t 원문", "esc 닫기"]),
+                    (false, true) => s(help::VALUE_JSON_HINTS),
+                    _ => s(help::VALUE_HINTS),
+                };
             }
             Screen::Table => {}
         }

@@ -12,6 +12,7 @@ pub mod grid;
 pub mod help;
 mod history;
 pub mod input;
+mod jsontree;
 pub mod keys;
 mod ops;
 mod render;

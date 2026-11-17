@@ -1160,6 +1160,14 @@ impl App {
         let want: &[&str] = match self.focus {
             Focus::Tree => &["트리"],
             Focus::Result if self.cur().redis.is_some() => &["Redis 값 편집", "결과"],
+            Focus::Result
+                if self
+                    .cur()
+                    .shown()
+                    .is_some_and(|g| g.value_mode().1 && g.screen == crate::grid::Screen::Value) =>
+            {
+                &["JSON 값 보기 (o)", "결과"]
+            }
             Focus::Result => &["결과"],
             _ => return,
         };

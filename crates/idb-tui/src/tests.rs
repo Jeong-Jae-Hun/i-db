@@ -618,3 +618,26 @@ fn 복사_꼴_고르기는_대상과_꼴을_고르고_마지막_꼴을_기억한
         "INSERT INTO \"public\".\"t\" (\"id\", \"name\") VALUES ('1', 'a|b'), ('2', 'c');"
     );
 }
+
+#[test]
+fn JSON_칸_값은_나무로_보이고_경로를_복사한다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select doc from t");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let mut r = rs(&["doc"], &[&[r#"{"items":[{"name":"x"}]}"#]]);
+    r["types"] = json!(["jsonb"]);
+    a.on_done(id, Ok(r));
+    a.set_focus(Focus::Result);
+    a.on_key("o");
+    let s = screen(&mut a);
+    assert!(s.contains("▾ $: {1}") && s.contains("▾ items: [1]"), "{s}");
+    assert!(s.lines().last().unwrap().contains("Enter 접기·펴기 · y 값 복사 · Y 경로 복사"));
+    keys(&mut a, &["j", "j", "j", "Y"]);
+    assert_eq!(a.clips.pop().unwrap(), "$.items[0].name");
+    a.on_key("t");
+    assert!(screen(&mut a).contains("\"items\": ["), "t 는 원문");
+}
