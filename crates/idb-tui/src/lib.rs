@@ -20,6 +20,7 @@ pub mod input;
 mod jsontree;
 pub mod keys;
 mod ops;
+mod plan;
 mod render;
 mod sources;
 mod state;

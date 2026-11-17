@@ -1398,3 +1398,31 @@ fn 접속_창은_URL_로_채우고_시험한_뒤_저장하고_목록을_다시_�
     let f = a.conn_form.as_ref().unwrap();
     assert!(!f.ask_save && f.msg.starts_with("원격 serve"));
 }
+
+#[test]
+fn Ctrl_E_는_JSON_계획을_나무로_보이고_t_는_원문_esc_는_닫기다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select * from orders");
+    a.on_key("ctrl+e");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        (req["op"].as_str(), req["format"].as_str(), req["analyze"].as_bool()),
+        (Some("explain"), Some("JSON"), Some(false))
+    );
+    let plan = r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"orders","Alias":"orders","Total Cost":12.5,"Plan Rows":100}}]"#;
+    a.on_done(id, Ok(rs(&["QUERY PLAN"], &[&[plan]])));
+    a.set_focus(Focus::Result);
+    let s = screen(&mut a);
+    assert!(
+        s.contains("100% Seq Scan on orders") && s.contains("Enter 접기·펴기 · t JSON · esc 닫기"),
+        "{s}"
+    );
+    a.on_key("t");
+    assert!(screen(&mut a).contains("\"Node Type\": \"Seq Scan\""));
+    a.on_key("esc");
+    assert!(a.cur().plan.is_none());
+    assert!(screen(&mut a).contains("QUERY PLAN"));
+}

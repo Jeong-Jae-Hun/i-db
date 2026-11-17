@@ -308,6 +308,8 @@ pub struct Tab {
     pub text_top: usize,
     /// 기록 사본 탭(R11.4): 읽기 전용, r 로 다시 실행
     pub snapshot: bool,
+    /// 실행 계획 나무(R22.2). 있으면 결과 영역이 나무다(esc 로 닫으면 표)
+    pub plan: Option<crate::plan::PlanView>,
     /// 서버로 다시 읽을 원래 문장(R14.5). 없으면 base_why 가 까닭이다
     pub base: Option<String>,
     pub base_why: &'static str,
@@ -346,6 +348,7 @@ impl Tab {
             sub: None,
             text_top: 0,
             snapshot: false,
+            plan: None,
             base: None,
             base_why: "편집기 실행 결과가 아님",
             since: 0,

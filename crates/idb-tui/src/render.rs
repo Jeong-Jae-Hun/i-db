@@ -476,6 +476,33 @@ impl App {
         let body = Rect::new(r.x, y, r.width, r.height.saturating_sub(lines.len() as u16));
         let focused = self.focus == Focus::Result;
         let t = &mut self.tabs[self.tab];
+        if let Some(p) = &mut t.plan {
+            let h = body.height as usize;
+            if p.show_raw {
+                for (i, l) in crate::grid::wrap(&p.raw, w).iter().take(h).enumerate() {
+                    buf.set_stringn(body.x, body.y + i as u16, l, w, Style::new().fg(theme::TEXT));
+                }
+                return;
+            }
+            if p.sel < p.top {
+                p.top = p.sel;
+            }
+            if p.sel >= p.top + h {
+                p.top = p.sel + 1 - h;
+            }
+            for (i, (l, hot)) in p.lines().iter().enumerate().skip(p.top).take(h) {
+                let mut st = match hot {
+                    2 => theme::err(),
+                    1 => Style::new().fg(theme::STG),
+                    _ => Style::new().fg(theme::TEXT),
+                };
+                if i == p.sel && focused {
+                    st = st.add_modifier(Modifier::REVERSED);
+                }
+                buf.set_stringn(body.x, body.y + (i - p.top) as u16, printable(l, false), w, st);
+            }
+            return;
+        }
         if !t.err.is_empty() {
             for (i, l) in crate::grid::wrap(&t.err, w).iter().take(body.height as usize).enumerate() {
                 buf.set_stringn(body.x, body.y + i as u16, l, w, theme::err());
@@ -724,6 +751,9 @@ impl App {
             && v.typing.is_some()
         {
             return s(help::WHERE_HINTS);
+        }
+        if t.plan.is_some() {
+            return s(&["Enter 접기·펴기", "t JSON", "esc 닫기", "? 키"]);
         }
         let Some(g) = t.shown() else {
             if !t.text.is_empty() {

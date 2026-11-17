@@ -1122,6 +1122,17 @@ impl App {
                 return;
             }
         }
+        if let Some(p) = &mut self.tabs[ti].plan {
+            match k {
+                "esc" => self.tabs[ti].plan = None,
+                "?" => self.open_keys(),
+                "q" => self.request_quit(),
+                _ => {
+                    p.key(k);
+                }
+            }
+            return;
+        }
         // 기록 사본 탭의 r 은 그 SQL 을 기록의 접속에서 다시 실행한다(R11.4)
         if self.tabs[ti].snapshot && k == "r" && self.tabs[ti].shown().is_none_or(|g| g.screen == Screen::Table) {
             if self.tabs[ti].conn.is_none() {
@@ -1855,11 +1866,12 @@ impl App {
                 confirm_analyze: s.confirm_analyze,
             };
             match s.explain {
+                // 나무로 그리려 JSON 으로 받는다(R9.1). TEXT 를 다시 받으면 ANALYZE 가 한 번 더 돌아 t 는 JSON 원문이다
                 Some(analyze) => Request::Explain {
                     run,
                     analyze,
                     buffers: analyze,
-                    format: String::new(),
+                    format: "JSON".into(),
                 },
                 None => Request::Run(run),
             }
@@ -2017,6 +2029,14 @@ impl App {
             }
         }
         let mut summary = summary_of(&last);
+        t.plan = if s.explain.is_some() && last.rows.len() == 1 && last.cols.len() == 1 {
+            crate::plan::PlanView::parse(&last.rows[0][0])
+        } else {
+            None
+        };
+        if let Some(p) = &t.plan {
+            summary = format!("{} · {}", p.summary, crate::actions::fmt_dur(last.elapsed_ms));
+        }
         match (&s.again, t.grid.as_mut()) {
             (Some(Again::More), Some(g)) => {
                 g.extend(last.rows.clone(), last.truncated);
