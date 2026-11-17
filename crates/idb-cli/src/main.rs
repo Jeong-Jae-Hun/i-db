@@ -4,6 +4,7 @@ mod cli;
 mod command;
 mod goflag;
 mod output;
+mod source_cmd;
 mod usage_text;
 
 use std::io::{IsTerminal, Write};

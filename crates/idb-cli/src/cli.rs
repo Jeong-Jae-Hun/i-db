@@ -456,7 +456,7 @@ pub fn run_cli(args: &[String], stdin: Option<Box<dyn Read + Send>>, stdout: &mu
     if o.cmd == "conns" {
         return output::write_results(stdout, stderr, &o, vec![conns_result(&proj, &o)]);
     }
-    if matches!(o.cmd.as_str(), "status" | "flows" | "board") || source && o.cmd != "user360" {
+    if matches!(o.cmd.as_str(), "status" | "flows" | "board") {
         stderr.push_str(&format!("db {cmd}: not yet ported to db-rs\n"));
         return EXIT_ERR;
     }

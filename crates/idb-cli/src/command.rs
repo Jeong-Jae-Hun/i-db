@@ -34,7 +34,7 @@ const CLI_WRITE_VERBS: &[&str] = &[
     "insert", "update", "delete", "merge", "create", "alter", "drop", "truncate", "comment", "grant", "revoke", "refresh", "vacuum",
     "analyze", "reindex", "cluster", "select", "with",
 ];
-const MSG_UNSUPPORTED: &str = "이 접속 종류에서는 안 됨";
+pub(crate) const MSG_UNSUPPORTED: &str = "이 접속 종류에서는 안 됨";
 /// 접속 풀이 4 연결이라 하나는 다른 조회에 남긴다
 const LINKED_WORKERS: usize = 3;
 /// 같은 그룹 접속이 여럿이어도 한 번에 찾는 접속 수다. 접속마다 LINKED_WORKERS 개씩 세므로 동시 쿼리는 최대 6개다
@@ -73,11 +73,11 @@ impl From<Error> for CmdError {
     }
 }
 
-fn usage(s: impl Into<String>) -> CmdError {
+pub(crate) fn usage(s: impl Into<String>) -> CmdError {
     CmdError::Usage(s.into())
 }
 
-fn refused(s: impl Into<String>) -> CmdError {
+pub(crate) fn refused(s: impl Into<String>) -> CmdError {
     CmdError::Refused(s.into())
 }
 
@@ -115,6 +115,12 @@ impl Env<'_> {
 pub async fn run_command(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>, stderr: &mut String) -> Result<Vec<CliResult>, CmdError> {
     let o = env.o;
     let proj = env.proj;
+    // 저장소 접속은 그 질의로 보낸다(--force 는 비싼 질의 허용이라 --write 없이 받는다)
+    if let Some(kind) = proj.conn_by_name(&o.conn).and_then(|c| c.kind).filter(|k| k.is_source())
+        && o.cmd != "user360"
+    {
+        return crate::source_cmd::run_source_command(env, kind, stdin).await;
+    }
     // --force 는 PostgreSQL·Redis 에서는 --write 와 함께만 쓴다(R58.1)
     if o.force && !o.write {
         return Err(usage("--force 는 --write 와 함께 씀"));
@@ -220,7 +226,7 @@ fn names_result(col: &str, names: Vec<String>) -> QueryResult {
 }
 
 /// -c(또는 --to) 이름의 접속을 찾고 prod 허용을 확인한다. 접속을 열기 전에 거절해야 prod 에 연결 자체를 하지 않는다.
-fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind) -> Result<&'a Conn, CmdError> {
+pub(crate) fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind) -> Result<&'a Conn, CmdError> {
     if name.is_empty() {
         return Err(usage(format!("{flag} <접속 이름> 이 필요함 (db conns)")));
     }
@@ -241,7 +247,7 @@ fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind
 
 /// 위치 인자, -f 파일, 표준 입력 순으로 SQL·명령 글을 읽는다.
 /// 표준 입력은 닫히지 않는 파이프에서도 --timeout 에 끝나게 따로 읽고, CLI_MAX_STDIN 을 넘으면 오류다.
-async fn read_input(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<String, CmdError> {
+pub(crate) async fn read_input(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<String, CmdError> {
     let o = env.o;
     let text = if !o.args.is_empty() {
         o.args.join(" ")
