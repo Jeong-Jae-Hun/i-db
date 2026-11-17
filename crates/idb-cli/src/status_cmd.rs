@@ -6,15 +6,14 @@ use std::time::Instant;
 use idb_core::gojson;
 use idb_core::project::{Conn, Kind, Project, folder_of, group_of};
 use idb_core::result::QueryResult;
-use idb_sources::health::{self, Health, PROBE_OPEN_TIMEOUT, PROBE_TIMEOUT, failed};
-use idb_sources::{Clients, join_indexed, source};
+use idb_sources::health::{self, Health, failed};
+use idb_sources::join_indexed;
 
 use crate::cli::{EXIT_ERR, EXIT_OK, EXIT_USAGE};
 use crate::command::Env;
 use crate::output::{self, CliResult};
 
-/// CLI 가 확인하지 않은 prod 접속(R64.3)이다
-pub const DASH_PROD_HINT: &str = "--prod 로 확인";
+pub use idb_engine::flows::DASH_PROD_HINT;
 
 // ─── 트리 순서 (R66.1) ───
 
@@ -72,32 +71,6 @@ pub fn conn_order(conns: &[Conn]) -> Vec<usize> {
 }
 
 // ─── 확인 ───
-
-/// 접속 하나를 확인한다(Go probeAny). PostgreSQL·Redis 는 접속 풀로, 저장소는 Backend 의 probe 로 본다.
-pub async fn probe_conn(clients: &Clients, c: &Conn) -> Health {
-    match c.kind {
-        Some(Kind::Pg) => return health::probe_pg(clients, c).await,
-        Some(Kind::Redis) => return health::probe_redis(clients, c).await,
-        _ => {}
-    }
-    let start = Instant::now();
-    let b = match tokio::time::timeout(PROBE_OPEN_TIMEOUT, source::open(c)).await {
-        Ok(Ok(b)) => b,
-        Ok(Err(e)) => return failed(start.elapsed(), &e.to_string(), &c.password),
-        Err(_) => return failed(start.elapsed(), "context deadline exceeded", &c.password),
-    };
-    let Some(p) = b.probe() else {
-        return Health {
-            err: "이 종류는 확인을 지원하지 않음".into(),
-            ..Default::default()
-        };
-    };
-    let start = Instant::now();
-    match tokio::time::timeout(PROBE_TIMEOUT, p).await {
-        Ok(h) => h,
-        Err(_) => failed(start.elapsed(), "context deadline exceeded", &c.password),
-    }
-}
 
 /// status 의 접속 한 줄이다. ok 가 None 이면 확인하지 않은 prod 접속이다(--prod 없음).
 struct Row {
@@ -162,7 +135,7 @@ pub async fn run_status(env: &Env<'_>, stdout: &mut String, stderr: &mut String)
         // 접속마다 전체 시간(--timeout)을 따로 건다. 끝난 접속의 결과는 다른 접속이 늦어도 남는다
         jobs.push((r, async move {
             let start = Instant::now();
-            tokio::time::timeout_at(deadline, probe_conn(&clients, &c))
+            tokio::time::timeout_at(deadline, health::probe_any(&clients, &c))
                 .await
                 .unwrap_or_else(|_| failed(start.elapsed(), "context deadline exceeded", &c.password))
         }));

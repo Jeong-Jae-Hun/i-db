@@ -3,6 +3,8 @@
 //! ssh 너머 `db serve` 에 있든(Remote) 같은 요청·응답 모양으로 돈다. Local 도 요청을 JSON 값으로 거쳐
 //! 두 길의 뜻이 갈리지 않게 한다. 안전장치와 가리기는 늘 접속이 있는 쪽(serve)이 정한다.
 
+pub mod board;
+pub mod flows;
 pub mod local;
 pub mod lookup;
 pub mod protocol;
@@ -406,5 +408,43 @@ impl Engine {
             confirm_prod,
         })
         .await
+    }
+
+    // ─── 저장소·대시보드 ───
+
+    pub async fn source_children(&self, conn: &str, path: &str) -> Result<Vec<Node>, EngineError> {
+        self.typed(Request::SourceChildren {
+            conn: conn.into(),
+            path: path.into(),
+        })
+        .await
+    }
+
+    pub async fn source_open(&self, conn: &str, path: &str) -> Result<ResultSet, EngineError> {
+        self.typed(Request::SourceOpen {
+            conn: conn.into(),
+            path: path.into(),
+        })
+        .await
+    }
+
+    pub async fn source_run(&self, req: SourceRunRequest) -> Result<ResultSet, EngineError> {
+        self.typed(Request::SourceRun(req)).await
+    }
+
+    pub async fn health(&self, conn: &str) -> Result<HealthInfo, EngineError> {
+        self.typed(Request::Health { conn: conn.into() }).await
+    }
+
+    pub async fn flows(&self, names: Vec<String>, prod: bool) -> Result<Vec<FlowResult>, EngineError> {
+        self.typed(Request::Flows { names, prod }).await
+    }
+
+    pub async fn board_list(&self) -> Result<Vec<BoardSummary>, EngineError> {
+        self.typed(Request::BoardList).await
+    }
+
+    pub async fn board_run(&self, name: &str, prod: bool) -> Result<BoardResult, EngineError> {
+        self.typed(Request::BoardRun { name: name.into(), prod }).await
     }
 }

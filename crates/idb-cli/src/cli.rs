@@ -12,7 +12,7 @@ use crate::command::{self, Env};
 use crate::goflag::{FlagDef, FlagSet, FlagType, ParseError, Parsed};
 use crate::output::{self, CliResult};
 use crate::usage_text::{CONN_USAGE, HISTORY_USAGE, UPDATE_USAGE};
-use idb_core::gostrconv::{duration_string, parse_duration};
+use idb_core::gostrconv::{duration_string, parse_day_duration};
 use idb_core::textutil::printable;
 use idb_engine::{CliInput, CliRequest, CliResponse, Engine, EngineError, RemoteEngine, RemoteSpec};
 use idb_sources::Clients;
@@ -25,7 +25,6 @@ pub const EXIT_REFUSED: i32 = 3;
 
 const CLI_DEFAULT_ROWS: i64 = 200;
 const CLI_MAX_ROWS: i64 = 10000;
-const MAX_FLAG_DAYS: i64 = 3650;
 /// 저장소 질의의 기본 한도다(R62.2). --max-rows 를 주면 그 값이다
 const SOURCE_DEFAULT_ROWS: i64 = 1000;
 pub(crate) const PROJECT_USAGE: &str = "DataGrip project directory (.idea 가 있는 폴더). 기본값은 $DBTUI_PROJECT, 없으면 현재 폴더";
@@ -214,20 +213,6 @@ fn check_value(name: &str, v: &str) -> Result<(), String> {
         },
         "since" | "until" => parse_day_duration(v).map(|_| ()),
         _ => Ok(()),
-    }
-}
-
-/// --since·--until 값이다. Go 기간 꼴(1h·15m)에 더해 날짜(7d)를 받는다. 날짜는 10년까지다.
-pub(crate) fn parse_day_duration(s: &str) -> Result<i64, String> {
-    if let Some(n) = s.strip_suffix('d') {
-        return match project::go_atoi(n) {
-            Some(days) if (0..=MAX_FLAG_DAYS).contains(&days) => Ok(days * 24 * 3600 * 1_000_000_000),
-            _ => Err(format!("invalid duration {} (days 0..{MAX_FLAG_DAYS})", go_quote(s))),
-        };
-    }
-    match parse_duration(s) {
-        Some(ns) if ns >= 0 => Ok(ns),
-        _ => Err(format!("invalid duration {}", go_quote(s))),
     }
 }
 
@@ -517,7 +502,7 @@ fn run_remote(
     };
     let timeout = Duration::from_nanos(o.timeout_ns as u64);
     let res = rt.block_on(async {
-        let input = if matches!(cmd, "query" | "explain" | "redis") && o.args.is_empty() {
+        let input = if matches!(cmd, "query" | "explain" | "redis" | "logs" | "metrics") && o.args.is_empty() {
             Some(match command::fetch_input(&o, stdin, Instant::now() + timeout).await {
                 Ok(t) => CliInput::Text(t),
                 Err(e) => CliInput::Error(e.to_string()),

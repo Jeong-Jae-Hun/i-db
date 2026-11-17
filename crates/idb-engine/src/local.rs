@@ -17,6 +17,7 @@ use idb_core::sqlsafe::{
 };
 use idb_core::textutil::printable;
 use idb_sources::redis::RedisConn;
+use idb_sources::source::{self, Backend, LOKI_OPEN_LIMIT, OPEN_LIMIT, Query};
 use idb_sources::{Clients, Error, Ran, Session, TableRef, changes_sql, undo_changes};
 use serde::Serialize;
 use serde_json::Value;
@@ -40,6 +41,9 @@ const BIGKEY_TOP: usize = 50;
 pub const REDIS_SESSION_LOST: &str = "이전 Redis 세션 연결이 끊겨 SELECT 한 DB 같은 세션 상태가 사라졌다. 다시 실행하면 새 연결에서 돈다";
 
 /// serve 가 CLI 하위 명령을 돌리는 함수다. idb-cli 가 넘긴다(엔진이 CLI 에 기대지 않게).
+/// 흐름·보드 한 번의 상한이다. 패널·흐름마다 15초 상한이 따로 있다
+const DASH_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub type CliHandler = Arc<dyn Fn(CliRequest) -> CliResponse + Send + Sync>;
 
 type RedisSlot = Arc<tokio::sync::Mutex<RedisState>>;
@@ -72,6 +76,8 @@ pub struct LocalEngine {
     /// switch_db 로 바꾼 데이터베이스(R27.1). 프로젝트 파일은 고치지 않는다
     db_override: Mutex<HashMap<String, String>>,
     cli: Option<CliHandler>,
+    /// 연 저장소 접속(uuid). AWS 설정 읽기·서명 준비를 트리 펼칠 때마다 하지 않게 둔다
+    sources: tokio::sync::Mutex<HashMap<String, Arc<dyn Backend>>>,
 }
 
 impl LocalEngine {
@@ -85,6 +91,7 @@ impl LocalEngine {
             unlocked: Default::default(),
             db_override: Default::default(),
             cli,
+            sources: Default::default(),
         }
     }
 
@@ -94,6 +101,7 @@ impl LocalEngine {
         for s in sessions {
             s.close().await;
         }
+        self.sources.lock().await.clear();
         self.clients.close().await;
     }
 
@@ -421,7 +429,198 @@ impl LocalEngine {
                 let n = self.redis_do(&c, RedisUse::Pool, |r| Box::pin(redis::unlink_keys(r, keys))).await?;
                 json(Count { rows: n })
             }
+            Request::SourceChildren { conn, path } => {
+                let c = self.source_conn(&conn)?;
+                let b = self.source(&c).await?;
+                json(b.children(&path).await.map_err(|e| self.source_err(&c, e))?)
+            }
+            Request::SourceOpen { conn, path } => {
+                let c = self.source_conn(&conn)?;
+                let b = self.source(&c).await?;
+                let limit = if c.kind == Some(Kind::Loki) { LOKI_OPEN_LIMIT } else { OPEN_LIMIT };
+                let r = b.open(&path, limit).await.map_err(|e| self.source_err(&c, e))?;
+                json(ResultSet::from_query(r))
+            }
+            Request::SourceRun(r) => {
+                let c = self.source_conn(&r.conn)?;
+                if c.kind == Some(Kind::Aws) {
+                    return Err(EngineError::usage("aws 접속은 트리로 본다"));
+                }
+                if r.text.trim().is_empty() {
+                    return Err(EngineError::usage("실행할 글이 없음"));
+                }
+                let b = self.source(&c).await?;
+                let q = Query {
+                    text: r.text.trim().to_string(),
+                    since_ns: r.since_ns,
+                    until_ns: r.until_ns,
+                    limit: r.limit,
+                    force: r.force,
+                    direction: r.direction,
+                    deadline: None,
+                };
+                json(ResultSet::from_query(b.run(&q).await.map_err(|e| self.source_err(&c, e))?))
+            }
+            Request::Health { conn } => {
+                let c = self.conn_any(&conn)?;
+                let h = idb_sources::health::probe_any(&self.clients, &c).await;
+                json(HealthInfo {
+                    ok: h.ok,
+                    latency_ms: h.latency.as_millis() as u64,
+                    summary: h.summary(),
+                    version: h.version,
+                    metrics: h.metrics,
+                    err: self.clean(&c, &h.err),
+                })
+            }
+            Request::Flows { names, prod } => {
+                let all = idb_core::flows::load(&self.proj.dir, &self.proj.conns).map_err(|e| EngineError::run(self.clean_all(&e)))?;
+                let list = if names.is_empty() {
+                    all
+                } else {
+                    let mut list = Vec::new();
+                    for n in &names {
+                        let f = all.iter().find(|f| &f.name == n);
+                        list.push(
+                            f.cloned()
+                                .ok_or_else(|| EngineError::usage(format!("흐름 없음: {n} (.dbtui/flows.json)")))?,
+                        );
+                    }
+                    list
+                };
+                let deadline = tokio::time::Instant::now() + DASH_TIMEOUT;
+                let boxes = crate::flows::resolve_flows(&self.clients, &self.proj.conns, &list, prod, deadline).await;
+                json(
+                    list.iter()
+                        .zip(boxes)
+                        .map(|(f, bs)| FlowResult {
+                            flow: f.name.clone(),
+                            boxes: bs.into_iter().map(|b| self.clean_box(b)).collect(),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
+            Request::BoardList => {
+                use crate::board::{BOARD_DIR, LoadErr, list_boards, load_board};
+                let items: Vec<BoardSummary> = list_boards(&self.proj.dir)
+                    .into_iter()
+                    .map(|n| match load_board(&self.proj, &n) {
+                        Ok(b) => BoardSummary {
+                            title: b.title,
+                            panels: b.panels.len(),
+                            error: self.clean_all(&b.err),
+                            name: n,
+                        },
+                        Err(LoadErr::NotFound) => BoardSummary {
+                            error: format!("open {BOARD_DIR}/{n}.json: no such file or directory"),
+                            name: n,
+                            ..Default::default()
+                        },
+                        Err(LoadErr::Other(e)) => BoardSummary {
+                            name: n,
+                            error: self.clean_all(&e),
+                            ..Default::default()
+                        },
+                    })
+                    .collect();
+                json(items)
+            }
+            Request::BoardRun { name, prod } => json(self.board_run(&name, prod).await?),
         }
+    }
+
+    // ─── 저장소 ───
+
+    /// 읽기 전용 저장소 접속이다(PostgreSQL·Redis 가 아닌 것).
+    fn source_conn(&self, name: &str) -> Result<Conn, EngineError> {
+        let c = self.conn_any(name)?;
+        if !c.kind.is_some_and(Kind::is_source) {
+            return Err(EngineError::usage(format!("{name} 는 저장소 접속이 아님 ({})", c.kind_str())));
+        }
+        Ok(c)
+    }
+
+    /// 종류를 가리지 않는 이름의 접속이다.
+    fn conn_any(&self, name: &str) -> Result<Conn, EngineError> {
+        if name.is_empty() {
+            return Err(EngineError::usage("접속 이름이 필요함"));
+        }
+        self.proj
+            .conn_by_name(name)
+            .filter(|c| c.kind.is_some())
+            .cloned()
+            .ok_or_else(|| EngineError::usage(format!("접속 없음: {name}")))
+    }
+
+    /// 연 저장소 접속을 돌려주고, 없으면 연다. 여는 동안 잠그지 않아 다른 접속의 요청을 막지 않는다.
+    async fn source(&self, c: &Conn) -> Result<Arc<dyn Backend>, EngineError> {
+        if let Some(b) = self.sources.lock().await.get(&c.uuid) {
+            return Ok(b.clone());
+        }
+        let b: Arc<dyn Backend> = source::open(c).await.map_err(|e| self.source_err(c, e))?.into();
+        Ok(self.sources.lock().await.entry(c.uuid.clone()).or_insert(b).clone())
+    }
+
+    /// 저장소 오류다. 쓰기·비싼 질의·요금 조회는 거절(3)이고 글은 CLI 와 같은 안내다(R60.2·R72).
+    fn source_err(&self, c: &Conn, e: Error) -> EngineError {
+        let text = self.clean(c, &source::err_text(&e));
+        match e {
+            Error::Write(_) => EngineError::refused(REASON_READ_ONLY, text),
+            Error::NeedsConfirm(_) => EngineError::refused(REASON_CONFIRM_EXPENSIVE, text),
+            Error::Billed => EngineError::refused(REASON_BILLED, text),
+            _ => EngineError::run(text),
+        }
+    }
+
+    fn clean_box(&self, mut b: crate::flows::FlowBox) -> crate::flows::FlowBox {
+        b.err = self.clean_all(&b.err);
+        b
+    }
+
+    async fn board_run(&self, name: &str, prod: bool) -> Result<BoardResult, EngineError> {
+        use crate::board::{BOARD_DIR, LoadErr, load_board, panel_prod, panel_value, run_panels};
+        let b = match load_board(&self.proj, name) {
+            Ok(b) => b,
+            Err(LoadErr::NotFound) => return Err(EngineError::usage(format!("보드 없음: {name} ({BOARD_DIR})"))),
+            Err(LoadErr::Other(e)) => return Err(EngineError::usage(self.clean_all(&e))),
+        };
+        let deadline = tokio::time::Instant::now() + DASH_TIMEOUT;
+        let results = run_panels(&self.clients, &self.proj, &b, prod, deadline).await;
+        let panels = b
+            .panels
+            .iter()
+            .zip(results)
+            .map(|(p, r)| {
+                let mut out = PanelOut {
+                    title: p.title.clone(),
+                    conn: p.conn.clone(),
+                    flow: p.flow.clone(),
+                    view: p.view.clone(),
+                    prod: panel_prod(&self.proj, p),
+                    note: r.note,
+                    ..Default::default()
+                };
+                if !p.err.is_empty() {
+                    out.error = format!("설정 오류: {}", self.clean_all(&p.err));
+                } else if !r.err.is_empty() {
+                    out.error = self.clean_all(&r.err);
+                } else if p.view == "flow" {
+                    out.boxes = r.boxes.into_iter().map(|b| self.clean_box(b)).collect();
+                } else if p.view == "number" {
+                    let v = panel_value(r.res.as_ref()).unwrap_or_default();
+                    out.warn = p.warn_hit(&v);
+                    out.value = Some(v);
+                } else {
+                    out.result = r.res.map(ResultSet::from_query);
+                }
+                out
+            })
+            .collect();
+        Ok(BoardResult {
+            title: b.title,
+            error: self.clean_all(&b.err),
+            panels,
+        })
     }
 
     fn project(&self) -> ProjectInfo {

@@ -28,7 +28,7 @@ pub struct Health {
 }
 
 /// 대시보드 한 칸이다. name 이 비면 값만 보인다(`green`·`ENABLED` 같은 상태 낱말).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Metric {
     pub name: String,
     pub value: String,
@@ -289,6 +289,34 @@ pub async fn test_db_conn(c: &Conn) -> Result<String, String> {
     .await;
     cs.close().await;
     r.map_err(|e: Error| redact(&e.to_string(), &c.password))
+}
+
+// ─── 아무 종류 ───
+
+/// 접속 하나를 확인한다(Go probeAny). PostgreSQL·Redis 는 접속 풀로, 저장소는 Backend 의 probe 로 본다.
+pub async fn probe_any(clients: &Clients, c: &Conn) -> Health {
+    match c.kind {
+        Some(Kind::Pg) => return probe_pg(clients, c).await,
+        Some(Kind::Redis) => return probe_redis(clients, c).await,
+        _ => {}
+    }
+    let start = Instant::now();
+    let b = match tokio::time::timeout(PROBE_OPEN_TIMEOUT, crate::source::open(c)).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => return failed(start.elapsed(), &e.to_string(), &c.password),
+        Err(_) => return failed(start.elapsed(), "context deadline exceeded", &c.password),
+    };
+    let Some(p) = b.probe() else {
+        return Health {
+            err: "이 종류는 확인을 지원하지 않음".into(),
+            ..Default::default()
+        };
+    };
+    let start = Instant::now();
+    match tokio::time::timeout(PROBE_TIMEOUT, p).await {
+        Ok(h) => h,
+        Err(_) => failed(start.elapsed(), "context deadline exceeded", &c.password),
+    }
 }
 
 #[cfg(test)]

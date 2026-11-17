@@ -89,6 +89,15 @@ pub fn go_upper(s: &str) -> String {
         .collect()
 }
 
+/// Go ui.go `oneLine`: 줄바꿈을 빈칸으로 바꾸고 200 글자에서 자른다.
+pub fn one_line(s: &str) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() > 200 {
+        return s.chars().take(200).collect::<String>() + "…";
+    }
+    s
+}
+
 // ─── 수 글 ───
 
 /// Go `textutil.GroupDigits`: 세 자리마다 쉼표를 넣는다. 음수의 부호 뒤에도 넣는 Go 꼴(-,123)까지 같다.

@@ -6,26 +6,14 @@ use std::io::Read;
 
 use idb_core::project::Kind;
 use idb_core::result::QueryResult;
-use idb_sources::source::{self, Query};
+use idb_sources::source::{self, Query, err_text as source_err_text};
 use idb_sources::{Error, with_deadline};
 
 use crate::command::{CmdError, Env, MSG_UNSUPPORTED, pick_conn, read_input, refused, usage};
 use crate::output::CliResult;
 
-const MSG_READ_ONLY_SOURCE: &str = "읽기 전용 저장소라 보내지 않음";
-const MSG_EXPENSIVE: &str = "비싼 질의";
 /// R67.1: aws 접속은 편집기 질의 언어가 없다
 pub const MSG_TREE_ONLY: &str = "aws 접속은 트리로 본다";
-
-/// 저장소 오류의 보일 글이다. 읽기 전용 거절은 정한 한국어 안내로, 비싼 질의는 까닭을 붙여 바꾼다(`비싼 질의: 전체 스캔`, R60.2).
-pub fn source_err_text(e: &Error) -> String {
-    match e {
-        Error::Write(_) => MSG_READ_ONLY_SOURCE.into(),
-        Error::NeedsConfirm(r) if !r.is_empty() => format!("{MSG_EXPENSIVE}: {r}"),
-        Error::NeedsConfirm(_) => MSG_EXPENSIVE.into(),
-        e => e.to_string(),
-    }
-}
 
 /// 질의(run) 오류의 종료 코드다. 쓰기·요금·비싼 질의는 거절(3)이고 나머지는 실행 오류(1)다.
 fn run_err(e: Error) -> CmdError {
@@ -101,6 +89,7 @@ pub async fn run_source_command(env: &Env<'_>, kind: Kind, stdin: Option<Box<dyn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use idb_sources::source::MSG_READ_ONLY_SOURCE;
 
     #[test]
     fn 저장소_오류는_정한_안내와_종료_코드로_바뀐다() {

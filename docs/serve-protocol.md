@@ -6,7 +6,7 @@
 
 한 줄에 JSON 하나다. 요청은 `{"id":N,"op":"…",…}`이고 응답은 `{"id":N,"ok":true,"result":…}` 또는 `{"id":N,"ok":false,"code":3,"error":"…","reason":"…"}`이다. id 는 클라이언트가 고르는 양의 정수이고 진행 중인 요청끼리 겹치면 안 된다. 요청은 동시에 돌고 응답은 끝난 순서로 온다. 모르는 필드는 무시한다.
 
-code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`), `confirm`(백엔드 신호·패턴 일괄 삭제처럼 환경과 상관없이 늘 묻는 것, `confirm:true`)이다. error 글은 그대로 확인 창에 보일 수 있는 질문(`prod(app-prod)에 제출 2건: y/N`)이다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
+code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오류, 3 안전장치 거절이다. code 3 의 reason 은 `prod_locked`(R54, 확인 창 없이 거절), `confirm_prod`(R6, 확인 후 `confirm_prod:true`로 다시 보냄), `confirm_danger`(R25, `confirm_danger:true`), `confirm`(백엔드 신호·패턴 일괄 삭제처럼 환경과 상관없이 늘 묻는 것, `confirm:true`)이다. 저장소 op 는 `read_only`(쓰기로 보이는 질의, 다시 보낼 길 없음), `confirm_expensive`(전체 스캔·7일 넘는 범위 같은 비싼 질의 R60.2, 확인 후 `force:true`), `billed`(요청마다 요금이 붙는 AWS 조회 R72, serve 쪽 `DB_ALLOW_BILLED=1` 없이는 확인으로도 풀리지 않음)를 쓴다. error 글은 그대로 확인 창에 보일 수 있는 질문(`prod(app-prod)에 제출 2건: y/N`)이다. 편집기 실행이 실패했는데 트랜잭션이 열려 있으면 code 1 에 reason `in_tx`가 붙는다.
 
 어느 메시지에도 비밀번호·AES 키를 싣지 않는다. 오류 글은 serve 가 그 접속의 비밀번호와 모든 AES 키·IV 를 지우고 제어 문자를 바꾼 것이다. 단, staticEncrypt 암호문은 형식상 앞에 IV 를 싣는다(`IV^|^…`).
 
@@ -62,6 +62,15 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 | `redis_info`·`redis_slowlog`(n=50)·`redis_big_keys`(sample=1000, top=50) | conn | ResultSet(R34.1) |
 | `redis_pattern_keys` | conn, pattern | `{keys, truncated}`(R42, 100,000개까지) |
 | `redis_unlink` | conn, keys, confirm, confirm_prod | `{rows}`(지운 수) |
+| `source_children` | conn, path(기본 맨 위 "") | `[{name, path, info, has_children, openable, warn}]`(R60~R68) |
+| `source_open` | conn, path | ResultSet(트리 Enter 미리 보기, Loki 100줄·나머지 50행) |
+| `source_run` | conn, text, since_ns, until_ns, limit(기본 1,000), direction(Loki `forward`·`backward`), force | ResultSet. aws 접속은 code 2 |
+| `health` | conn(모든 종류) | `{ok, latency_ms, version, metrics:[{name,value,warn}], summary, err}`(R64.2) |
+| `flows` | names(비면 모두), prod | `[{flow, boxes:[{stage, name, metrics, warn, idle, err, note, conn}]}]`(R69) |
+| `board_list` | | `[{name, title, panels, error?}]` |
+| `board_run` | name, prod | `{title, error?, panels:[{title, conn, flow, view, prod, value?, warn, result?, boxes?, error?, note?}]}`(R70) |
+
+저장소 op 의 prod 는 화면처럼 읽기를 막지 않는다. `flows`·`board_run` 은 `prod:false` 면 prod 접속을 묻지 않고 그 자리에 note `--prod 로 확인`을 둔다. 저장소 접속은 serve 안에서 접속마다 한 번 열어 다시 쓴다.
 
 ResultSet 은 `{cols, types?, rows, text, truncated, elapsed_ms, in_tx?, note?, origin?}`다. NULL 칸은 `"NULL"`, 64KiB 넘는 칸은 `…(N바이트)`로 잘린다. origin 은 편집기 결과가 한 테이블에서 왔고 PK 열이 모두 있을 때만 있다(`{table:{schema,table}, pk, cols, always}`, cols[i] 는 결과 i 열의 테이블 열 이름이고 식·생성 열은 빈 글). 같은 열이 두 번 나오거나 시스템 열이 섞이면 없다.
 
@@ -75,7 +84,7 @@ ChangeSet 은 `{table:{schema,table}, pk:[…], changes:[{op:"update"|"insert"|"
 
 편집기 길(`run`·`explain`·`table_page`·`tx_*`)은 접속마다 연결 하나를 계속 쓰는 세션이라 `BEGIN`·`SET`이 다음 요청까지 이어진다. prod 의 읽기 전용이 아닌 문장은 잠겨 있으면 `prod_locked`, 열려 있어도 `confirm_prod`가 없으면 거절이다. `commit`·`rollback`·`end`·`abort`만의 문장은 잠금에 막히지 않는다(R54.2). 잠긴 prod 의 읽기는 READ ONLY 트랜잭션(열린 트랜잭션이면 SAVEPOINT)으로 감싼다. `prod_lock` 상태는 serve 프로세스 안에만 있고, 열리는 시간은 serve 쪽 `DB_PROD_UNLOCK_MIN`이다.
 
-`cli`는 `db <명령> --remote`가 쓴다. 받는 명령은 conns·schemas·tables·describe·ddl·query·explain·search·redis·linked·schema-diff·user360·logs·metrics·status·flows·board 이고 출력 글은 serve 쪽 CLI 가 만든 그대로다. 클라이언트의 `-p`와 `-f`는 쓰지 않는다. `-f` 파일과 표준 입력은 클라이언트가 읽어 `input`으로 보낸다. serve 쪽 파일을 읽게 하지 않으려는 것이다.
+`cli`는 `db <명령> --remote`가 쓴다. 받는 명령은 conns·schemas·tables·describe·ddl·query·explain·search·redis·linked·schema-diff·user360·logs·metrics·status·flows·board 이고 출력 글은 serve 쪽 CLI 가 만든 그대로다. 클라이언트의 `-p`와 `-f`는 쓰지 않는다. `-f` 파일과 표준 입력은 클라이언트가 읽어 `input`으로 보낸다(query·explain·redis·logs·metrics). 단, `flows -f`는 흐름 이름이라 그대로 넘긴다. serve 쪽 파일을 읽게 하지 않으려는 것이다.
 
 ## 원격 설정
 

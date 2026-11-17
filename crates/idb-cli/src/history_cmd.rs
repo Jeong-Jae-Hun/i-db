@@ -5,11 +5,13 @@ use std::io;
 
 use chrono::{Local, SecondsFormat};
 use idb_core::gojson;
+use idb_core::gostrconv::parse_day_duration;
 use idb_core::history::{self, Filter, GoTime, Results};
 use idb_core::redact::mask_secrets;
 use idb_core::result::QueryResult;
+use idb_core::textutil::one_line;
 
-use crate::cli::{EXIT_ERR, EXIT_OK, EXIT_USAGE, Opts, parse_day_duration};
+use crate::cli::{EXIT_ERR, EXIT_OK, EXIT_USAGE, Opts};
 use crate::goflag::{FlagDef, FlagSet, FlagType, ParseError, Parsed};
 use crate::output::{self, CliResult};
 use crate::usage_text::HISTORY_USAGE;
@@ -45,15 +47,6 @@ fn flag_set() -> FlagSet {
         ],
         check,
     }
-}
-
-/// Go ui.go `oneLine`: 줄바꿈을 빈칸으로 바꾸고 200 글자에서 자른다.
-pub fn one_line(s: &str) -> String {
-    let s = s.replace('\n', " ");
-    if s.chars().count() > 200 {
-        return s.chars().take(200).collect::<String>() + "…";
-    }
-    s
 }
 
 /// 지역 시각 `2006-01-02 15:04:05` 다.

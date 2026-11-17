@@ -19,6 +19,10 @@ const REMOTE: &[&str] = &[
     "schema-diff",
     "user360",
     "logs",
+    "metrics",
+    "status",
+    "flows",
+    "board",
 ];
 
 #[test]

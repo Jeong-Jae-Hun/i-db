@@ -14,8 +14,8 @@ pub use crate::health::{Health, Metric};
 use crate::obs::{Grafana, Loki, Prometheus};
 use crate::opensearch::OpenSearch;
 
-/// 트리 한 줄이다. path 는 children·open 에 그대로 돌려줄 종류별 경로다(예: "index/field").
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// 트리 한 줄이다. path 는 children·open 에 그대로 돌려줄 종류별 경로다(예: "index/field"). serve 프로토콜에 그대로 싣는다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Node {
     pub name: String,
     pub path: String,
@@ -106,6 +106,20 @@ pub fn sql_words(text: &str) -> Result<(String, Vec<String>), Error> {
     // 가린 글은 원문과 길이·글자 경계가 같아 n 이 원문에서도 글자 경계다
     let stmt = text.get(..n).unwrap_or(text).trim().to_string();
     Ok((stmt, words))
+}
+
+// ─── 보일 글 ───
+
+pub const MSG_READ_ONLY_SOURCE: &str = "읽기 전용 저장소라 보내지 않음";
+pub const MSG_EXPENSIVE: &str = "비싼 질의";
+/// 저장소 오류의 보일 글이다(Go `sourceErrText`). 읽기 전용 거절은 정한 한국어 안내로, 비싼 질의는 까닭을 붙여 바꾼다(`비싼 질의: 전체 스캔`, R60.2).
+pub fn err_text(e: &Error) -> String {
+    match e {
+        Error::Write(_) => MSG_READ_ONLY_SOURCE.into(),
+        Error::NeedsConfirm(r) if !r.is_empty() => format!("{MSG_EXPENSIVE}: {r}"),
+        Error::NeedsConfirm(_) => MSG_EXPENSIVE.into(),
+        e => e.to_string(),
+    }
 }
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
