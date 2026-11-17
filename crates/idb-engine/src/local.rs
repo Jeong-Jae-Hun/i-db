@@ -446,6 +446,7 @@ impl LocalEngine {
                         .cloned()
                         .unwrap_or_else(|| c.db.clone()),
                     source: if c.source == SOURCE_DB { SOURCE_DB } else { "datagrip" }.into(),
+                    uuid: c.uuid.clone(),
                 })
                 .collect(),
             warnings: self.proj.warnings.iter().map(|w| self.clean_all(w)).collect(),

@@ -24,7 +24,7 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 
 | op | 필드 | result |
 | --- | --- | --- |
-| `project` | | `{dir, conns:[{name,group,folder,kind,env,host,db,source}], warnings}` |
+| `project` | | `{dir, conns:[{name,group,folder,kind,env,host,db,source,uuid}], warnings}` |
 | `schemas` | conn | `["public",…]` |
 | `tables` | conn, schema(기본 public) | `["t",…]` |
 | `describe`·`ddl` | conn, schema, table(`스키마.테이블` 꼴도) | ResultSet · CREATE 글 |

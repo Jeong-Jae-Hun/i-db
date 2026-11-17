@@ -383,6 +383,9 @@ pub struct ConnSummary {
     pub db: String,
     /// datagrip 또는 db(R59.1)
     pub source: String,
+    /// 화면이 세션·최근 기록·쿼리 파일 매핑에 남기는 접속 열쇠다. 옛 serve 는 보내지 않아 빈 글이다
+    #[serde(default)]
+    pub uuid: String,
 }
 
 /// 표 결과다. Go `db.Result` 의 Cols·Types·Rows·Text·Truncated·InTx·Elapsed 다.

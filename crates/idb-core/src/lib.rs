@@ -13,6 +13,7 @@ pub mod recent;
 pub mod redact;
 pub mod result;
 pub mod session;
+pub mod sqlfmt;
 pub mod sqlsafe;
 pub mod statcrypt;
 pub mod textutil;
