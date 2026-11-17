@@ -13,11 +13,14 @@ pub const DARK: &[(&str, &str)] = &[
     ("caret", "#f0f0f0"),
     ("border", "#ffffff12"),
     ("input.border", "#ffffff26"),
-    ("ring", "#737373"),
+    ("ring", "#0d9488"),
     ("popover.background", "#171717"),
     ("popover.foreground", "#f0f0f0"),
-    ("primary.background", "#e5e5e5"),
-    ("primary.foreground", "#171717"),
+    // 주 버튼·초점 고리는 브랜드 강조색(assets/brand)이다. 나머지는 Orca 무채색 그대로
+    ("primary.background", "#0d9488"),
+    ("primary.foreground", "#ffffff"),
+    ("primary.hover.background", "#0f766e"),
+    ("primary.active.background", "#115e59"),
     ("secondary.background", "#262626"),
     ("secondary.foreground", "#f0f0f0"),
     ("muted.background", "#262626"),
@@ -36,7 +39,7 @@ pub const DARK: &[(&str, &str)] = &[
     ("list.active.background", "#404040"),
     ("list.active.border", "#00000000"),
     ("table.background", "#0a0a0a"),
-    ("table.head.background", "#171717"),
+    ("table.head.background", "#0a0a0a"),
     ("table.head.foreground", "#acacac"),
     ("table.even.background", "#ffffff05"),
     ("table.hover.background", "#ffffff0a"),
@@ -69,11 +72,13 @@ pub const LIGHT: &[(&str, &str)] = &[
     ("caret", "#0a0a0a"),
     ("border", "#e5e5e5"),
     ("input.border", "#e5e5e5"),
-    ("ring", "#a1a1a1"),
+    ("ring", "#0d9488"),
     ("popover.background", "#ffffff"),
     ("popover.foreground", "#0a0a0a"),
-    ("primary.background", "#171717"),
-    ("primary.foreground", "#fafafa"),
+    ("primary.background", "#0d9488"),
+    ("primary.foreground", "#ffffff"),
+    ("primary.hover.background", "#0f766e"),
+    ("primary.active.background", "#115e59"),
     ("secondary.background", "#f5f5f5"),
     ("secondary.foreground", "#171717"),
     ("muted.background", "#f5f5f5"),
@@ -92,7 +97,7 @@ pub const LIGHT: &[(&str, &str)] = &[
     ("list.active.background", "#eaeaea"),
     ("list.active.border", "#00000000"),
     ("table.background", "#ffffff"),
-    ("table.head.background", "#fafafa"),
+    ("table.head.background", "#ffffff"),
     ("table.head.foreground", "#696969"),
     ("table.even.background", "#00000005"),
     ("table.hover.background", "#0000000a"),
@@ -176,6 +181,16 @@ mod tests {
         // rgb(255 255 255 / 0.07) = 흰색 알파 0x12
         assert_eq!(get(DARK, "border"), "#ffffff12");
         assert_eq!(get(DARK, "danger.background"), "#e40014");
+    }
+
+    #[test]
+    fn 브랜드_강조는_주_버튼과_초점_고리에만_쓴다() {
+        let accent = crate::vm::brand::ACCENT;
+        for p in [DARK, LIGHT] {
+            let using: Vec<&str> = p.iter().filter(|(_, v)| v.eq_ignore_ascii_case(accent)).map(|(k, _)| *k).collect();
+            assert_eq!(using, vec!["ring", "primary.background"], "{using:?}");
+            assert_eq!(get(p, "primary.hover.background"), crate::vm::brand::ACCENT_HOVER);
+        }
     }
 
     #[test]

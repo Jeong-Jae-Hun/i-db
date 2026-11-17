@@ -1,4 +1,11 @@
-# i-db
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
+    <img src="assets/brand/lockup.svg" alt="i-db" height="48">
+  </picture>
+</h1>
+
+DataGrip 프로젝트를 그대로 여는 DB 도구 — open your DataGrip project as-is, in a terminal, a CLI and a macOS app.
 
 `db` is a terminal database editor for PostgreSQL and Redis. It reads an existing DataGrip project (`.idea/dataSources.xml` and friends) as its connection list and takes passwords from a `.env` file next to it, so there is no second place to maintain connections. One binary gives you a full-screen TUI, a scriptable CLI and a read-only MCP server for AI agents.
 

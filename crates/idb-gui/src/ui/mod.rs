@@ -1,8 +1,11 @@
 //! GPUI 화면. 무엇을 보일지는 `vm` 이 정하고 여기서는 그리고 입력을 넘긴다.
 
+mod brand;
+mod dashboard;
 mod dialogs;
 mod redis;
 mod results;
+mod source;
 mod sql_completion;
 mod workspace;
 
@@ -39,6 +42,7 @@ actions!(
         ZoomReset,
         ToggleSidebar,
         ToggleResults,
+        ShowDashboard,
         RunQuery,
         RunAll,
         ExplainQuery,
@@ -76,6 +80,7 @@ fn action_for(cmd: Cmd) -> Box<dyn Action> {
         Cmd::ZoomReset => Box::new(ZoomReset),
         Cmd::ToggleSidebar => Box::new(ToggleSidebar),
         Cmd::ToggleResults => Box::new(ToggleResults),
+        Cmd::Dashboard => Box::new(ShowDashboard),
         Cmd::Run => Box::new(RunQuery),
         Cmd::RunAll => Box::new(RunAll),
         Cmd::Explain => Box::new(ExplainQuery),
@@ -237,48 +242,47 @@ pub fn run() {
             std::process::exit(1);
         }
     };
-    gpui_platform::application()
-        .with_assets(gpui_kit_assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_component::init(cx);
-            install_palette(cx);
-            let prefs = Prefs::path().map(|p| Prefs::load(&p)).unwrap_or_default();
-            let font = load_font(&prefs, cx);
-            cx.bind_keys(key_bindings());
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.set_menus(menus());
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-            let opts = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1320.), px(860.)), cx))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("i-db".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            let rt = rt.clone();
-            let opened = cx.open_window(opts, move |window, cx| {
-                apply_look(&prefs, &font, window, cx);
-                let ws = cx.new(|cx| {
-                    let mut ws = Workspace::new(rt, font, window, cx);
-                    if let Some(t) = initial {
-                        ws.open_target(t, window, cx);
-                    }
-                    ws
-                });
-                cx.new(|cx| Root::new(ws, window, cx))
-            });
-            if let Err(e) = opened {
-                eprintln!("i-db: {e}");
+    gpui_platform::application().with_assets(brand::Assets).run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        install_palette(cx);
+        let prefs = Prefs::path().map(|p| Prefs::load(&p)).unwrap_or_default();
+        let font = load_font(&prefs, cx);
+        cx.bind_keys(key_bindings());
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.set_menus(menus());
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
                 cx.quit();
             }
-            cx.activate(true);
+        })
+        .detach();
+        let opts = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1320.), px(860.)), cx))),
+            // 제목 줄을 투명하게 두고 탭·단추를 그 안에 그린다(Orca). 신호등은 그 위에 앉는다
+            titlebar: Some(TitlebarOptions {
+                title: Some(crate::vm::brand::NAME.into()),
+                ..gpui_component::TitleBar::title_bar_options()
+            }),
+            ..Default::default()
+        };
+        let rt = rt.clone();
+        let opened = cx.open_window(opts, move |window, cx| {
+            apply_look(&prefs, &font, window, cx);
+            let ws = cx.new(|cx| {
+                let mut ws = Workspace::new(rt, font, window, cx);
+                if let Some(t) = initial {
+                    ws.open_target(t, window, cx);
+                }
+                ws
+            });
+            cx.new(|cx| Root::new(ws, window, cx))
         });
+        if let Err(e) = opened {
+            eprintln!("i-db: {e}");
+            cx.quit();
+        }
+        cx.activate(true);
+    });
 }
 
 #[cfg(test)]
@@ -316,6 +320,20 @@ mod tests {
             Theme::change(ThemeMode::Light, None, cx);
             assert_eq!(cx.theme().background, workspace::hex("#ffffff"));
         });
+    }
+
+    #[test]
+    fn 자산은_브랜드_마크와_아이콘을_함께_준다() {
+        use gpui::AssetSource as _;
+        let a = brand::Assets;
+        for p in ["brand/mark-body.svg", "brand/mark-dot.svg", "icons/play.svg"] {
+            assert!(a.load(p).unwrap().is_some_and(|b| !b.is_empty()), "{p}");
+        }
+        let body = String::from_utf8(a.load("brand/mark-body.svg").unwrap().unwrap().to_vec()).unwrap();
+        assert!(
+            body.contains("<ellipse") && !body.contains("circle"),
+            "몸통 조각에 점이 섞이면 한 색으로 칠해진다"
+        );
     }
 
     #[test]

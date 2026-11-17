@@ -123,10 +123,30 @@ pub fn open_shortcuts(window: &mut Window, cx: &mut Context<Workspace>) {
 }
 
 pub fn open_about(window: &mut Window, cx: &mut Context<Workspace>) {
-    window.open_alert_dialog(cx, |alert, _, _| {
-        alert.title("i-db").description(format!(
-            "판 {}\nPostgreSQL·Redis 를 db 엔진으로 연다. 비밀번호·.env 는 접속이 있는 쪽에만 있다.\n글꼴 D2Coding(SIL OFL 1.1, NAVER) · 색 토큰은 Orca(MIT, Lovecast Inc.)에서 왔다.",
-            env!("CARGO_PKG_VERSION")
-        ))
+    use crate::vm::brand;
+    window.open_dialog(cx, |dialog, _, cx| {
+        let t = cx.theme().clone();
+        let muted = |s: String| div().text_xs().text_color(t.muted_foreground).child(s);
+        dialog.w(px(420.)).child(
+            v_flex()
+                .items_center()
+                .gap_2()
+                .py_4()
+                .child(super::brand::mark(px(56.), t.foreground, super::brand::accent()))
+                .child(super::brand::wordmark(px(28.), t.foreground))
+                .child(div().text_color(t.muted_foreground).child(brand::TAGLINE))
+                .child(muted(format!("판 {}", brand::version())))
+                .child(div().pt_3().text_xs().text_color(t.primary).child(brand::REPO))
+                .child(
+                    v_flex()
+                        .pt_3()
+                        .gap_1()
+                        .items_center()
+                        .child(muted("글꼴 D2Coding — NAVER, SIL Open Font License 1.1".into()))
+                        .child(muted("색·간격 토큰 — Orca (MIT, Lovecast Inc.)".into()))
+                        .child(muted("UI — GPUI · gpui-component (Apache-2.0)".into()))
+                        .child(muted("전문: THIRD_PARTY_NOTICES.md".into())),
+                ),
+        )
     });
 }

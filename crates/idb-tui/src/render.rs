@@ -552,7 +552,7 @@ impl App {
             }
             return;
         }
-        buf.set_stringn(body.x, body.y, "결과가 여기에 나옵니다", w, theme::dim());
+        crate::banner::draw(buf, body, crate::banner::version(), crate::banner::no_color());
     }
 
     fn draw_redis(&self, buf: &mut Buffer, r: Rect) {

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::vm::brand;
 use crate::vm::palette;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions,
@@ -14,6 +15,7 @@ use gpui::{
 };
 use gpui::{ClickEvent, ClipboardItem, MouseButton, rems};
 use gpui_component::Disableable as _;
+use gpui_component::TitleBar;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
@@ -24,15 +26,18 @@ use gpui_component::{
 };
 use idb_engine::{Catalog, ConnSummary, Engine, EngineError, LockState, ProjectInfo, ResultSet, RunRequest, TablePageRequest};
 
+use super::dashboard::DashboardView;
 use super::redis::RedisView;
 use super::results::{ResultsView, Source};
+use super::source::SourceView;
 use super::sql_completion::{CatalogCell, SqlCompletion};
 use super::{
-    About, CancelRun, CloseTab, ExplainQuery, Minimize, NewTab, OpenFile, OpenSettings, RunAll, RunQuery, SaveFile, ShowShortcuts,
-    SwitchConn, ToggleProdLock, ToggleResults, ToggleSidebar, TxBegin, TxCommit, TxRollback, ZoomIn, ZoomOut, ZoomReset,
+    About, CancelRun, CloseTab, ExplainQuery, Minimize, NewTab, OpenFile, OpenSettings, RunAll, RunQuery, SaveFile, ShowDashboard,
+    ShowShortcuts, SwitchConn, ToggleProdLock, ToggleResults, ToggleSidebar, TxBegin, TxCommit, TxRollback, ZoomIn, ZoomOut, ZoomReset,
 };
 use crate::vm::font::FontChoice;
 use crate::vm::picker;
+use crate::vm::queries::{self, QueryFile};
 use crate::vm::runtime::{Canceler, Prefs, Runtime, Target, connect};
 use crate::vm::safety::{Ask, Confirms, Gate, Tone, lock_label, tone};
 use crate::vm::tabs::{Tabs, target_sql};
@@ -85,12 +90,20 @@ enum Body {
     Redis {
         view: Entity<RedisView>,
     },
+    Source {
+        view: Entity<SourceView>,
+    },
+    Dashboard {
+        view: Entity<DashboardView>,
+    },
 }
 
 pub struct Workspace {
     pub(super) rt: Rc<Runtime>,
     focus: FocusHandle,
     pub(super) prefs: Prefs,
+    /// 설정 파일 자리. 시험은 None 으로 두어 사용자 gui.json 을 건드리지 않는다
+    prefs_path: Option<PathBuf>,
     /// 설정·설치 여부로 정한 글꼴(확대 전 크기)
     pub(super) font: FontChoice,
     pub(super) show_sidebar: bool,
@@ -100,6 +113,15 @@ pub struct Workspace {
     /// switch_db·set_search_path 뒤의 세션(R27)
     sessions: HashMap<String, SessionState>,
     databases: HashMap<String, Vec<String>>,
+    /// 로컬 프로젝트의 `queries/` 파일(R43). 원격이면 None
+    queries: Option<Vec<QueryFile>>,
+    /// 파일 탭마다 마지막으로 읽거나 쓴 내용(R45.2 자동 저장이 밖의 바뀜을 가른다)
+    file_text: HashMap<u64, String>,
+    /// 자동 저장을 멈춘 탭과 까닭
+    autosave_stopped: HashMap<u64, String>,
+    autosave_tasks: HashMap<u64, gpui::Task<()>>,
+    /// `DB_AUTO_SAVE=0` 이면 끈다(첫 실행 저장·1초 뒤·탭 옮김·닫기). ⌘S 는 그대로다
+    pub(super) autosave_on: bool,
     /// 데이터베이스 바꾸기 요청이 도는 접속. 원격이면 엔진은 이미 바꿨는데 답이 안 왔을 수 있어
     /// 그동안 그 접속 결과의 고치기·반영·되돌리기·다음 쪽을 막는다
     switching: std::collections::HashSet<String>,
@@ -202,6 +224,7 @@ impl Workspace {
             rt,
             focus,
             prefs,
+            prefs_path: Prefs::path(),
             font,
             show_sidebar: true,
             show_results: true,
@@ -211,6 +234,11 @@ impl Workspace {
             databases: HashMap::new(),
             db_gen: HashMap::new(),
             switching: Default::default(),
+            queries: None,
+            file_text: HashMap::new(),
+            autosave_stopped: HashMap::new(),
+            autosave_tasks: HashMap::new(),
+            autosave_on: queries::autosave_enabled(std::env::var("DB_AUTO_SAVE").ok().as_deref()),
             selected_table: None,
             dir_input,
             remotes: crate::vm::runtime::remote_names(),
@@ -232,8 +260,8 @@ impl Workspace {
     }
 
     pub(super) fn save_prefs(&self) {
-        if let Some(p) = Prefs::path() {
-            let _ = self.prefs.save(&p);
+        if let Some(p) = &self.prefs_path {
+            let _ = self.prefs.save(p);
         }
     }
 
@@ -426,11 +454,22 @@ impl Workspace {
 
     fn connected(&mut self, target: Target, engine: Engine, info: ProjectInfo, window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.touch(target.clone());
-        if let Some(p) = Prefs::path() {
-            let _ = self.prefs.save(&p);
-        }
+        self.save_prefs();
         let warn = info.warnings.join("; ");
+        // 옛 판이 남긴 prod 접속 기록을 지운다(R75.5)
+        let prod_keys: Vec<String> = info
+            .conns
+            .iter()
+            .filter(|c| tone(&c.env) == Tone::Prod)
+            .flat_map(|c| [c.uuid.clone(), c.name.clone()])
+            .filter(|k| !k.is_empty())
+            .collect();
+        if crate::vm::history::purge_prod(&mut self.prefs.table_history, &prod_keys) {
+            self.save_prefs();
+        }
         self.tree = ConnTree::new(info.conns);
+        self.target = Some(target.clone());
+        self.refresh_queries();
         self.engine = Some(engine);
         self.target = Some(target);
         self.new_tab(None, window, cx);
@@ -459,6 +498,10 @@ impl Workspace {
         self.databases.clear();
         self.db_gen.clear();
         self.switching.clear();
+        self.queries = None;
+        self.file_text.clear();
+        self.autosave_stopped.clear();
+        self.autosave_tasks.clear();
         self.selected_table = None;
         cx.notify();
     }
@@ -497,7 +540,23 @@ impl Workspace {
                 self.bodies.insert(id, Body::Redis { view });
                 self.refresh_conn_state(&name, window, cx);
             }
-            k => self.set_status(format!("{k} 접속은 아직 GUI 에서 열지 않는다(터미널 db 를 쓴다)"), true, cx),
+            k => {
+                // 읽기 전용 저장소: 이미 열린 탭이 있으면 그리로 간다
+                if let Some(i) =
+                    self.tabs.tabs.iter().position(|t| {
+                        t.conn.as_deref() == Some(name.as_str()) && matches!(self.bodies.get(&t.id), Some(Body::Source { .. }))
+                    })
+                {
+                    self.tabs.activate(i);
+                } else {
+                    let id = self.tabs.open_named(Some(name.clone()), name.clone());
+                    let (rt, ws) = (self.rt.clone(), cx.entity().downgrade());
+                    let Some(engine) = self.engine.clone() else { return };
+                    let kind = k.to_string();
+                    let view = cx.new(|cx| SourceView::new(ws, rt, engine, name.clone(), kind, window, cx));
+                    self.bodies.insert(id, Body::Source { view });
+                }
+            }
         }
         cx.notify();
     }
@@ -560,6 +619,20 @@ impl Workspace {
     }
 
     // ─── 데이터베이스·스키마 ───
+
+    pub(super) fn engine(&self) -> Option<&Engine> {
+        self.engine.as_ref()
+    }
+
+    /// 테이블 보기 기록 자리와 prod 여부다(R75.5: prod 기록은 남기지 않는다).
+    pub(super) fn history_key(&self, conn: &str, schema: &str, table: &str) -> (String, bool) {
+        let c = self.conn(conn);
+        let conn_key = c
+            .map(|c| if c.uuid.is_empty() { c.name.clone() } else { c.uuid.clone() })
+            .unwrap_or_else(|| conn.to_string());
+        let prod = c.is_none_or(|c| tone(&c.env) == Tone::Prod);
+        (crate::vm::history::table_key(&conn_key, schema, table), prod)
+    }
 
     pub(super) fn is_switching(&self, conn: &str) -> bool {
         self.switching.contains(conn)
@@ -942,10 +1015,12 @@ impl Workspace {
         let sub = cx.subscribe_in(&editor, window, move |this, _, ev: &InputEvent, _, cx| {
             if let InputEvent::Change = ev
                 && let Some(i) = this.tabs.index_of(id)
-                && !this.tabs.tabs[i].dirty
             {
-                this.tabs.tabs[i].dirty = true;
-                cx.notify();
+                if !this.tabs.tabs[i].dirty {
+                    this.tabs.tabs[i].dirty = true;
+                    cx.notify();
+                }
+                this.schedule_autosave(id, cx);
             }
         });
         self._subs.push(sub);
@@ -961,10 +1036,176 @@ impl Workspace {
     }
 
     fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        // 닫기 전에 자동 저장한다(R45.2)
+        if let Some(id) = self.tabs.tabs.get(i).map(|t| t.id) {
+            self.autosave(id, cx);
+        }
         if let Some(t) = self.tabs.close(i) {
             self.bodies.remove(&t.id);
+            self.file_text.remove(&t.id);
+            self.autosave_stopped.remove(&t.id);
+            self.autosave_tasks.remove(&t.id);
         }
         cx.notify();
+    }
+
+    /// 대시보드 탭을 하나만 연다(R64.1).
+    pub(super) fn open_dashboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(i) = self
+            .tabs
+            .tabs
+            .iter()
+            .position(|t| matches!(self.bodies.get(&t.id), Some(Body::Dashboard { .. })))
+        {
+            self.tabs.activate(i);
+            cx.notify();
+            return;
+        }
+        let Some(engine) = self.engine.clone() else { return };
+        let id = self.tabs.open_named(None, "대시보드".into());
+        let (rt, conns) = (self.rt.clone(), self.tree.conns.clone());
+        let view = cx.new(|cx| DashboardView::new(rt, engine, conns, window, cx));
+        self.bodies.insert(id, Body::Dashboard { view });
+        cx.notify();
+    }
+
+    // ─── 쿼리 파일(R43·R45) ───
+
+    fn project_dir(&self) -> Option<PathBuf> {
+        match &self.target {
+            Some(Target::Local(d)) => Some(std::path::absolute(d).unwrap_or_else(|_| d.clone())),
+            _ => None,
+        }
+    }
+
+    /// 로컬 프로젝트의 queries/ 를 다시 훑는다. 매핑은 프로젝트를 다시 읽어 얻는다.
+    pub(super) fn refresh_queries(&mut self) {
+        self.queries = self.project_dir().map(|dir| {
+            let mapping = idb_core::project::load_project(&dir).map(|p| p.mapping).unwrap_or_default();
+            queries::scan(&dir, &mapping, &self.tree.conns)
+        });
+    }
+
+    /// 쿼리 파일을 연다. 이미 열린 탭이면 그 탭으로 간다. 붙은 접속이 있으면 그 접속으로 연다.
+    pub(super) fn open_query(&mut self, rel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.project_dir() else { return };
+        let path = dir.join(&rel);
+        if let Some(i) = self.tabs.tabs.iter().position(|t| t.path.as_deref() == Some(path.as_path())) {
+            self.tabs.activate(i);
+            cx.notify();
+            return;
+        }
+        let conn = self
+            .queries
+            .as_ref()
+            .and_then(|q| q.iter().find(|f| f.rel == rel))
+            .and_then(|f| f.conn.clone());
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let id = self.tabs.open(conn.clone(), Some(path));
+                self.file_text.insert(id, text.clone());
+                self.insert_sql_body(id, text, window, cx);
+                if let Some(c) = conn {
+                    self.ensure_catalog(&c, window, cx);
+                }
+                self.sync_catalog_cells();
+                cx.notify();
+            }
+            Err(e) => self.set_status(format!("열기 실패: {e}"), true, cx),
+        }
+    }
+
+    fn schedule_autosave(&mut self, id: u64, cx: &mut Context<Self>) {
+        if !self.autosave_on {
+            return;
+        }
+        let has_file = self.tabs.index_of(id).is_some_and(|i| self.tabs.tabs[i].path.is_some());
+        if !has_file || self.autosave_stopped.contains_key(&id) || !self.file_text.contains_key(&id) {
+            return;
+        }
+        // 마지막 고침 1초 뒤(R45.2). 새 고침이 오면 앞 작업을 버린다
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |ws, cx| ws.autosave(id, cx));
+        });
+        self.autosave_tasks.insert(id, task);
+    }
+
+    /// 파일 탭을 저장한다. 밖에서 바뀌었으면 멈추고 알린다(내용으로 가른다).
+    pub(super) fn autosave(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.autosave_tasks.remove(&id);
+        if !self.autosave_on {
+            return;
+        }
+        if self.autosave_stopped.contains_key(&id) {
+            return;
+        }
+        let Some(i) = self.tabs.index_of(id) else { return };
+        let Some(path) = self.tabs.tabs[i].path.clone() else { return };
+        let Some(last) = self.file_text.get(&id).cloned() else { return };
+        let Some(Body::Sql { editor, .. }) = self.bodies.get(&id) else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        let disk = std::fs::read_to_string(&path).ok();
+        match queries::before_autosave(disk.as_deref(), &last, &text) {
+            queries::SaveDecision::Skip => {
+                self.file_text.insert(id, text);
+                self.tabs.tabs[i].dirty = false;
+            }
+            queries::SaveDecision::Write => match queries::write_query(self.project_dir().as_deref(), &path, &text) {
+                Ok(()) => {
+                    self.file_text.insert(id, text);
+                    self.tabs.tabs[i].dirty = false;
+                }
+                Err(e) => self.set_status(format!("자동 저장 실패: {e}"), true, cx),
+            },
+            queries::SaveDecision::Stop(why) => {
+                self.autosave_stopped.insert(id, why.clone());
+                self.set_status(why, true, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 파일 없는 탭의 첫 실행이면 queries/<그룹>/<접속>-<시각>.sql 로 저장하고 매핑에 붙인다(R45.1).
+    fn save_new_query_on_run(&mut self, cx: &mut Context<Self>) {
+        if !self.autosave_on {
+            return;
+        }
+        let Some(dir) = self.project_dir() else { return };
+        let Some(t) = self.tabs.active().cloned() else { return };
+        if t.path.is_some() || t.name.is_some() {
+            return;
+        }
+        let Some(c) = t.conn.as_ref().and_then(|c| self.conn(c)).cloned() else {
+            return;
+        };
+        if c.kind != "postgresql" {
+            return;
+        }
+        let Some(Body::Sql { editor, .. }) = self.bodies.get(&t.id) else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        match queries::save_new_query(&dir, &c.group, &c.name, &c.uuid, &text) {
+            Ok((rel, note)) => {
+                if let Some(i) = self.tabs.index_of(t.id) {
+                    self.tabs.tabs[i].path = Some(dir.join(&rel));
+                    self.tabs.tabs[i].dirty = false;
+                }
+                self.file_text.insert(t.id, text);
+                self.refresh_queries();
+                match note {
+                    Some(n) => self.set_status(n, true, cx),
+                    None => self.set_status(format!("새 쿼리를 저장함: {rel}"), false, cx),
+                }
+            }
+            Err(e) => self.set_status(format!("새 쿼리 저장 실패: {e}"), true, cx),
+        }
     }
 
     fn open_table(&mut self, conn: String, schema: String, table: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1003,6 +1244,11 @@ impl Workspace {
             window.defer(cx, move |window, cx| view.update(cx, |v, cx| v.run_command(window, cx)));
             return;
         }
+        if let Some(Body::Source { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
+            let view = view.clone();
+            window.defer(cx, move |window, cx| view.update(cx, |v, cx| v.run(window, cx)));
+            return;
+        }
         let Some(t) = self.tabs.active() else { return };
         if t.conn.is_none() {
             self.set_status("왼쪽 트리에서 접속을 먼저 고른다", true, cx);
@@ -1012,6 +1258,7 @@ impl Workspace {
             self.set_status("실행할 문장이 없다", true, cx);
             return;
         };
+        self.save_new_query_on_run(cx);
         let (_, names) = idb_core::params::bind(&sql);
         if names.is_empty() {
             self.run_sql(conn, sql, BTreeMap::new(), explain, window, cx);
@@ -1309,6 +1556,7 @@ impl Workspace {
                 Ok(text) => {
                     let conn = ws.active_conn();
                     let id = ws.tabs.open(conn, Some(path));
+                    ws.file_text.insert(id, text.clone());
                     ws.insert_sql_body(id, text, window, cx);
                     ws.sync_catalog_cells();
                     cx.notify();
@@ -1340,12 +1588,16 @@ impl Workspace {
     }
 
     fn write_file(&mut self, id: u64, path: PathBuf, text: String, cx: &mut Context<Self>) {
-        match std::fs::write(&path, text) {
+        // ⌘S 는 밖에서 바뀌었어도 덮어쓰고 자동 저장을 다시 켠다(R45.2)
+        match queries::write_query(self.project_dir().as_deref(), &path, &text) {
             Ok(()) => {
                 if let Some(i) = self.tabs.index_of(id) {
                     self.tabs.tabs[i].dirty = false;
                     self.tabs.tabs[i].path = Some(path.clone());
                 }
+                self.file_text.insert(id, text);
+                self.autosave_stopped.remove(&id);
+                self.refresh_queries();
                 self.set_status(format!("저장함: {}", path.display()), false, cx);
             }
             Err(e) => self.set_status(format!("저장 실패: {e}"), true, cx),
@@ -1387,86 +1639,126 @@ impl Focusable for Workspace {
 impl Workspace {
     fn render_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let mut remotes = v_flex().gap_1();
+        // Orca 첫 화면 문법: 가운데 마크·글자표·한 줄 소개, 아래 고를 것들은 둥근 줄(28px)
+        let row = |id: (&'static str, usize), label: String, detail: &'static str| {
+            h_flex()
+                .id(id)
+                .h(rems(1.9))
+                .px_3()
+                .gap_2()
+                .rounded(theme.radius)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.secondary))
+                .child(div().flex_1().truncate().child(label))
+                .child(div().text_xs().text_color(theme.muted_foreground).child(detail))
+        };
+        let header = |title: &'static str| {
+            div()
+                .px_3()
+                .pt_4()
+                .pb_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(title)
+        };
+        let mut remotes = v_flex().gap_px();
         match &self.remotes {
             Ok(names) if names.is_empty() => {
-                remotes = remotes.child(div().text_color(theme.muted_foreground).child(picker::NO_REMOTES));
+                remotes = remotes.child(div().px_3().text_xs().text_color(theme.muted_foreground).child(picker::NO_REMOTES));
             }
             Ok(names) => {
                 for (i, c) in picker::remote_choices(names).into_iter().enumerate() {
                     let t = c.target;
-                    remotes = remotes.child(
-                        Button::new(("remote", i))
-                            .label(c.label)
-                            .on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t.clone(), w, cx))),
-                    );
+                    let name = match &t {
+                        Target::Remote(n) => n.clone(),
+                        Target::Local(p) => p.display().to_string(),
+                    };
+                    remotes = remotes
+                        .child(row(("remote", i), name, "ssh").on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t.clone(), w, cx))));
                 }
             }
-            Err(e) => remotes = remotes.child(div().text_color(theme.danger).child(e.clone())),
+            Err(e) => remotes = remotes.child(div().px_3().text_xs().text_color(theme.danger).child(e.clone())),
         }
-        let mut recent = v_flex().gap_1();
+        let mut recent = v_flex().gap_px();
         for (i, t) in self.prefs.recent.iter().enumerate() {
             let t2 = t.clone();
-            recent = recent.child(
-                Button::new(("recent", i))
-                    .ghost()
-                    .label(t.label())
-                    .on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t2.clone(), w, cx))),
-            );
+            let detail = if matches!(t, Target::Remote(_)) { "원격" } else { "로컬" };
+            recent = recent
+                .child(row(("recent", i), t.label(), detail).on_click(cx.listener(move |ws, _, w, cx| ws.open_target(t2.clone(), w, cx))));
         }
-        let section = |title: &str| div().pt_4().pb_1().text_color(theme.muted_foreground).child(title.to_string());
-        v_flex().size_full().items_center().justify_center().child(
-            v_flex()
-                .w(px(600.))
-                .gap_1()
-                .child(div().text_2xl().child(picker::TITLE))
-                .child(div().text_color(theme.muted_foreground).child(picker::SUBTITLE))
-                .child(section(picker::REMOTE_SECTION))
-                .child(remotes)
-                .child(section(picker::LOCAL_SECTION))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().flex_1().child(Input::new(&self.dir_input)))
-                        .child(
-                            Button::new("pick-dir")
-                                .label(picker::PICK_DIR)
-                                .on_click(cx.listener(|_, _, window, cx| {
-                                    let rx = cx.prompt_for_paths(PathPromptOptions {
-                                        files: false,
-                                        directories: true,
-                                        multiple: false,
-                                        prompt: Some("프로젝트 폴더".into()),
-                                    });
-                                    cx.spawn_in(window, async move |this, cx| {
-                                        let Ok(Ok(Some(paths))) = rx.await else { return };
-                                        let Some(p) = paths.into_iter().next() else { return };
-                                        let _ = this.update_in(cx, move |ws, window, cx| ws.open_target(Target::Local(p), window, cx));
-                                    })
-                                    .detach();
-                                })),
-                        )
-                        .child(
-                            Button::new("open-dir")
-                                .primary()
-                                .label(picker::OPEN)
-                                .loading(self.connecting)
-                                .on_click(cx.listener(|ws, _, window, cx| {
-                                    let dir = expand_home(&ws.dir_input.read(cx).value());
-                                    ws.open_target(Target::Local(dir), window, cx);
-                                })),
-                        ),
-                )
-                .when(!self.prefs.recent.is_empty(), |d| {
-                    d.child(section(picker::RECENT_SECTION)).child(recent)
-                })
-                .child(
-                    div()
-                        .pt_4()
-                        .text_color(if self.status.1 { theme.danger } else { theme.muted_foreground })
-                        .child(self.status.0.clone()),
-                ),
-        )
+        v_flex()
+            .id("picker")
+            .size_full()
+            .overflow_y_scroll()
+            .items_center()
+            .justify_center()
+            .gap_6()
+            .py_8()
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(super::brand::mark(px(64.), theme.foreground, super::brand::accent()))
+                    .child(super::brand::wordmark(px(40.), theme.foreground))
+                    .child(div().text_color(theme.muted_foreground).child(brand::TAGLINE)),
+            )
+            .child(
+                v_flex()
+                    .w(px(520.))
+                    .child(header(picker::REMOTE_SECTION))
+                    .child(remotes)
+                    .child(header(picker::LOCAL_SECTION))
+                    .child(
+                        h_flex()
+                            .px_3()
+                            .gap_2()
+                            .child(div().flex_1().child(Input::new(&self.dir_input).small()))
+                            .child(
+                                Button::new("pick-dir")
+                                    .small()
+                                    .label(picker::PICK_DIR)
+                                    .on_click(cx.listener(|_, _, window, cx| {
+                                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                                            files: false,
+                                            directories: true,
+                                            multiple: false,
+                                            prompt: Some("프로젝트 폴더".into()),
+                                        });
+                                        cx.spawn_in(window, async move |this, cx| {
+                                            let Ok(Ok(Some(paths))) = rx.await else { return };
+                                            let Some(p) = paths.into_iter().next() else { return };
+                                            let _ = this.update_in(cx, move |ws, window, cx| ws.open_target(Target::Local(p), window, cx));
+                                        })
+                                        .detach();
+                                    })),
+                            )
+                            .child(
+                                Button::new("open-dir")
+                                    .small()
+                                    .primary()
+                                    .label(picker::OPEN)
+                                    .loading(self.connecting)
+                                    .on_click(cx.listener(|ws, _, window, cx| {
+                                        let dir = expand_home(&ws.dir_input.read(cx).value());
+                                        ws.open_target(Target::Local(dir), window, cx);
+                                    })),
+                            ),
+                    )
+                    .when(!self.prefs.recent.is_empty(), |d| {
+                        d.child(header(picker::RECENT_SECTION)).child(recent)
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(if self.status.1 { theme.danger } else { theme.muted_foreground })
+                    .child(if self.status.0.is_empty() {
+                        format!("{} · ⌘, 설정 · ⌘/ 단축키", brand::version())
+                    } else {
+                        self.status.0.clone()
+                    }),
+            )
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1493,7 +1785,7 @@ impl Workspace {
                         .id(("folder", i))
                         .mx_1()
                         .px_2()
-                        .h(rems(1.6))
+                        .h(rems(1.75))
                         .gap_1()
                         .rounded(theme.radius)
                         .cursor_pointer()
@@ -1502,7 +1794,19 @@ impl Workspace {
                         .text_color(theme.muted_foreground)
                         .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
                         .child(div().flex_1().truncate().child(row.label))
-                        .child(div().child(count.to_string()))
+                        .child(
+                            // 개수 알약(Orca 의 18px 배지)
+                            div()
+                                .min_w(px(18.))
+                                .h(px(18.))
+                                .px_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(theme.secondary)
+                                .child(count.to_string()),
+                        )
                         .on_click(cx.listener(move |ws, _, _, cx| {
                             ws.tree.toggle(&label);
                             cx.notify();
@@ -1640,7 +1944,17 @@ impl Workspace {
             }
         }
 
-        let section = |title: &'static str| div().px_3().pt_3().pb_1().text_xs().text_color(theme.muted_foreground).child(title);
+        let queries_el = self.render_queries(&filter, cx);
+        let section = |title: &'static str| {
+            div()
+                .px_4()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(title)
+        };
         v_flex()
             .size_full()
             .bg(theme.sidebar)
@@ -1649,6 +1963,14 @@ impl Workspace {
                     .p_2()
                     .gap_1()
                     .child(div().flex_1().child(Input::new(&self.tree_filter).small().cleanable(true)))
+                    .child(
+                        Button::new("dashboard")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::LayoutDashboard)
+                            .tooltip("대시보드 (⌘G)")
+                            .on_click(cx.listener(|ws, _, w, cx| ws.open_dashboard(w, cx))),
+                    )
                     .child(
                         Button::new("switch-conn")
                             .xsmall()
@@ -1667,6 +1989,8 @@ impl Workspace {
                     .child(section("접속"))
                     .child(list)
                     .when(has_catalog, |d| d.child(section("테이블")).child(objects))
+                    .child(section("쿼리"))
+                    .child(queries_el)
                     .when(active.is_some() && !has_catalog, |d| {
                         d.child(
                             div()
@@ -1680,6 +2004,68 @@ impl Workspace {
             )
     }
 
+    fn render_queries(&self, filter: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme().clone();
+        let Some(files) = &self.queries else {
+            return div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("원격 접속에서는 serve 쪽 queries/ 를 열지 않는다 (⌘O 로 이 Mac 의 파일을 연다)")
+                .into_any_element();
+        };
+        let shown: Vec<QueryFile> = files
+            .iter()
+            .filter(|f| filter.is_empty() || f.name.to_lowercase().contains(filter))
+            .cloned()
+            .collect();
+        if shown.is_empty() {
+            return div()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(if files.is_empty() {
+                    "queries/ 에 파일이 없다 — 새 탭에서 처음 실행하면 저장된다"
+                } else {
+                    "맞는 파일이 없다"
+                })
+                .into_any_element();
+        }
+        let mut list = v_flex().py_1().gap_px();
+        let mut i = 0usize;
+        for (conn, group) in queries::group(&shown, &self.tree.conns) {
+            list = list.child(
+                div()
+                    .px_3()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(conn.clone().unwrap_or_else(|| "접속 없음".into())),
+            );
+            for f in group {
+                i += 1;
+                let rel = f.rel.clone();
+                let open = self.tabs.tabs.iter().any(|t| t.path.as_ref().is_some_and(|p| p.ends_with(&f.rel)));
+                list = list.child(
+                    h_flex()
+                        .id(("query", i))
+                        .mx_1()
+                        .px_3()
+                        .h(rems(1.75))
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .when(open, |d| d.bg(theme.sidebar_accent))
+                        .hover(|st| st.bg(theme.sidebar_accent))
+                        .child(div().flex_1().truncate().child(f.name.clone()))
+                        .on_click(cx.listener(move |ws, _, window, cx| ws.open_query(rel.clone(), window, cx))),
+                );
+            }
+        }
+        list.into_any_element()
+    }
+
     fn conn_label(&self) -> String {
         let Some(c) = self.active_conn().and_then(|c| self.conn(&c).cloned()) else {
             return "접속 고르기".into();
@@ -1691,19 +2077,12 @@ impl Workspace {
         }
     }
 
-    fn render_toolbar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// 상태 줄 왼쪽의 접속·데이터베이스·스키마 고르기다(Orca 처럼 무거운 도구 줄 없이).
+    fn render_conn_selector(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let conn = self.active_conn();
         let summary = conn.as_ref().and_then(|c| self.conn(c)).cloned();
-        let in_tx = conn.as_ref().is_some_and(|c| self.tx.get(c).copied().unwrap_or(false));
         let is_prod = summary.as_ref().is_some_and(|s| tone(&s.env) == Tone::Prod);
-        let is_pg = summary.as_ref().is_some_and(|s| s.kind == "postgresql");
-        let lock = conn.as_ref().and_then(|c| self.locks.get(c)).map(|(l, at)| {
-            let left = l.remaining_secs.saturating_sub(at.elapsed().as_secs());
-            (l.locked || left == 0, left)
-        });
-        let locked = lock.is_none_or(|(l, _)| l);
-        let busy = self.busy.is_some();
 
         // 접속·데이터베이스·스키마 고르기
         let conns: Vec<(String, String)> = self
@@ -1722,7 +2101,7 @@ impl Workspace {
         let ws = cx.entity().downgrade();
         let cur = conn.clone();
         let selector = Button::new("conn-selector")
-            .small()
+            .xsmall()
             .ghost()
             .icon(IconName::ChevronsUpDown)
             .label(self.conn_label())
@@ -1764,58 +2143,67 @@ impl Workspace {
 
         h_flex()
             .gap_1()
-            .px_2()
-            .h(rems(2.5))
-            .border_b_1()
-            .border_color(theme.border)
-            .when(is_prod, |d| d.bg(theme.danger.opacity(0.08)))
             .child(selector)
             .when_some(summary.as_ref(), |d, s| d.child(env_pill(&s.env, theme.is_dark())))
-            .child(div().flex_1())
+    }
+
+    /// 제목 줄 오른쪽의 작은 아이콘 버튼들이다(실행·EXPLAIN·멈춤·트랜잭션·prod 잠금).
+    fn render_actions(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let conn = self.active_conn();
+        let summary = conn.as_ref().and_then(|c| self.conn(c)).cloned();
+        let in_tx = conn.as_ref().is_some_and(|c| self.tx.get(c).copied().unwrap_or(false));
+        let is_prod = summary.as_ref().is_some_and(|s| tone(&s.env) == Tone::Prod);
+        let is_pg = summary.as_ref().is_some_and(|s| s.kind == "postgresql");
+        let lock = conn.as_ref().and_then(|c| self.locks.get(c)).map(|(l, at)| {
+            let left = l.remaining_secs.saturating_sub(at.elapsed().as_secs());
+            (l.locked || left == 0, left)
+        });
+        let locked = lock.is_none_or(|(l, _)| l);
+        let busy = self.busy.is_some();
+        h_flex()
+            .gap_0p5()
+            .pr_2()
             .when(is_pg, |d| {
                 d.child(
                     Button::new("run")
-                        .small()
+                        .xsmall()
                         .ghost()
                         .icon(IconName::Play)
-                        .label("실행")
                         .tooltip("커서 문장 또는 선택 실행 (⌘↵)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_query(false, w, cx))),
                 )
                 .child(
                     Button::new("run-all")
-                        .small()
+                        .xsmall()
                         .ghost()
                         .icon(IconName::ArrowRight)
-                        .label("모두")
                         .tooltip("편집기 문장 모두 실행 (⇧⌘↵)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_all(w, cx))),
                 )
                 .child(
                     Button::new("explain")
-                        .small()
+                        .xsmall()
                         .ghost()
                         .icon(IconName::Search)
-                        .label("EXPLAIN")
                         .tooltip("실행 계획 (⌘E)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_query(true, w, cx))),
                 )
             })
             .child(
                 Button::new("stop")
-                    .small()
+                    .xsmall()
                     .ghost()
                     .icon(IconName::Square)
-                    .label("멈춤")
                     .disabled(!busy)
                     .tooltip("진행 중인 요청 멈춤 (⌘.)")
                     .on_click(cx.listener(|ws, _, _, cx| ws.cancel(cx))),
             )
             .when(is_pg, |d| {
-                d.child(div().w_px().h(rems(1.2)).bg(theme.border).mx_1())
+                d.child(div().w_px().h(rems(1.0)).bg(theme.border).mx_1())
                     .child(
                         Button::new("tx")
-                            .small()
+                            .xsmall()
                             .with_variant(if in_tx { ButtonVariant::Warning } else { ButtonVariant::Ghost })
                             .label(if in_tx { "트랜잭션 중" } else { "BEGIN" })
                             .tooltip(if in_tx {
@@ -1832,18 +2220,18 @@ impl Workspace {
                     .when(in_tx, |d| {
                         d.child(
                             Button::new("commit")
-                                .small()
+                                .xsmall()
                                 .ghost()
                                 .icon(IconName::Check)
-                                .label("COMMIT")
+                                .tooltip("COMMIT")
                                 .on_click(cx.listener(|ws, _, w, cx| ws.tx_op("COMMIT", w, cx))),
                         )
                         .child(
                             Button::new("rollback")
-                                .small()
+                                .xsmall()
                                 .ghost()
                                 .icon(IconName::Undo2)
-                                .label("ROLLBACK")
+                                .tooltip("ROLLBACK")
                                 .on_click(cx.listener(|ws, _, w, cx| ws.tx_op("ROLLBACK", w, cx))),
                         )
                     })
@@ -1851,11 +2239,11 @@ impl Workspace {
             .when(is_prod, |d| {
                 let label = match lock {
                     Some((false, left)) => format!("prod 열림 {}:{:02}", left / 60, left % 60),
-                    _ => "prod 잠김".into(),
+                    _ => "prod".into(),
                 };
                 d.child(
                     Button::new("lock")
-                        .small()
+                        .xsmall()
                         .with_variant(if locked { ButtonVariant::Ghost } else { ButtonVariant::Danger })
                         .icon(IconName::TriangleAlert)
                         .label(label)
@@ -1863,17 +2251,29 @@ impl Workspace {
                         .on_click(cx.listener(|ws, _, w, cx| ws.toggle_lock(w, cx))),
                 )
             })
+            .child(div().w_px().h(rems(1.0)).bg(theme.border).mx_1())
+            .child(
+                Button::new("dashboard-top")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::LayoutDashboard)
+                    .tooltip("대시보드 (⌘G)")
+                    .on_click(cx.listener(|ws, _, w, cx| ws.open_dashboard(w, cx))),
+            )
+            .child(
+                Button::new("settings-top")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .tooltip("설정 (⌘,)")
+                    .on_click(cx.listener(|ws, _, w, cx| super::dialogs::open_settings(ws, w, cx))),
+            )
     }
 
     fn render_tabs(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let mut bar = h_flex()
-            .id("tabs")
-            .h(rems(2.25))
-            .overflow_x_scroll()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.tab_bar);
+        // 제목 줄 안의 탭(Orca): 작은 높이, 고른 탭만 바탕을 깔고 아래 강조선을 둔다
+        let mut bar = h_flex().id("tabs").h_full().gap_0p5().items_center().overflow_x_scroll();
         for (i, t) in self.tabs.tabs.iter().enumerate() {
             let active = i == self.tabs.active;
             let prod = t
@@ -1886,28 +2286,37 @@ impl Workspace {
             bar = bar.child(
                 h_flex()
                     .id(("tab", i))
-                    .group("tab")
-                    .h_full()
-                    .px_3()
-                    .gap_2()
-                    .border_r_1()
-                    .border_color(theme.border)
+                    .group(SharedString::from(format!("tab-{i}")))
+                    .h(rems(1.6))
+                    .pl_2p5()
+                    .pr_1()
+                    .gap_1()
+                    .rounded(theme.radius)
                     .cursor_pointer()
+                    .text_xs()
                     .text_color(if active { theme.foreground } else { theme.muted_foreground })
-                    .when(active, |d| d.bg(theme.background))
+                    .when(active, |d| {
+                        d.bg(theme.secondary)
+                            .border_b_2()
+                            .border_color(if prod { theme.danger } else { theme.ring })
+                    })
                     .when(!active, |d| d.hover(|s| s.bg(theme.secondary.opacity(0.5))))
-                    .when(prod, |d| d.border_t_2().border_color(theme.danger))
-                    .child(div().child(base.title()))
+                    .when(prod && !active, |d| d.text_color(theme.danger.opacity(0.8)))
+                    .child(div().max_w(px(180.)).truncate().child(base.title()))
                     .child(
                         div()
                             .id(("close", i))
                             .w(rems(1.0))
+                            .h(rems(1.0))
                             .flex()
+                            .items_center()
                             .justify_center()
                             .rounded(theme.radius)
-                            .text_xs()
-                            .hover(|s| s.bg(theme.secondary))
-                            // 고친 탭은 점을 보이고, 올리면 닫기 단추가 된다
+                            .hover(|s| s.bg(theme.accent))
+                            // 고친 탭은 점을 늘 보이고, 아니면 올렸을 때만 닫기 단추가 보인다
+                            .when(!t.dirty && !active, |d| {
+                                d.opacity(0.).group_hover(format!("tab-{i}"), |s| s.opacity(1.))
+                            })
                             .child(if t.dirty { "●" } else { "×" })
                             .tooltip(|window, cx| Tooltip::new("탭 닫기 (⌘W)").build(window, cx))
                             .on_click(cx.listener(move |ws, _, _, cx| {
@@ -1917,6 +2326,10 @@ impl Workspace {
                     )
                     .on_mouse_down(MouseButton::Middle, cx.listener(move |ws, _, _, cx| ws.close_tab(i, cx)))
                     .on_click(cx.listener(move |ws, _, _, cx| {
+                        // 탭을 옮길 때 자동 저장한다(R45.2)
+                        if let Some(id) = ws.tabs.active().map(|t| t.id) {
+                            ws.autosave(id, cx);
+                        }
                         ws.tabs.activate(i);
                         cx.notify();
                     })),
@@ -1973,6 +2386,8 @@ impl Workspace {
             Some(Body::Table { result: Some(r) }) => r.clone().into_any_element(),
             Some(Body::Table { result: None }) => empty("읽는 중…", ""),
             Some(Body::Redis { view }) => view.clone().into_any_element(),
+            Some(Body::Source { view }) => view.clone().into_any_element(),
+            Some(Body::Dashboard { view }) => view.clone().into_any_element(),
             None => empty("", ""),
         }
     }
@@ -1994,8 +2409,9 @@ impl Workspace {
             _ => None,
         });
         let pill = |text: String, bg: gpui::Hsla, fg: gpui::Hsla| div().px_2().rounded_full().bg(bg).text_color(fg).child(text);
+        let selector = self.render_conn_selector(cx);
         h_flex()
-            .px_3()
+            .px_1()
             .h(rems(1.6))
             .gap_3()
             .border_t_1()
@@ -2003,7 +2419,7 @@ impl Workspace {
             .bg(theme.status_bar)
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(div().child(self.target.as_ref().map(Target::label).unwrap_or_default()))
+            .child(selector)
             .when(in_tx, |d| {
                 d.child(pill("트랜잭션 중".into(), theme.warning.opacity(0.2), theme.warning))
             })
@@ -2025,6 +2441,7 @@ impl Workspace {
                     .child(self.status.0.clone()),
             )
             .when_some(summary, |d, s| d.child(div().child(s)))
+            .child(div().pr_2().child(self.target.as_ref().map(Target::label).unwrap_or_default()))
             .when(self.prefs.zoom != zoom::DEFAULT, |d| {
                 d.child(div().child(zoom::label(self.prefs.zoom)))
             })
@@ -2090,6 +2507,7 @@ impl Render for Workspace {
                 ws.show_sidebar = !ws.show_sidebar;
                 cx.notify();
             }))
+            .on_action(cx.listener(|ws, _: &ShowDashboard, w, cx| ws.open_dashboard(w, cx)))
             .on_action(cx.listener(|ws, _: &ToggleResults, _, cx| {
                 ws.show_results = !ws.show_results;
                 cx.notify();
@@ -2099,21 +2517,53 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &About, w, cx| super::dialogs::open_about(w, cx)))
             .on_action(cx.listener(|_, _: &Minimize, w, _| w.minimize_window()));
         if self.engine.is_none() {
-            return root.child(self.render_picker(cx));
+            let bar = TitleBar::new().child(
+                h_flex()
+                    .gap_2()
+                    .child(super::brand::mark(px(14.), theme.foreground, super::brand::accent()))
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(brand::NAME)),
+            );
+            return root.child(
+                v_flex()
+                    .size_full()
+                    .child(bar)
+                    .child(div().flex_1().min_h_0().child(self.render_picker(cx))),
+            );
         }
         let sidebar = self.render_sidebar(cx);
-        let toolbar = self.render_toolbar(cx);
+        let actions = self.render_actions(cx);
         let tabs = self.render_tabs(cx);
         let body = self.render_body(cx);
         let status = self.render_status(cx);
-        let main = v_flex()
-            .size_full()
-            .child(tabs)
-            .child(toolbar)
-            .child(div().flex_1().min_h_0().child(body));
+        // 제목 줄(Orca): 신호등 자리 뒤에 사이드바 단추·마크, 가운데 탭, 오른쪽 작은 아이콘 단추
+        let titlebar = TitleBar::new().child(
+            h_flex()
+                .size_full()
+                .gap_1()
+                .child(
+                    Button::new("toggle-sidebar")
+                        .xsmall()
+                        .ghost()
+                        .icon(if self.show_sidebar {
+                            IconName::PanelLeftClose
+                        } else {
+                            IconName::PanelLeftOpen
+                        })
+                        .tooltip("사이드바 (⌘B)")
+                        .on_click(cx.listener(|ws, _, _, cx| {
+                            ws.show_sidebar = !ws.show_sidebar;
+                            cx.notify();
+                        })),
+                )
+                .child(super::brand::mark(px(14.), theme.foreground, super::brand::accent()))
+                .child(div().flex_1().min_w_0().h_full().child(tabs))
+                .child(actions),
+        );
+        let main = v_flex().size_full().child(div().flex_1().min_h_0().child(body));
         root.child(
             v_flex()
                 .size_full()
+                .child(titlebar)
                 .child(
                     div().flex_1().min_h_0().child(
                         h_resizable(SharedString::from("main-split"))
@@ -2146,7 +2596,13 @@ mod tests {
         let rt = Rc::new(Runtime::new().unwrap());
         let mut ws = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| Workspace::new(rt, crate::vm::font::resolve("D2Coding", 13.0, &[]), window, cx));
+            let view = cx.new(|cx| {
+                let mut w = Workspace::new(rt, crate::vm::font::resolve("D2Coding", 13.0, &[]), window, cx);
+                // 시험은 사용자 설정 파일(~/.config/db/gui.json)을 읽지도 쓰지도 않는다
+                w.prefs_path = None;
+                w.prefs = Prefs::default();
+                w
+            });
             ws = Some(view.clone());
             Root::new(view, window, cx)
         });
@@ -2248,6 +2704,174 @@ mod tests {
             let w = ws.read(cx);
             let t = w.tabs.active().unwrap();
             assert!(matches!(w.bodies.get(&t.id), Some(Body::Redis { .. })));
+        });
+    }
+
+    #[gpui::test]
+    fn 저장소_접속을_누르면_트리_탭을_열고_다시_누르면_그_탭으로_간다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("aws-stg".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("logs-stg".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("aws-stg".into(), window, cx)));
+        draw(cx);
+        let view = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            let n = w
+                .tabs
+                .tabs
+                .iter()
+                .filter(|t| matches!(w.bodies.get(&t.id), Some(Body::Source { .. })))
+                .count();
+            assert_eq!(n, 2, "같은 저장소는 탭 하나");
+            match w.tabs.active().and_then(|t| w.bodies.get(&t.id)) {
+                Some(Body::Source { view }) => view.clone(),
+                _ => panic!("저장소 탭이 아니다"),
+            }
+        });
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert_eq!((v.conn.as_str(), v.kind.as_str()), ("aws-stg", "aws"));
+        });
+        // ⌘↵: 빈 편집기는 보내지 않는다
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.run_query(false, window, cx)));
+        draw(cx);
+        cx.update(|_, cx| assert!(ws.read(cx).busy.is_none()));
+    }
+
+    #[gpui::test]
+    fn 대시보드는_한_탭만_열고_모든_접속을_확인한다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_dashboard(window, cx)));
+        draw(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_dashboard(window, cx)));
+        draw(cx);
+        let (view, n_conns) = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            let dash: Vec<_> = w
+                .tabs
+                .tabs
+                .iter()
+                .filter_map(|t| match w.bodies.get(&t.id) {
+                    Some(Body::Dashboard { view }) => Some(view.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(dash.len(), 1);
+            (dash[0].clone(), w.tree.conns.len())
+        });
+        // 확인은 접속마다 하나씩 동시에 간다(읽기 전용, 확인 창 없음)
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert!(
+                v.checking + v.health.len() >= n_conns,
+                "확인 {} + 결과 {} < 접속 {n_conns}",
+                v.checking,
+                v.health.len()
+            );
+            assert!(ws.read(cx).busy.is_none(), "대시보드 확인은 작업 공간 요청 칸을 쓰지 않는다");
+        });
+    }
+
+    fn redis_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".idea")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".dbtui")).unwrap();
+        for f in ["dataSources.xml", "dataSources.local.xml"] {
+            std::fs::copy(offline_project().join(".idea").join(f), dir.path().join(".idea").join(f)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join(".dbtui/connections.json"),
+            r#"[{"uuid": "r1", "name": "cache-local", "group": "c", "kind": "redis", "host": "127.0.0.1", "port": 1}]"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[gpui::test]
+    fn Redis_편집은_뻔한_입력_오류를_보내지_않고_전체_패턴_삭제를_막는다(cx: &mut TestAppContext) {
+        let dir = redis_project();
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("cache-local".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        let view = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            match w.tabs.active().and_then(|t| w.bodies.get(&t.id)) {
+                Some(Body::Redis { view }) => view.clone(),
+                _ => panic!("Redis 탭이 아니다"),
+            }
+        });
+        let raw: idb_engine::RawValue = serde_json::from_value(serde_json::json!({
+            "key": "k", "type": "string", "ttl_secs": -1, "string": "v", "truncated": true
+        }))
+        .unwrap();
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.selected = Some("k".into());
+                v.raw = Some(raw);
+                assert!(!v.apply_edit("k", crate::vm::redisedit::Action::SetString("x".into()), window, cx));
+            })
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(w.busy.is_none(), "잘린 값은 보내지 않는다");
+            assert!(w.status.0.contains("일부만 읽었다"), "{:?}", w.status);
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.pattern.update(cx, |i, cx| i.set_value("*", window, cx));
+                v.pattern_delete(window, cx);
+            })
+        });
+        draw(cx);
+        cx.update(|_, cx| assert!(ws.read(cx).status.0.contains("패턴을 좁힌다"), "{:?}", ws.read(cx).status));
+    }
+
+    /// 리뷰: A 를 고르고 곧 B 를 고르면 A 의 늦은 답이 B 자리에 앉아, B 로 보이는 창에서 A 를 지웠다.
+    #[gpui::test]
+    fn Redis_늦은_답은_버리고_다른_키_편집은_보내지_않는다(cx: &mut TestAppContext) {
+        let dir = redis_project();
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("cache-local".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        let view = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            match w.tabs.active().and_then(|t| w.bodies.get(&t.id)) {
+                Some(Body::Redis { view }) => view.clone(),
+                _ => panic!("Redis 탭이 아니다"),
+            }
+        });
+        let raw = |k: &str| -> idb_engine::RawValue {
+            serde_json::from_value(serde_json::json!({"key": k, "type": "string", "ttl_secs": -1, "string": "v"})).unwrap()
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.open_key("a".into(), window, cx);
+                v.open_key("b".into(), window, cx);
+                // A 를 고를 때의 세대(1)로 A 의 답이 늦게 온다
+                v.on_raw(1, raw("a"), cx);
+                assert!(v.raw.is_none(), "늦은 A 답은 버린다");
+                v.on_raw(2, raw("b"), cx);
+                assert_eq!(v.raw.as_ref().map(|r| r.key.as_str()), Some("b"));
+                // 창은 a 로 열렸는데 그사이 b 를 골랐다면 보내지 않는다
+                assert!(!v.apply_edit("a", crate::vm::redisedit::Action::DeleteKey, window, cx));
+                assert!(
+                    v.apply_edit("b", crate::vm::redisedit::Action::DeleteKey, window, cx),
+                    "확인한 키는 보낸다"
+                );
+            })
         });
     }
 
@@ -2471,6 +3095,303 @@ mod tests {
             })
         });
         assert_eq!(*log.borrow(), vec!["cancel", "fail", "fail-only"]);
+    }
+
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let (src, dst) = (e.path(), to.join(e.file_name()));
+            if e.file_type().unwrap().is_dir() {
+                copy_dir(&src, &dst);
+            } else {
+                std::fs::copy(&src, &dst).unwrap();
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn 쿼리_파일을_매핑된_접속으로_열고_자동_저장은_밖의_바뀜에서_멈춘다(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&offline_project(), dir.path());
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let (rel, conn) = cx.update(|_, cx| {
+            let q = ws.read(cx).queries.clone().expect("로컬이면 쿼리 목록이 있다");
+            let f = q.iter().find(|f| f.rel == "queries/app/a.sql").expect("a.sql").clone();
+            (f.rel, f.conn)
+        });
+        assert!(conn.is_some(), "매핑으로 접속을 잇는다");
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_query(rel.clone(), window, cx)));
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_query(rel.clone(), window, cx)));
+        draw(cx);
+        let id = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            let opened: Vec<_> = w
+                .tabs
+                .tabs
+                .iter()
+                .filter(|t| t.path.as_ref().is_some_and(|p| p.ends_with(&rel)))
+                .collect();
+            assert_eq!(opened.len(), 1, "이미 열린 파일은 그 탭으로 간다");
+            assert_eq!(opened[0].conn, conn);
+            opened[0].id
+        });
+        let file = dir.path().join(&rel);
+        // 편집기 글을 바꾸고 자동 저장
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id) {
+                    editor.update(cx, |e, cx| e.set_value("select 42", window, cx));
+                }
+                w.autosave(id, cx);
+            })
+        });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "select 42");
+        // 밖에서 바꾸면 멈춘다
+        std::fs::write(&file, "-- 다른 편집기").unwrap();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id) {
+                    editor.update(cx, |e, cx| e.set_value("select 43", window, cx));
+                }
+                w.autosave(id, cx);
+            })
+        });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- 다른 편집기", "밖의 바뀜을 덮지 않는다");
+        cx.update(|_, cx| assert!(ws.read(cx).autosave_stopped.contains_key(&id)));
+    }
+
+    #[gpui::test]
+    fn DB_AUTO_SAVE_0_이면_자동_저장과_첫_실행_저장을_하지_않는다(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&offline_project(), dir.path());
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let rel = "queries/app/a.sql".to_string();
+        let file = dir.path().join(&rel);
+        let before = std::fs::read_to_string(&file).unwrap();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.autosave_on = false;
+                w.open_query(rel.clone(), window, cx);
+                let id = w.tabs.active().unwrap().id;
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id) {
+                    editor.update(cx, |e, cx| e.set_value("select 99", window, cx));
+                }
+                w.autosave(id, cx);
+                // 첫 실행 저장도 끈다: 파일 없는 새 탭
+                w.new_tab(Some("app-stg".into()), window, cx);
+                let id2 = w.tabs.active().unwrap().id;
+                if let Some(Body::Sql { editor, .. }) = w.bodies.get(&id2) {
+                    editor.update(cx, |e, cx| e.set_value("select 1", window, cx));
+                }
+                w.save_new_query_on_run(cx);
+                assert!(w.tabs.active().unwrap().path.is_none(), "첫 실행 저장을 하지 않는다");
+            })
+        });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "자동 저장하지 않는다");
+    }
+
+    /// 리뷰: prod WHERE 가 gui.json 에 남았다(R75.5 는 prod 기록을 막는다).
+    #[gpui::test]
+    fn prod_테이블_WHERE_는_기록하지_않고_옛_prod_기록은_지운다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|_, cx| {
+            ws.update(cx, |w, _| {
+                // 옛 판이 남긴 app-prod 기록(접속을 열 때 지워져야 한다)
+                let stale = crate::vm::history::table_key("00000000-0000-0000-0000-000000000002", "public", "users");
+                w.prefs.table_history.insert(
+                    stale,
+                    crate::vm::history::TableHistory {
+                        where_: vec!["email = 'x'".into()],
+                        order: vec![],
+                    },
+                );
+                w.prefs.table_history.insert(
+                    "app-prod\tpublic.users".into(),
+                    crate::vm::history::TableHistory {
+                        where_: vec!["y".into()],
+                        order: vec![],
+                    },
+                );
+            })
+        });
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let rs: ResultSet =
+            serde_json::from_value(serde_json::json!({"cols": ["id"], "rows": [["1"]], "text": "", "truncated": false, "elapsed_ms": 1}))
+                .unwrap();
+        let src = Source::Table {
+            schema: "public".into(),
+            table: "users".into(),
+            filter: String::new(),
+            order: String::new(),
+        };
+        let r = cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                let (_, prod) = w.history_key("app-prod", "public", "users");
+                assert!(prod);
+                assert!(
+                    !w.prefs.table_history.keys().any(|k| k.contains("public.users")
+                        && (k.starts_with("app-prod") || k.starts_with("00000000-0000-0000-0000-000000000002"))),
+                    "옛 prod 기록이 남았다: {:?}",
+                    w.prefs.table_history.keys().collect::<Vec<_>>()
+                );
+                let id = w.tabs.tabs[0].id;
+                w.show_result(id, "app-prod".into(), src, rs, false, window, cx);
+                match w.bodies.get(&id) {
+                    Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                    _ => panic!("결과 없음"),
+                }
+            })
+        });
+        cx.update(|window, cx| {
+            let (wi, _) = r.read(cx).table_inputs.clone().unwrap();
+            wi.update(cx, |i, cx| i.set_value("email = 'secret'", window, cx));
+            r.update(cx, |v, cx| v.apply_table_query(window, cx));
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(
+                w.prefs
+                    .table_history
+                    .values()
+                    .all(|h| !h.where_.iter().any(|x| x.contains("secret")))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn 원격이면_쿼리_목록이_없다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|_, cx| {
+            ws.update(cx, |w, _| {
+                w.target = Some(Target::Remote("devbox".into()));
+                w.refresh_queries();
+                assert!(w.queries.is_none());
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn 테이블_보기_WHERE_ORDER_를_적용하면_기록에_남긴다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let rs: ResultSet =
+            serde_json::from_value(serde_json::json!({"cols": ["id"], "rows": [["1"]], "text": "", "truncated": false, "elapsed_ms": 1}))
+                .unwrap();
+        let src = Source::Table {
+            schema: "public".into(),
+            table: "users".into(),
+            filter: String::new(),
+            order: String::new(),
+        };
+        let r = cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.prefs.table_history.clear();
+                let id = w.tabs.tabs[0].id;
+                w.show_result(id, "app-stg".into(), src, rs, false, window, cx);
+                match w.bodies.get(&id) {
+                    Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                    _ => panic!("결과 없음"),
+                }
+            })
+        });
+        cx.update(|window, cx| {
+            let (wi, oi) = r.read(cx).table_inputs.clone().expect("테이블 보기면 입력칸이 있다");
+            wi.update(cx, |i, cx| i.set_value("id > 1", window, cx));
+            oi.update(cx, |i, cx| i.set_value("id desc", window, cx));
+            r.update(cx, |v, cx| v.apply_table_query(window, cx));
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            let (key, prod) = w.history_key("app-stg", "public", "users");
+            assert!(!prod);
+            assert_eq!(w.prefs.table_history[&key].where_, vec!["id > 1"]);
+            assert_eq!(w.prefs.table_history[&key].order, vec!["id desc"]);
+        });
+    }
+
+    #[gpui::test]
+    fn 복호화_보기는_암호문_칸만_평문으로_바꾸고_끄면_돌아온다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let enc = "000102030405060708090a0b0c0d0e0f^|^00112233445566778899aabbccddeeff";
+        let rs: ResultSet = serde_json::from_value(
+            serde_json::json!({"cols": ["email", "name"], "rows": [[enc, "kim"]], "text": "", "truncated": false, "elapsed_ms": 1}),
+        )
+        .unwrap();
+        let r = cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                let id = w.tabs.tabs[0].id;
+                w.show_result(
+                    id,
+                    "app-stg".into(),
+                    Source::Query { sql: "select 1".into() },
+                    rs,
+                    false,
+                    window,
+                    cx,
+                );
+                match w.bodies.get(&id) {
+                    Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                    _ => panic!("결과 없음"),
+                }
+            })
+        });
+        cx.update(|window, cx| {
+            r.update(cx, |v, cx| {
+                v.set_decrypted(Some([(enc.to_string(), "a@b.com".to_string())].into()), cx)
+            });
+            assert_eq!(r.read(cx).shown_cell(0, 0, cx), "a@b.com");
+            assert_eq!(r.read(cx).shown_cell(0, 1, cx), "kim");
+            // 켜져 있으면 끈다
+            r.update(cx, |v, cx| v.toggle_decrypt(window, cx));
+            assert_eq!(r.read(cx).shown_cell(0, 0, cx), enc);
+            // 끈 상태에서 켜면 serve 에 묻는다. 오프라인 프로젝트엔 그룹 키가 없어 실패하고 보기는 그대로다
+            r.update(cx, |v, cx| v.toggle_decrypt(window, cx));
+        });
+        draw(cx);
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|_, cx| {
+            assert_eq!(r.read(cx).shown_cell(0, 0, cx), enc);
+            assert!(ws.read(cx).status.1, "{:?}", ws.read(cx).status);
+        });
+    }
+
+    #[gpui::test]
+    fn 전체_내보내기가_실패하면_파일을_만들지_않는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("x.csv");
+        let o2 = out.clone();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                super::super::results::run_export(w, "app-stg".into(), "select 1".into(), o2, 0, window, cx)
+            })
+        });
+        wait(cx, &ws, |w| w.busy.is_none());
+        cx.update(|_, cx| assert!(ws.read(cx).status.1));
+        assert!(!out.exists(), "시작이 실패하면 파일을 만들지 않는다");
+        // 데이터베이스를 바꾼 뒤(세대가 다르면)는 보내지도 않는다
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.on_db_switched("app-stg", cx);
+                super::super::results::run_export(w, "app-stg".into(), "select 1".into(), dir.path().join("y.csv"), 0, window, cx);
+                assert!(w.busy.is_none());
+                assert!(w.status.0.contains("데이터베이스가 바뀌어"), "{:?}", w.status);
+            })
+        });
     }
 
     /// 리뷰 3: 모두 실행 중 탭을 바꾸면 남은 결과가 새 탭에 붙었다.

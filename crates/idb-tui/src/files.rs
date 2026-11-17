@@ -4,8 +4,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
+
+use idb_core::mapping::real_path;
 
 use crate::app::App;
 use crate::help::Focus;
@@ -23,33 +25,6 @@ pub struct Files {
 
 fn autosave_on() -> bool {
     std::env::var("DB_AUTO_SAVE").as_deref() != Ok("0")
-}
-
-/// rel 의 실제 경로다. 심볼릭 링크를 따라간 경로가 프로젝트 밖이면 오류다(R45.2).
-pub fn real_path(dir: &Path, rel: &str) -> Result<PathBuf, String> {
-    let root = fs::canonicalize(dir).map_err(|e| e.to_string())?;
-    let mut p = dir.join(rel);
-    let mut rest = PathBuf::new();
-    let real = loop {
-        match fs::canonicalize(&p) {
-            Ok(r) => break r.join(&rest),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let Some(name) = p.file_name().map(PathBuf::from) else {
-                    return Err(e.to_string());
-                };
-                // 빈 PathBuf 를 join 하면 끝에 / 가 붙어 폴더로 읽힌다
-                rest = if rest.as_os_str().is_empty() { name } else { name.join(rest) };
-                if !p.pop() {
-                    return Err(e.to_string());
-                }
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    if !real.starts_with(&root) {
-        return Err(format!("real path is outside the project: {rel}"));
-    }
-    Ok(real)
 }
 
 impl Files {
@@ -114,16 +89,12 @@ impl Files {
         fs::read_to_string(p).map_err(|e| e.to_string())
     }
 
-    /// 원자적으로 쓴다(R5.2). 권한은 원본을 따르고 새 파일은 0644 다.
+    /// 원자적으로 쓴다(R5.2). 권한은 원본을 따르고 새 파일은 0644 다. 실제 경로가 밖이면 쓰지 않는다.
     pub fn write(&self, rel: &str, text: &str) -> Result<(), String> {
-        let p = real_path(&self.dir, rel).map_err(|_| AUTOSAVE_OUTSIDE.to_string())?;
-        let perm = fs::metadata(&p)
-            .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777)
-            .unwrap_or(0o644);
-        if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        idb_core::atomicfile::write(&p, ".db-*", text.as_bytes(), perm).map_err(|e| e.to_string())
+        idb_core::mapping::write_project_file(&self.dir, rel, text).map_err(|e| match e {
+            idb_core::mapping::WriteError::Outside(_) => AUTOSAVE_OUTSIDE.to_string(),
+            idb_core::mapping::WriteError::Io(e) => e,
+        })
     }
 }
 
@@ -352,10 +323,7 @@ impl App {
         }
         let mut note = format!("저장함: {rel}");
         if !conn.uuid.is_empty() {
-            match real_path(&f.dir, ".idea/data_source_mapping.xml")
-                .map_err(|e| e.to_string())
-                .and_then(|_| idb_core::mapping::add_mapping(&f.dir, &rel, &conn.uuid).map_err(|e| e.to_string()))
-            {
+            match idb_core::mapping::add_mapping_checked(&f.dir, &rel, &conn.uuid) {
                 Ok(()) => {
                     f.mapping.insert(rel.clone(), conn.uuid.clone());
                 }

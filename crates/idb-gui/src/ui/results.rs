@@ -9,13 +9,14 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use idb_engine::{Applied, ChangeSet, Engine, EngineError, ResultSet, TablePage, TablePageRequest};
 
 use super::workspace::{Hooks, Workspace};
 use crate::vm::edits::Edits;
+use crate::vm::export;
 use crate::vm::grid::{Dir, Grid, NULL};
 use crate::vm::runtime::{Job, Runtime};
 use crate::vm::safety::Confirms;
@@ -49,6 +50,8 @@ pub struct GridDelegate {
     page: u64,
     /// 데이터베이스를 바꾸는 중이면 다음 쪽을 읽지 않는다
     frozen: bool,
+    /// 복호화 보기가 켜져 있으면 암호문 → 평문
+    pub(super) decrypted: Option<std::collections::HashMap<String, String>>,
     /// 결과의 출처 테이블(INSERT 복사에 쓴다). 편집 상태와 달리 데이터베이스를 바꿔도 이름은 그대로라 남긴다
     origin: Option<idb_engine::Origin>,
     /// 마지막으로 오른쪽 단추를 누른 칸(열을 고르는 데 쓴다)
@@ -62,8 +65,13 @@ impl GridDelegate {
             return (String::new(), CellMark::Plain);
         };
         let base = self.grid.cell(row, col).to_string();
+        // 복호화 보기(R37): 받은 암호문을 serve 가 푼 평문으로 보인다(보기만 바꾸고 편집·제출 값은 그대로다)
+        let (base, plain_mark) = match self.decrypted.as_ref().and_then(|m| m.get(&base)) {
+            Some(p) => (p.clone(), CellMark::Decrypted),
+            None => (base, CellMark::Plain),
+        };
         let Some(e) = &self.edits else {
-            return (base, CellMark::Plain);
+            return (base, plain_mark);
         };
         if e.is_deleted(src) {
             return (base, CellMark::Deleted);
@@ -71,7 +79,7 @@ impl GridDelegate {
         match e.value(src, col) {
             Some(Some(v)) => (v.to_string(), CellMark::Edited),
             Some(None) => (NULL.to_string(), CellMark::Edited),
-            None => (base, CellMark::Plain),
+            None => (base, plain_mark),
         }
     }
 }
@@ -81,6 +89,7 @@ enum CellMark {
     Plain,
     Edited,
     Deleted,
+    Decrypted,
 }
 
 /// 칸에 보일 한 줄이다. 긴 글은 앞부분만 둔다(칸 너비 밖은 어차피 잘린다).
@@ -146,6 +155,7 @@ impl TableDelegate for GridDelegate {
             .when(is_null, |d| d.text_color(cx.theme().muted_foreground).italic())
             .when(mark == CellMark::Edited, |d| d.bg(cx.theme().warning.opacity(0.25)))
             .when(mark == CellMark::Deleted, |d| d.bg(cx.theme().danger.opacity(0.2)).line_through())
+            .when(mark == CellMark::Decrypted, |d| d.text_color(cx.theme().success))
             .child(one_line(&text))
     }
 
@@ -244,6 +254,8 @@ pub struct ResultsView {
     truncated: bool,
     /// 마지막 반영. 되돌리기에 쓴다(R50)
     last_applied: Option<(ChangeSet, Applied)>,
+    /// 테이블 보기의 WHERE·ORDER BY 입력칸
+    pub(super) table_inputs: Option<(Entity<InputState>, Entity<InputState>)>,
     /// 데이터베이스를 바꾼 뒤의 옛 결과다. 고치기·되돌리기·다음 쪽을 막는다(R27.1·R50)
     pub stale: bool,
     /// 그 접속의 데이터베이스 바꾸기 요청이 도는 중이다(답이 오면 stale 이 되거나 풀린다)
@@ -318,6 +330,7 @@ impl ResultsView {
             loader,
             page,
             frozen: false,
+            decrypted: None,
             origin,
             ctx_cell: None,
             owner: Some(cx.weak_entity()),
@@ -329,7 +342,35 @@ impl ResultsView {
                 .row_header(true)
         });
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("결과 거르기"));
-        let subs = vec![
+        // 테이블 보기면 WHERE·ORDER BY 입력칸을 둔다(R16)
+        let table_inputs = match &source {
+            Source::Table { filter: w, order: o, .. } => {
+                let (w, o) = (w.clone(), o.clone());
+                let wi = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("WHERE 조건 (예: id > 100)")
+                        .default_value(w)
+                });
+                let oi = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("ORDER BY (예: created_at desc)")
+                        .default_value(o)
+                });
+                Some((wi, oi))
+            }
+            _ => None,
+        };
+        let mut subs = Vec::new();
+        if let Some((wi, oi)) = &table_inputs {
+            for i in [wi, oi] {
+                subs.push(cx.subscribe_in(i, window, |this, _, ev: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        this.apply_table_query(window, cx);
+                    }
+                }));
+            }
+        }
+        subs.extend([
             cx.subscribe_in(&filter, window, |this, input, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
                     let f = input.read(cx).value().to_string();
@@ -350,8 +391,9 @@ impl ResultsView {
                 }
                 _ => {}
             }),
-        ];
+        ]);
         ResultsView {
+            table_inputs,
             ws,
             rt,
             engine,
@@ -709,6 +751,185 @@ impl ResultsView {
         });
     }
 
+    /// 표에 보이는 칸 글이다(복호화·편집 반영 뒤). 화면 시험이 본다
+    #[cfg(test)]
+    pub(super) fn shown_cell(&self, row: usize, col: usize, cx: &App) -> String {
+        self.table.read(cx).delegate().display(row, col).0
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_decrypted(&mut self, m: Option<std::collections::HashMap<String, String>>, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().decrypted = m;
+            t.refresh(cx);
+        });
+    }
+
+    // ─── 복호화·전체 내보내기 ───
+
+    /// 복호화 보기를 켜고 끈다(R37). 암호문 꼴 칸만 serve 로 보내 그 접속 그룹 키로 푼다.
+    pub(super) fn toggle_decrypt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let was_on = self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            let on = d.decrypted.take().is_some();
+            t.refresh(cx);
+            on
+        });
+        if was_on {
+            self.status("복호화 보기를 껐다", false, cx);
+            cx.notify();
+            return;
+        }
+        let cells = {
+            let g = &self.table.read(cx).delegate().grid;
+            let all = (0..g.source_len()).flat_map(|i| g.source(i).iter().map(String::as_str));
+            export::cipher_cells(all, 10_000)
+        };
+        if cells.is_empty() {
+            self.status("암호문 꼴 칸이 없다", false, cx);
+            return;
+        }
+        let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
+        self.with_ws(window, cx, move |ws, window, cx| {
+            let sent = cells.clone();
+            ws.guarded(
+                "복호화",
+                Rc::new(move |e: Engine, _| {
+                    let (conn, cells) = (conn.clone(), cells.clone());
+                    async move { e.decrypt(&conn, cells).await }
+                }),
+                Rc::new(move |ws: &mut Workspace, d: idb_engine::Decrypted, _, cx| {
+                    let map = export::overlay(&sent, &d.values);
+                    let msg = if d.failed > 0 {
+                        format!("복호화 {}칸 · {}칸 풀지 못함", map.len(), d.failed)
+                    } else {
+                        format!("복호화 {}칸", map.len())
+                    };
+                    ws.set_status(msg, d.failed > 0, cx);
+                    let _ = this.update(cx, |v, cx| {
+                        v.table.update(cx, |t, cx| {
+                            t.delegate_mut().decrypted = Some(map);
+                            t.refresh(cx);
+                        });
+                        cx.notify();
+                    });
+                }),
+                Confirms::default(),
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// 이 결과를 만든 문장 전체를 1,000행 제한 없이 CSV 로 받는다(R33.1). 원격이어도 이 기계에 쓴다.
+    pub(super) fn full_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked(cx) {
+            return;
+        }
+        let sql = match &self.source {
+            Source::Query { sql } => sql.clone(),
+            Source::Table {
+                schema,
+                table,
+                filter,
+                order,
+            } => export::table_sql(schema, table, filter, order),
+            Source::Static => return,
+        };
+        let conn = self.conn.clone();
+        let dir = dirs_home().join("Downloads");
+        let dir = if dir.is_dir() { dir } else { std::env::temp_dir() };
+        let rx = cx.prompt_for_new_path(&dir, Some(&export::default_name(&conn, chrono::Local::now())));
+        let ws = self.ws.clone();
+        let gen0 = self.db_gen;
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(path))) = rx.await else { return };
+            let _ = cx.update(|window, cx| {
+                let _ = ws.update(cx, |ws, cx| run_export(ws, conn, sql, path, gen0, window, cx));
+            });
+        })
+        .detach();
+    }
+
+    /// WHERE·ORDER BY 로 테이블 보기를 다시 읽고 기록에 남긴다.
+    pub(super) fn apply_table_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((wi, oi)), Source::Table { schema, table, .. }) = (&self.table_inputs, &self.source) else {
+            return;
+        };
+        let (w, o) = (wi.read(cx).value().trim().to_string(), oi.read(cx).value().trim().to_string());
+        let source = Source::Table {
+            schema: schema.clone(),
+            table: table.clone(),
+            filter: w.clone(),
+            order: o.clone(),
+        };
+        let conn = self.conn.clone();
+        let (sc, tb) = (schema.clone(), table.clone());
+        self.with_ws(window, cx, move |ws, window, cx| {
+            let (key, prod) = ws.history_key(&conn, &sc, &tb);
+            if !prod {
+                crate::vm::history::record(&mut ws.prefs.table_history, &key, prod, &w, &o);
+                ws.save_prefs();
+            }
+            ws.load_source(conn, source, window, cx);
+        });
+    }
+
+    fn render_table_inputs(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (wi, oi) = self.table_inputs.clone()?;
+        let theme = cx.theme().clone();
+        let (wh, oh) = match (&self.source, self.ws.upgrade()) {
+            (Source::Table { schema, table, .. }, Some(w)) => {
+                let w = w.read(cx);
+                let (key, prod) = w.history_key(&self.conn, schema, table);
+                let h = crate::vm::history::shown(&w.prefs.table_history, &key, prod);
+                (h.where_, h.order)
+            }
+            _ => Default::default(),
+        };
+        let recent = |id: &'static str, input: Entity<InputState>, items: Vec<String>| {
+            Button::new(id)
+                .xsmall()
+                .ghost()
+                .icon(gpui_component::IconName::ChevronDown)
+                .tooltip("최근 기록")
+                .dropdown_menu(move |mut menu, _, _| {
+                    if items.is_empty() {
+                        return menu.item(PopupMenuItem::new("기록 없음").disabled(true));
+                    }
+                    for it in &items {
+                        let (input, it2) = (input.clone(), it.clone());
+                        menu = menu.item(PopupMenuItem::new(it.clone()).on_click(move |_, window, cx| {
+                            input.update(cx, |i, cx| i.set_value(it2.clone(), window, cx));
+                        }));
+                    }
+                    menu
+                })
+        };
+        Some(
+            h_flex()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(div().text_xs().text_color(theme.muted_foreground).child("WHERE"))
+                .child(div().flex_1().child(Input::new(&wi).small()))
+                .child(recent("where-recent", wi.clone(), wh))
+                .child(div().text_xs().text_color(theme.muted_foreground).child("ORDER BY"))
+                .child(div().w(px(220.)).child(Input::new(&oi).small()))
+                .child(recent("order-recent", oi.clone(), oh))
+                .child(
+                    Button::new("table-apply")
+                        .xsmall()
+                        .primary()
+                        .label("적용 ↵")
+                        .on_click(cx.listener(|v, _, w, cx| v.apply_table_query(w, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// 같은 출처를 다시 읽어 표를 갈아 끼운다.
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.source, Source::Static) {
@@ -732,6 +953,74 @@ impl ResultsView {
         self.status("추가 행은 반영 뒤 다시 읽을 때 보인다. 값은 칸을 두 번 눌러 정한다", false, cx);
         cx.notify();
     }
+}
+
+/// 전체 내보내기를 돌린다. 시작·조각 받기·파일 쓰기를 한 요청으로 묶어, 멈추면(⌘.) serve 의 내보내기도 멈춘다.
+pub(super) fn run_export(
+    ws: &mut Workspace,
+    conn: String,
+    sql: String,
+    path: std::path::PathBuf,
+    gen0: u64,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let started: std::sync::Arc<std::sync::Mutex<Option<u64>>> = Default::default();
+    let (st_make, st_cancel) = (started.clone(), started.clone());
+    let (c_make, shown) = (conn.clone(), path.clone());
+    let hooks = Hooks {
+        precheck: Some(Rc::new(move |ws: &Workspace| {
+            ws.write_ok(&conn, gen0)
+                .map_err(|_| "데이터베이스가 바뀌어 내보내지 않는다 (다시 실행한다)".to_string())
+        })),
+        fail: None,
+        cancelled: Some(Rc::new(move |ws: &mut Workspace, _: &mut Window, _: &mut Context<Workspace>| {
+            if let (Some(id), Some(e)) = (*st_cancel.lock().unwrap(), ws.engine().cloned()) {
+                ws.rt.spawn(async move {
+                    let _ = e.export_cancel(id).await;
+                });
+            }
+        })),
+    };
+    ws.guarded_with(
+        "전체 내보내기",
+        Rc::new(move |e: Engine, _| {
+            let (conn, sql, path, started) = (c_make.clone(), sql.clone(), path.clone(), st_make.clone());
+            async move {
+                let s = e.export_start(&conn, &sql).await?;
+                *started.lock().unwrap() = Some(s.export);
+                let id = s.export;
+                let file_err = |e: std::io::Error| EngineError::run(format!("export file: {e}"));
+                let work = async {
+                    let mut f = export::PrivateFile::create(&path).map_err(file_err)?;
+                    loop {
+                        let ch = e.export_read(id).await?;
+                        if ch.done {
+                            f.commit().map_err(file_err)?;
+                            return Ok((ch.rows, ch.bytes));
+                        }
+                        f.write(&ch.data).map_err(file_err)?;
+                    }
+                };
+                // id 를 받은 뒤의 어느 실패에서도 serve 의 COPY 를 멈춘다
+                export::cancel_on_error(work, async {
+                    let _ = e.export_cancel(id).await;
+                })
+                .await
+            }
+        }),
+        Rc::new(move |ws: &mut Workspace, (rows, bytes): (i64, u64), _, cx| {
+            ws.set_status(
+                format!("내보냄: {} → {}", export::progress(bytes, Some(rows)), shown.display()),
+                false,
+                cx,
+            );
+        }),
+        hooks,
+        Confirms::default(),
+        window,
+        cx,
+    );
 }
 
 /// 반영·되돌리기는 (확인 뒤 다시 보낼 때도) 보내기 바로 전에 데이터베이스 세대·바꾸는 중을 다시 본다.
@@ -773,6 +1062,8 @@ impl Render for ResultsView {
         if inserts > 0 {
             info.push_str(&format!(" · 추가 {inserts}"));
         }
+        let table_inputs_el = self.render_table_inputs(cx);
+        let decrypt_on = self.table.read(cx).delegate().decrypted.is_some();
         let toolbar = h_flex()
             .gap_1()
             .px_2()
@@ -821,6 +1112,28 @@ impl Render for ResultsView {
                     )
                 })
             })
+            .when(!matches!(self.source, Source::Static), |d| {
+                d.child(
+                    Button::new("full-export")
+                        .xsmall()
+                        .ghost()
+                        .label("전체 내보내기")
+                        .tooltip("1,000행 제한 없이 CSV 로 받는다")
+                        .on_click(cx.listener(|v, _, w, cx| v.full_export(w, cx))),
+                )
+            })
+            .child(
+                Button::new("decrypt")
+                    .xsmall()
+                    .with_variant(if decrypt_on {
+                        gpui_component::button::ButtonVariant::Primary
+                    } else {
+                        gpui_component::button::ButtonVariant::Ghost
+                    })
+                    .label("복호화")
+                    .tooltip("암호문 칸을 그룹 키로 풀어 보인다 (보기만)")
+                    .on_click(cx.listener(|v, _, w, cx| v.toggle_decrypt(w, cx))),
+            )
             .child(
                 Button::new("copy")
                     .xsmall()
@@ -857,6 +1170,7 @@ impl Render for ResultsView {
             // 메뉴 편집 > 복사(⌘C)가 표에 초점이 있을 때 여기로 온다
             .on_action(cx.listener(|v, _: &gpui_component::input::Copy, _, cx| v.copy(cx)))
             .child(toolbar)
+            .children(table_inputs_el)
             .when(!self.note.is_empty(), |d| {
                 d.child(div().px_2().py_1().text_xs().text_color(theme.warning).child(self.note.clone()))
             })
@@ -864,7 +1178,7 @@ impl Render for ResultsView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(DataTable::new(&self.table).stripe(true))
+                    .child(DataTable::new(&self.table).stripe(false))
                     .into_any_element()
             } else {
                 div()
