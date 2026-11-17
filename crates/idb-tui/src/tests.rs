@@ -1337,6 +1337,15 @@ fn I_는_CSV_머리를_열에_맞춰_미리_보이고_import_csv_로_보낸다()
     a.on_key("ctrl+u");
     a.on_paste(csv.to_str().unwrap());
     a.on_key("enter");
+    // 파일은 화면 밖에서 읽는다
+    assert_eq!(a.status, "CSV 를 읽는 중…");
+    for _ in 0..200 {
+        a.poll_bg();
+        if a.csv_job.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let s = screen(&mut a);
     assert!(
         s.contains("열: NAME → Name, extra (버림), id → id") && s.contains("alice | 1"),

@@ -506,6 +506,8 @@ pub struct App {
     pub tree_restored: HashSet<String>,
     /// `--remote` 로 켰다. 접속 편집 창을 열지 않는다(R59, 원격 serve 는 접속 파일을 고치지 않음)
     pub remote: bool,
+    /// 화면 밖에서 준비 중인 CSV 가져오기(R19)
+    pub csv_job: Option<crate::export::CsvJob>,
 }
 
 impl App {
@@ -566,6 +568,7 @@ impl App {
             tip: None,
             tree_restored: HashSet::new(),
             remote: false,
+            csv_job: None,
         };
         if !app.warnings.is_empty() {
             app.status = format!("건너뜀: {}", app.warnings.join(", "));

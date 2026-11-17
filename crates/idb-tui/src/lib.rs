@@ -90,6 +90,7 @@ impl Runner {
             self.tasks.remove(&d.id);
             app.on_done(d.id, d.res);
         }
+        app.poll_bg();
     }
 }
 

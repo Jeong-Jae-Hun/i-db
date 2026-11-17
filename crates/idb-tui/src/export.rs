@@ -265,60 +265,39 @@ impl App {
         });
     }
 
+    /// 파일 읽기·풀기는 화면 밖 스레드에서 한다. 큰 파일이 화면을 멈추지 않게 하려는 것이다.
     fn csv_preview(&mut self, conn: usize, table: TableRef, cols: Vec<String>, path: String) {
         let path = match path.strip_prefix("~/") {
             Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
             None => path,
         };
-        let text = match std::fs::read(&path) {
-            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(prepare_csv(&p, &cols));
+        });
+        self.csv_job = Some(CsvJob { rx, conn, table, path });
+        self.status = "CSV 를 읽는 중…".into();
+    }
+
+    /// 화면 밖에서 준비한 CSV 가 오면 미리 보기와 확인 창을 연다. Runner 가 돌 때마다 부른다.
+    pub fn poll_bg(&mut self) {
+        let Some(job) = &self.csv_job else { return };
+        let prep = match job.rx.try_recv() {
+            Ok(p) => p,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("CSV 를 읽지 못함".into()),
+        };
+        let CsvJob { conn, table, path, .. } = self.csv_job.take().unwrap();
+        let prep = match prep {
+            Ok(p) => p,
             Err(e) => {
-                self.status = format!("CSV 를 읽지 못함: {e}");
+                self.status = e;
                 return;
             }
         };
-        let mut rows = parse_csv(&text);
-        if rows.is_empty() {
-            self.status = "CSV 가 비어 있음".into();
-            return;
-        }
-        let head = rows.remove(0);
-        // 머리 줄을 테이블 열 이름에 대소문자 없이 맞추고 맞지 않는 열은 버린다
-        let map: Vec<(usize, String)> = head
-            .iter()
-            .enumerate()
-            .filter_map(|(i, h)| cols.iter().find(|c| c.eq_ignore_ascii_case(h.trim())).map(|c| (i, c.clone())))
-            .collect();
-        if map.is_empty() {
-            self.status = "테이블 열과 맞는 CSV 열이 없음".into();
-            return;
-        }
-        let columns: Vec<String> = map.iter().map(|m| m.1.clone()).collect();
-        let data: Vec<Vec<Option<String>>> = rows
-            .iter()
-            .map(|r| map.iter().map(|(i, _)| r.get(*i).filter(|v| !v.is_empty()).cloned()).collect())
-            .collect();
-        let mut preview = vec![format!(
-            "열: {}",
-            head.iter()
-                .enumerate()
-                .map(|(i, h)| match map.iter().find(|m| m.0 == i) {
-                    Some((_, c)) => format!("{h} → {c}"),
-                    None => format!("{h} (버림)"),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        )];
-        for r in data.iter().take(5) {
-            preview.push(
-                r.iter()
-                    .map(|v| v.clone().unwrap_or_else(|| "NULL".into()))
-                    .collect::<Vec<_>>()
-                    .join(" | "),
-            );
-        }
         let c = &self.conns[conn];
-        let n = data.len();
+        let n = prep.data.len();
         let q = if c.env == "prod" {
             format!("prod({}) {} 에 {n}행 가져오기", c.name, table.quoted())
         } else {
@@ -326,7 +305,7 @@ impl App {
         };
         let prod = c.env == "prod";
         let name = c.name.clone();
-        let file = path.clone();
+        let CsvPrep { columns, data, preview } = prep;
         self.overlay = Overlay::Confirm {
             q,
             then: Box::new(move |a| {
@@ -338,7 +317,7 @@ impl App {
                     rows: data,
                     confirm_prod: prod,
                 };
-                a.call(req, Pend::Import { conn, table, file });
+                a.call(req, Pend::Import { conn, table, file: path });
                 a.status = "가져오는 중…".into();
             }),
             preview,
@@ -357,6 +336,91 @@ impl App {
             Err(e) => self.status = format!("가져오지 못함: {}", e.error.replace('\n', " ")),
         }
     }
+}
+
+/// serve 가 한 번에 받는 가져오기 상한과 같다(idb-sources import_csv: 10만 행·50MiB). 넘는 파일은 읽기 전에 막는다
+pub const MAX_IMPORT_BYTES: u64 = 50 << 20;
+pub const MAX_IMPORT_ROWS: usize = 100_000;
+
+/// 화면 밖 스레드의 CSV 준비 일감이다.
+pub struct CsvJob {
+    pub rx: std::sync::mpsc::Receiver<Result<CsvPrep, String>>,
+    pub conn: usize,
+    pub table: TableRef,
+    pub path: String,
+}
+
+#[derive(Debug)]
+pub struct CsvPrep {
+    pub columns: Vec<String>,
+    pub data: Vec<Vec<Option<String>>>,
+    pub preview: Vec<String>,
+}
+
+/// CSV 를 읽어 테이블 열에 맞춘다(R19.1). 일반 파일만, 상한 안에서만 읽는다(`/dev/zero`·폴더·큰 파일이 메모리를 채우지 않게).
+pub fn prepare_csv(path: &str, cols: &[String]) -> Result<CsvPrep, String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|e| format!("CSV 를 읽지 못함: {e}"))?;
+    if !meta.is_file() {
+        return Err("CSV 를 읽지 못함: 일반 파일이 아님".into());
+    }
+    if meta.len() > MAX_IMPORT_BYTES {
+        return Err(format!("CSV 가 {}MiB 를 넘어 가져오지 않음", MAX_IMPORT_BYTES >> 20));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_IMPORT_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("CSV 를 읽지 못함: {e}"))?;
+    if bytes.len() as u64 > MAX_IMPORT_BYTES {
+        return Err(format!("CSV 가 {}MiB 를 넘어 가져오지 않음", MAX_IMPORT_BYTES >> 20));
+    }
+    let mut rows = parse_csv(&String::from_utf8_lossy(&bytes));
+    drop(bytes);
+    if rows.is_empty() {
+        return Err("CSV 가 비어 있음".into());
+    }
+    if rows.len() - 1 > MAX_IMPORT_ROWS {
+        return Err(format!("CSV 가 {MAX_IMPORT_ROWS}행을 넘어 가져오지 않음"));
+    }
+    let head = rows.remove(0);
+    // 머리 줄을 테이블 열 이름에 대소문자 없이 맞추고 맞지 않는 열은 버린다
+    let map: Vec<(usize, String)> = head
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| cols.iter().find(|c| c.eq_ignore_ascii_case(h.trim())).map(|c| (i, c.clone())))
+        .collect();
+    if map.is_empty() {
+        return Err("테이블 열과 맞는 CSV 열이 없음".into());
+    }
+    let columns: Vec<String> = map.iter().map(|m| m.1.clone()).collect();
+    let data: Vec<Vec<Option<String>>> = rows
+        .into_iter()
+        .map(|mut r| {
+            map.iter()
+                .map(|(i, _)| r.get_mut(*i).filter(|v| !v.is_empty()).map(std::mem::take))
+                .collect()
+        })
+        .collect();
+    let mut preview = vec![format!(
+        "열: {}",
+        head.iter()
+            .enumerate()
+            .map(|(i, h)| match map.iter().find(|m| m.0 == i) {
+                Some((_, c)) => format!("{h} → {c}"),
+                None => format!("{h} (버림)"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )];
+    for r in data.iter().take(5) {
+        preview.push(
+            r.iter()
+                .map(|v| v.clone().unwrap_or_else(|| "NULL".into()))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
+    }
+    Ok(CsvPrep { columns, data, preview })
 }
 
 fn human_bytes(n: u64) -> String {
@@ -378,5 +442,24 @@ mod tests {
             [vec!["a", "b"], vec!["x,1", "q\"\n2"], vec!["3", ""]]
         );
         assert_eq!(human_bytes(2 << 20), "2.0 MB");
+    }
+
+    #[test]
+    fn CSV_는_일반_파일만_상한_안에서_읽는다() {
+        let cols = vec!["id".to_string()];
+        assert_eq!(prepare_csv("/dev/zero", &cols).unwrap_err(), "CSV 를 읽지 못함: 일반 파일이 아님");
+        let d = tempfile::tempdir().unwrap();
+        assert!(prepare_csv(d.path().to_str().unwrap(), &cols).is_err());
+        let big = d.path().join("big.csv");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(MAX_IMPORT_BYTES + 1).unwrap();
+        assert_eq!(
+            prepare_csv(big.to_str().unwrap(), &cols).unwrap_err(),
+            "CSV 가 50MiB 를 넘어 가져오지 않음"
+        );
+        let ok = d.path().join("ok.csv");
+        std::fs::write(&ok, "ID,x\n1,a\n").unwrap();
+        let p = prepare_csv(ok.to_str().unwrap(), &cols).unwrap();
+        assert_eq!((p.columns, p.data), (vec!["id".to_string()], vec![vec![Some("1".to_string())]]));
     }
 }
