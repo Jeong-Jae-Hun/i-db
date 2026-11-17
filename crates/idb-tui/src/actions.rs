@@ -38,7 +38,21 @@ pub struct Script {
     /// EXPLAIN(ANALYZE 면 true)
     pub explain: Option<bool>,
     pub started: Instant,
+    /// 정렬·거르기 다시 읽기·더 읽기다(R14.5·R14.7)
+    pub again: Option<Again>,
 }
+
+pub enum Again {
+    Keep {
+        sort: Option<(usize, bool)>,
+        filter: String,
+        col: usize,
+    },
+    More,
+}
+
+/// 더 읽기로 모으는 행 상한이다(R14.7). 칸을 모두 메모리에 들고 있어서다
+const MORE_LIMIT: usize = 10_000;
 
 fn decode<T: DeserializeOwned>(v: Value) -> Result<T, EngineError> {
     serde_json::from_value(v).map_err(|e| EngineError::run(format!("bad result: {e}")))
@@ -1045,6 +1059,9 @@ impl App {
             "p" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.pin(),
             "P" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.unpin(),
             "{" | "}" => return self.cycle_sub(if k == "}" { 1 } else { -1 }),
+            "]" if self.tabs[ti].view.is_none() && self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => {
+                return self.read_more(ti);
+            }
             "F" | "R" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.follow_fk(k == "R"),
             "K" | "X" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.signal(k == "X"),
             "+" | "-" if self.tabs[ti].shown().is_some_and(|g| g.screen == Screen::Table) => return self.cell_where(k == "-"),
@@ -1085,10 +1102,103 @@ impl App {
             g.key(k)
         };
         let after = (g.sort, g.filter.clone());
-        if before.0 != after.0 && self.tabs[ti].result_conn.is_some_and(|c| self.is_pg(c)) && !sub {
-            self.status = "받은 행만 정렬: 편집기 실행 결과를 서버에서 다시 읽기는 아직 옮기지 않음".into();
-        }
+        let typing = g.screen == Screen::Filter;
+        let sort_changed = before.0 != after.0;
+        let filter_done = matches!(act, Act::FilterDone(_)) || (!typing && before.1 != after.1);
         self.grid_act(act);
+        if sort_changed || filter_done {
+            self.server_requery(ti, sort_changed);
+        }
+    }
+
+    /// 정렬·거르기 확정을 서버에서 다시 읽는다(R14.5). 못 하면 받은 행만 한 까닭을 알린다(R14.6).
+    fn server_requery(&mut self, ti: usize, sort: bool) {
+        let what = if sort { "정렬" } else { "거르기" };
+        let t = &self.tabs[ti];
+        let why = if t.sub.is_some() {
+            "고정·문장별 결과"
+        } else if t.snapshot || t.base.is_none() {
+            t.base_why
+        } else if t.running.is_some() {
+            "다른 실행 중"
+        } else if t.result_conn != t.conn {
+            "접속이 바뀜"
+        } else if !t.grid.as_ref().is_some_and(Grid::unique_cols) {
+            "열 이름 겹침"
+        } else {
+            ""
+        };
+        if !why.is_empty() {
+            self.status = format!("받은 행만 {what}: {why}");
+            return;
+        }
+        if t.pending() > 0 {
+            self.status = format!("받은 행만 {what}: 고친 칸이 있음 (제출하거나 되돌린 뒤 다시)");
+            return;
+        }
+        let g = t.grid.as_ref().unwrap();
+        let sql = g.server_sql(t.base.as_ref().unwrap(), None);
+        let again = Again::Keep {
+            sort: g.sort,
+            filter: g.filter.clone(),
+            col: g.col,
+        };
+        let (tab, conn) = (t.id, t.result_conn.unwrap());
+        self.start_script(Script {
+            tab,
+            conn,
+            stmts: vec![sql],
+            idx: 0,
+            confirm_prod: false,
+            confirm_danger: false,
+            params: BTreeMap::new(),
+            redis: false,
+            results: Vec::new(),
+            explain: None,
+            started: Instant::now(),
+            again: Some(again),
+        });
+    }
+
+    /// 일반 결과의 `]`: 잘린 PostgreSQL 결과의 다음 1,000행을 같은 정렬·거르기로 덧붙인다(R14.7).
+    fn read_more(&mut self, ti: usize) {
+        let t = &self.tabs[ti];
+        let Some(g) = &t.grid else { return };
+        let why = if t.result_conn.is_none_or(|c| !self.is_pg(c)) {
+            "PostgreSQL 결과만 더 읽음"
+        } else if t.pending() > 0 {
+            "고친 칸을 먼저 제출하거나 되돌리세요"
+        } else if !g.res.truncated {
+            "더 읽을 행이 없음"
+        } else if g.res.rows.len() >= MORE_LIMIT {
+            "10,000행까지만 더 읽음 (F7 전체 내보내기)"
+        } else if t.base.is_none() || t.sub.is_some() || t.snapshot {
+            "정렬·거르기가 받은 행에만 걸림"
+        } else if t.running.is_some() {
+            "다른 실행 중"
+        } else {
+            ""
+        };
+        if !why.is_empty() {
+            self.status = format!("더 읽지 않음: {why}");
+            return;
+        }
+        let sql = g.server_sql(t.base.as_ref().unwrap(), Some(g.res.rows.len()));
+        let (tab, conn) = (t.id, t.result_conn.unwrap());
+        self.start_script(Script {
+            tab,
+            conn,
+            stmts: vec![sql],
+            idx: 0,
+            confirm_prod: false,
+            confirm_danger: false,
+            params: BTreeMap::new(),
+            redis: false,
+            results: Vec::new(),
+            explain: None,
+            started: Instant::now(),
+            again: Some(Again::More),
+        });
     }
 
     pub(crate) fn grid_act(&mut self, act: Act) {
@@ -1233,6 +1343,7 @@ impl App {
                 results: Vec::new(),
                 explain: None,
                 started: Instant::now(),
+                again: None,
             });
         }
     }
@@ -1526,6 +1637,7 @@ impl App {
             results: Vec::new(),
             explain,
             started: Instant::now(),
+            again: None,
         };
         // EXPLAIN ANALYZE 는 문장을 실제로 실행하므로 쓰기면 늘 묻는다(R9.2)
         if explain == Some(true) && !is_read_only_sql(&script.stmts[0]) {
@@ -1684,6 +1796,11 @@ impl App {
                 }
                 let sql = self.history_sql(&s);
                 self.record(s.conn, &sql, s.started.elapsed().as_millis() as u64, None, &e.error);
+                // 다시 읽기·더 읽기가 실패하면 보던 결과·정렬·거르기를 둔다(R14.5)
+                if s.again.is_some() {
+                    self.status = format!("다시 읽지 못함: {}", one_line(&e.error));
+                    return;
+                }
                 let t = &mut self.tabs[ti];
                 let mut msg = e.error.clone();
                 if s.stmts.len() > 1 {
@@ -1737,14 +1854,46 @@ impl App {
             }
         }
         let mut summary = summary_of(&last);
-        if last.cols.is_empty() {
-            t.grid = None;
-            t.text = last.text.clone();
-        } else {
-            t.text.clear();
-            t.grid = Some(Grid::new(last.clone()));
-            if !s.redis && s.explain.is_none() && s.stmts.len() == 1 {
-                t.last_sql = s.stmts[0].clone();
+        match (&s.again, t.grid.as_mut()) {
+            (Some(Again::More), Some(g)) => {
+                g.extend(last.rows.clone(), last.truncated);
+                let n = g.res.rows.len() as i64;
+                summary = format!(
+                    "{}행{}",
+                    idb_core::textutil::group_digits(n),
+                    if last.truncated { " · 더 있음" } else { "" }
+                );
+            }
+            (Some(Again::Keep { sort, filter, col }), _) => {
+                let mut g = Grid::new(last.clone());
+                g.adopt(*sort, filter, *col);
+                t.grid = Some(g);
+            }
+            _ if last.cols.is_empty() => {
+                t.grid = None;
+                t.text = last.text.clone();
+                t.base = None;
+                t.base_why = "표 결과가 아님";
+            }
+            _ => {
+                t.text.clear();
+                t.grid = Some(Grid::new(last.clone()));
+                t.base = None;
+                t.base_why = if s.redis {
+                    "이 저장소는 서버 정렬 없음"
+                } else if s.stmts.len() > 1 {
+                    "문장이 둘 이상"
+                } else if s.explain.is_some() || !is_read_only_sql(&s.stmts[0]) {
+                    "쓰기 문장"
+                } else if !s.params.is_empty() || !idb_core::params::bind(&s.stmts[0]).1.is_empty() {
+                    "파라미터 문장"
+                } else {
+                    t.base = Some(s.stmts[0].clone());
+                    ""
+                };
+                if !s.redis && s.explain.is_none() && s.stmts.len() == 1 {
+                    t.last_sql = s.stmts[0].clone();
+                }
             }
         }
         if multi {

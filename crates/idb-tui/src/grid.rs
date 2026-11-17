@@ -409,6 +409,8 @@ impl Grid {
 
     /// 정렬을 오름 → 내림 → 없음으로 돌린다(R14.3).
     pub fn cycle_sort(&mut self, c: usize) {
+        // 받은 행 안에서 다시 정렬한다. 서버로 다시 읽으면 adopt 가 서버 결과로 갈음한다
+        self.server = false;
         self.sort = match self.sort {
             Some((x, false)) if x == c => Some((c, true)),
             Some((x, true)) if x == c => None,
@@ -427,6 +429,73 @@ impl Grid {
             Some((c, desc)) => format!("정렬 {} {}", printable(&self.res.cols[c], false), if desc { "↓" } else { "↑" }),
             None => String::new(),
         }
+    }
+
+    // ─── 서버로 다시 읽기 (R14.5·R14.7) ───
+
+    /// 열 이름이 겹치지 않는지다. 겹치면 서브쿼리 바깥에서 열을 가리킬 수 없다. _q 열이 있으면 모든 열 찾기가 그 열을 가리킨다.
+    pub fn unique_cols(&self) -> bool {
+        let mut seen = std::collections::HashSet::from(["_q".to_string()]);
+        self.res.cols.iter().all(|c| seen.insert(c.clone()))
+    }
+
+    /// 지금 정렬·거르기의 서버 WHERE·ORDER BY 다. NULL 은 받은 행 정렬처럼 늘 뒤다.
+    pub fn server_clauses(&self) -> (String, String) {
+        let f = crate::tableview::parse_filter(&self.filter, &self.res.cols);
+        let like = |v: &str| idb_core::sqlsafe::quote_literal(&format!("%{}%", crate::tableview::like_escape(v)));
+        let where_ = match f.col {
+            Some(c) => f.sql(self.kind(c) == Kind::Number).unwrap_or_default(),
+            None if f.value.is_empty() => String::new(),
+            None if f.op == crate::tableview::Op::NotContains => format!("NOT (_q::text ILIKE {})", like(&f.value)),
+            None => format!("_q::text ILIKE {}", like(&f.value)),
+        };
+        let order = match self.sort {
+            Some((c, d)) => format!(
+                "{} {} NULLS LAST",
+                idb_core::sqlsafe::quote_ident(&self.res.cols[c]),
+                if d { "DESC" } else { "ASC" }
+            ),
+            None => String::new(),
+        };
+        (where_, order)
+    }
+
+    /// 읽기 문장 base 를 감싸 지금 정렬·거르기를 서버에서 하는 SELECT 다. offset 이 있으면 그 뒤부터 읽는다(더 읽기).
+    /// base 끝의 줄 주석이 닫는 괄호를 삼키지 않게 괄호 앞에 줄을 바꾼다. 둘 다 없고 offset 도 없으면 base 그대로다.
+    pub fn server_sql(&self, base: &str, offset: Option<usize>) -> String {
+        let (w, o) = self.server_clauses();
+        if w.is_empty() && o.is_empty() && offset.is_none() {
+            return base.to_string();
+        }
+        let mut s = format!("SELECT * FROM (\n{base}\n) AS _q");
+        if !w.is_empty() {
+            s.push_str(&format!(" WHERE {w}"));
+        }
+        if !o.is_empty() {
+            s.push_str(&format!(" ORDER BY {o}"));
+        }
+        if let Some(n) = offset {
+            s.push_str(&format!(" OFFSET {n}"));
+        }
+        s
+    }
+
+    /// 서버에서 그 정렬·거르기로 읽은 결과로 바꾼다. 받은 행에서 다시 거르거나 정렬하지 않는다.
+    pub fn adopt(&mut self, sort: Option<(usize, bool)>, filter: &str, col: usize) {
+        self.sort = sort.filter(|(c, _)| *c < self.res.cols.len());
+        self.filter = filter.to_string();
+        self.server = true;
+        self.col = col.min(self.res.cols.len().saturating_sub(1));
+        self.rebuild();
+    }
+
+    /// 더 읽은 행을 덧붙인다(R14.7). 커서·정렬·거르기·열 폭은 그대로다.
+    pub fn extend(&mut self, rows: Vec<Vec<String>>, truncated: bool) {
+        self.res.rows.extend(rows);
+        self.res.truncated = truncated;
+        self.edits.clear();
+        self.inserts = 0;
+        self.rebuild();
     }
 
     // ─── 편집 (R15) ───
@@ -985,6 +1054,7 @@ impl Grid {
             }
             "/" => {
                 self.screen = Screen::Filter;
+                self.server = false;
                 self.input = LineInput::new(&self.filter);
             }
             "<" => {

@@ -482,3 +482,62 @@ fn 여러_문장은_차례로_돌고_첫_오류에서_멈춘다() {
     assert!(jobs(&mut a).is_empty());
     assert!(screen(&mut a).contains("statement 2 of 3: column \"nope\" does not exist"));
 }
+
+#[test]
+fn 일반_결과의_정렬_거르기_더_읽기는_감싼_SQL_로_서버에서_읽는다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "select a from t");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    let mut r = rs(&["a"], &[&["2"], &["1"]]);
+    r["truncated"] = json!(true);
+    a.on_done(id, Ok(r));
+    a.set_focus(Focus::Result);
+    a.on_key("s");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        req["sql"],
+        "SELECT * FROM (\nselect a from t\n) AS _q ORDER BY \"a\" ASC NULLS LAST"
+    );
+    a.on_done(id, Ok(rs(&["a"], &[&["1"], &["2"]])));
+    keys(&mut a, &["/", "x", "enter"]);
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert_eq!(
+        req["sql"],
+        "SELECT * FROM (\nselect a from t\n) AS _q WHERE _q::text ILIKE '%x%' ORDER BY \"a\" ASC NULLS LAST"
+    );
+    let mut r = rs(&["a"], &[&["1x"]]);
+    r["truncated"] = json!(true);
+    a.on_done(id, Ok(r));
+    a.on_key("]");
+    let (id, req) = jobs(&mut a).pop().unwrap();
+    assert!(req["sql"].as_str().unwrap().ends_with("NULLS LAST OFFSET 1"), "{req}");
+    a.on_done(id, Ok(rs(&["a"], &[&["2x"]])));
+    assert_eq!(a.cur().grid.as_ref().unwrap().res.rows.len(), 2);
+    assert_eq!(a.cur().summary, "2행");
+    // 다시 읽기가 실패하면 보던 결과를 둔다
+    a.on_key("s");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Err(EngineError::run("boom")));
+    assert_eq!(a.status, "다시 읽지 못함: boom");
+    assert!(a.cur().grid.is_some());
+}
+
+#[test]
+fn 쓰기_결과는_받은_행만_정렬하고_까닭을_알린다() {
+    let mut a = app();
+    a.set_conn(0, Some(0));
+    a.take_jobs();
+    a.set_focus(Focus::Editor);
+    typed(&mut a, "insert into t values (1) returning a");
+    a.on_key("ctrl+r");
+    let (id, _) = jobs(&mut a).pop().unwrap();
+    a.on_done(id, Ok(rs(&["a"], &[&["1"]])));
+    a.set_focus(Focus::Result);
+    a.on_key("s");
+    assert!(jobs(&mut a).is_empty());
+    assert_eq!(a.status, "받은 행만 정렬: 쓰기 문장");
+}

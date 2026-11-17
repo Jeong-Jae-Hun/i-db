@@ -134,7 +134,7 @@ pub fn is_decimal(v: &str) -> bool {
     !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit() || b"+-.eE".contains(&c)) && v.parse::<f64>().is_ok()
 }
 
-fn like_escape(s: &str) -> String {
+pub(crate) fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
