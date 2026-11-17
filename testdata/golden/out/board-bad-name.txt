@@ -1,0 +1,5 @@
+args: ["board","-p","{P}","../x"]
+exit: 2
+--- stdout
+--- stderr
+db board: board name must be a file name in .dbtui/boards: "../x"

@@ -1848,5 +1848,250 @@
    "update",
    "-h"
   ]
+ },
+ {
+  "name": "status-prod-skip-json",
+  "project": "offline",
+  "args": [
+   "status",
+   "-p",
+   "{P}",
+   "-c",
+   "app-prod",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "status-prod-skip-table",
+  "project": "offline",
+  "args": [
+   "status",
+   "-p",
+   "{P}",
+   "-c",
+   "app-prod",
+   "-c",
+   "metrics-prod",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "status-prod-skip-tsv",
+  "project": "offline",
+  "args": [
+   "status",
+   "-p",
+   "{P}",
+   "app-prod-redis",
+   "--format",
+   "tsv"
+  ]
+ },
+ {
+  "name": "status-unknown-conn",
+  "project": "offline",
+  "args": [
+   "status",
+   "-p",
+   "{P}",
+   "-c",
+   "nope"
+  ]
+ },
+ {
+  "name": "status-csv",
+  "project": "offline",
+  "args": [
+   "status",
+   "-p",
+   "{P}",
+   "--format",
+   "csv"
+  ]
+ },
+ {
+  "name": "flows-unknown",
+  "project": "offline",
+  "args": [
+   "flows",
+   "-p",
+   "{P}",
+   "-f",
+   "nope"
+  ]
+ },
+ {
+  "name": "flows-csv",
+  "project": "offline",
+  "args": [
+   "flows",
+   "-p",
+   "{P}",
+   "--format",
+   "csv"
+  ]
+ },
+ {
+  "name": "board-list-tsv",
+  "project": "offline",
+  "args": [
+   "board",
+   "-p",
+   "{P}",
+   "--format",
+   "tsv"
+  ]
+ },
+ {
+  "name": "board-list-json",
+  "project": "offline",
+  "args": [
+   "board",
+   "-p",
+   "{P}",
+   "--format",
+   "json"
+  ]
+ },
+ {
+  "name": "board-list-table",
+  "project": "offline",
+  "args": [
+   "board",
+   "-p",
+   "{P}",
+   "--format",
+   "table"
+  ]
+ },
+ {
+  "name": "board-unknown",
+  "project": "offline",
+  "args": [
+   "board",
+   "-p",
+   "{P}",
+   "nope"
+  ]
+ },
+ {
+  "name": "board-two-names",
+  "project": "offline",
+  "args": [
+   "board",
+   "-p",
+   "{P}",
+   "a",
+   "b"
+  ]
+ },
+ {
+  "name": "board-bad-name",
+  "project": "offline",
+  "args": [
+   "board",
+   "-p",
+   "{P}",
+   "../x"
+  ]
+ },
+ {
+  "name": "board-csv",
+  "project": "offline",
+  "args": [
+   "board",
+   "-p",
+   "{P}",
+   "--format",
+   "csv"
+  ]
+ },
+ {
+  "name": "query-aws-tree-only",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "aws-stg",
+   "select 1"
+  ]
+ },
+ {
+  "name": "query-ddb-write",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "ddb-stg",
+   "--write",
+   "SELECT * FROM t"
+  ]
+ },
+ {
+  "name": "query-ddb-param",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "ddb-stg",
+   "--param",
+   "a=1",
+   "SELECT * FROM t"
+  ]
+ },
+ {
+  "name": "query-ddb-no-text",
+  "project": "offline",
+  "args": [
+   "query",
+   "-p",
+   "{P}",
+   "-c",
+   "ddb-stg"
+  ]
+ },
+ {
+  "name": "explain-ddb",
+  "project": "offline",
+  "args": [
+   "explain",
+   "-p",
+   "{P}",
+   "-c",
+   "ddb-stg",
+   "SELECT * FROM t"
+  ]
+ },
+ {
+  "name": "logs-ddb",
+  "project": "offline",
+  "args": [
+   "logs",
+   "-p",
+   "{P}",
+   "-c",
+   "ddb-stg",
+   "{app=\"x\"}"
+  ]
+ },
+ {
+  "name": "describe-aws",
+  "project": "offline",
+  "args": [
+   "describe",
+   "-p",
+   "{P}",
+   "-c",
+   "aws-stg",
+   "t"
+  ]
  }
 ]
