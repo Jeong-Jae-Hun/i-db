@@ -1,0 +1,5 @@
+args: ["metrics","-p","{P}","-c","logs-stg","up"]
+exit: 2
+--- stdout
+--- stderr
+logs-stg 는 metrics 접속이 아님 (loki)
