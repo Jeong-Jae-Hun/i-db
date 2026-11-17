@@ -809,6 +809,10 @@ impl App {
         if let Some(f) = &mut self.conn_form {
             let at = f.at;
             f.fields[at].insert(s);
+            // URL 은 붙인 즉시 풀어 비밀번호를 가린 칸으로 옮긴다. 다음 그림에 비밀번호가 보이지 않게 한다
+            if at == 0 {
+                f.fill_url();
+            }
             return;
         }
         match &mut self.overlay {

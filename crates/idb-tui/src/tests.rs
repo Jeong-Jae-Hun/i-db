@@ -1708,3 +1708,12 @@ fn 제출이_confirm_prod_로_거절되면_엔진_질문을_보이고_y_뒤에�
     let (_, req) = jobs(&mut a).pop().unwrap();
     assert_eq!(req["confirm_prod"], true);
 }
+
+#[test]
+fn 접속_URL_을_붙이면_다음_그림_전에_비밀번호를_가린_칸으로_옮긴다() {
+    let mut a = app();
+    a.on_key("N");
+    a.on_paste("postgres://u:s3cret@db.local:5432/app");
+    let s = screen(&mut a);
+    assert!(!s.contains("s3cret") && s.contains("db.local") && s.contains("••••••"), "{s}");
+}
