@@ -25,6 +25,8 @@ pub struct ConnForm {
     pub has_password: bool,
     /// 시험에 실패하면 저장할지 묻는 중이다
     pub ask_save: bool,
+    /// 고치는 접속의 원래 값. 창에 없는 칸(sslmode·auth·region·profile·workgroup·output)은 이 값을 그대로 보낸다
+    orig: ConnFields,
 }
 
 fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, EngineError> {
@@ -43,6 +45,7 @@ impl ConnForm {
             msg: String::new(),
             has_password: false,
             ask_save: false,
+            orig: ConnFields::default(),
         }
     }
 
@@ -57,6 +60,7 @@ impl ConnForm {
             f.fields[i].set(if i == 4 && c.port == 0 { "" } else { v });
         }
         f.has_password = c.has_password;
+        f.orig = c.clone();
         f
     }
 
@@ -75,6 +79,8 @@ impl ConnForm {
                 self.fields[5].set(&c.db);
                 self.fields[6].set(&c.user);
                 self.fields[PASSWORD].set(&pw);
+                // URL 의 ?sslmode= 는 창에 칸이 없어 원래 값 자리에 둔다(R59.1)
+                self.orig.sslmode = c.sslmode.clone();
                 self.msg = "URL 로 칸을 채움 · 이름을 쓰세요".into();
             }
             Err(e) => {
@@ -99,7 +105,8 @@ impl ConnForm {
             db: v(5),
             user: v(6),
             password: self.fields[PASSWORD].text.clone(),
-            ..ConnFields::default()
+            has_password: false,
+            ..self.orig.clone()
         }
     }
 }
@@ -432,5 +439,43 @@ mod tests {
         h.fields[2].set("opensearch");
         h.fields[3].set("https://os.local");
         assert_eq!(h.fields().url, "https://os.local");
+    }
+}
+
+#[cfg(test)]
+mod keep_tests {
+    use super::*;
+
+    #[test]
+    fn 고치기는_창에_없는_칸을_그대로_둔다() {
+        let orig = ConnFields {
+            name: "app-stg2".into(),
+            kind: "postgresql".into(),
+            host: "db.local".into(),
+            port: 5432,
+            user: "ro".into(),
+            sslmode: "verify-full".into(),
+            auth: "iam".into(),
+            region: "ap-northeast-2".into(),
+            profile: "stg".into(),
+            workgroup: "wg".into(),
+            output: "s3://o".into(),
+            ..Default::default()
+        };
+        let mut f = ConnForm::from(&orig);
+        f.fields[6].set("rw");
+        let c = f.fields();
+        assert_eq!(c.user, "rw");
+        assert_eq!(
+            (
+                c.sslmode.as_str(),
+                c.auth.as_str(),
+                c.region.as_str(),
+                c.profile.as_str(),
+                c.workgroup.as_str(),
+                c.output.as_str()
+            ),
+            ("verify-full", "iam", "ap-northeast-2", "stg", "wg", "s3://o")
+        );
     }
 }
