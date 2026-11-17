@@ -47,6 +47,8 @@ pub struct GridDelegate {
     loader: Option<Loader>,
     /// 테이블 보기 한 쪽의 행 수(설정, 엔진 상한 1,000)
     page: u64,
+    /// 결과의 출처 테이블(INSERT 복사에 쓴다). 편집 상태와 달리 데이터베이스를 바꿔도 이름은 그대로라 남긴다
+    origin: Option<idb_engine::Origin>,
     /// 마지막으로 오른쪽 단추를 누른 칸(열을 고르는 데 쓴다)
     ctx_cell: Option<(usize, usize)>,
     owner: Option<WeakEntity<ResultsView>>,
@@ -149,16 +151,12 @@ impl TableDelegate for GridDelegate {
         let col = self.ctx_cell.filter(|(r, _)| *r == row_ix).map_or(0, |(_, c)| c);
         let cell = self.display(row_ix, col).0;
         let row = self.grid.tsv([row_ix], &self.grid.all_cols(), false);
-        let table = self
-            .edits
-            .as_ref()
-            .map(|e| (e.origin.table.schema.clone(), e.origin.table.table.clone()));
         let src = self
             .grid
             .source_row(row_ix)
             .map(|r| self.grid.source(r).to_vec())
             .unwrap_or_default();
-        let insert = sqlcopy::insert_sql(table.as_ref().map(|(s, t)| (s.as_str(), t.as_str())), &self.grid.cols, &[src]);
+        let insert = self.origin.as_ref().and_then(|o| sqlcopy::insert_from_origin(o, &[src]));
         let col_vals: Vec<String> = (0..self.grid.len()).map(|i| self.grid.cell(i, col).to_string()).collect();
         let in_list = sqlcopy::in_list(&col_vals.iter().map(String::as_str).collect::<Vec<_>>());
         let col_name = self.grid.cols.get(col).cloned().unwrap_or_default();
@@ -168,7 +166,11 @@ impl TableDelegate for GridDelegate {
         };
         menu.item(copy("칸 복사".into(), cell))
             .item(copy("행 복사 (탭 구분)".into(), row))
-            .item(copy("INSERT 문으로 복사".into(), insert))
+            .item(match insert {
+                Some(sql) => copy("INSERT 문으로 복사".into(), sql),
+                // 한 테이블에서 PK 와 함께 온 결과가 아니면 진짜 열 이름을 몰라 막는다
+                None => PopupMenuItem::new("INSERT 문으로 복사 (한 테이블 결과만)").disabled(true),
+            })
             .item(copy(format!("{col_name} 열을 IN 목록으로 복사"), in_list))
             .separator()
             .item(PopupMenuItem::new("CSV 로 저장…").on_click(move |_, _, cx| {
@@ -240,6 +242,8 @@ pub struct ResultsView {
     truncated: bool,
     /// 마지막 반영. 되돌리기에 쓴다(R50)
     last_applied: Option<(ChangeSet, Applied)>,
+    /// 데이터베이스를 바꾼 뒤의 옛 결과다. 고치기·되돌리기·다음 쪽을 막는다(R27.1·R50)
+    pub stale: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -297,7 +301,8 @@ impl ResultsView {
             }
             Source::Query { .. } | Source::Static => None,
         };
-        let edits = rs.origin.clone().and_then(|o| Edits::new(o, rs.rows.len()));
+        let origin = rs.origin.clone();
+        let edits = origin.clone().and_then(|o| Edits::new(o, rs.rows.len()));
         let (text, note, elapsed_ms, truncated) = (rs.text.clone(), rs.note.clone(), rs.elapsed_ms, rs.truncated);
         let delegate = GridDelegate {
             grid: Grid::new(rs),
@@ -306,6 +311,7 @@ impl ResultsView {
             loading: false,
             loader,
             page,
+            origin,
             ctx_cell: None,
             owner: Some(cx.weak_entity()),
         };
@@ -351,6 +357,7 @@ impl ResultsView {
             elapsed_ms,
             truncated,
             last_applied: None,
+            stale: false,
             _subs: subs,
         }
     }
@@ -369,7 +376,23 @@ impl ResultsView {
         format!("{rows} · {}ms{}", self.elapsed_ms, if self.truncated { " · 잘림" } else { "" })
     }
 
-    fn pending(&self, cx: &App) -> usize {
+    /// 접속의 데이터베이스가 바뀌었다. 이 결과의 바꿈·되돌리기 묶음은 옛 데이터베이스 것이라 버리고,
+    /// 고치기와 다음 쪽 읽기를 막는다. 보기·복사는 그대로 둔다.
+    pub fn invalidate(&mut self, cx: &mut Context<Self>) {
+        self.stale = true;
+        self.last_applied = None;
+        self.note = "데이터베이스를 바꾸기 전 결과다. 고치거나 더 읽으려면 다시 실행한다".into();
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            d.edits = None;
+            d.more = false;
+            d.loader = None;
+            t.refresh(cx);
+        });
+        cx.notify();
+    }
+
+    pub(super) fn pending(&self, cx: &App) -> usize {
         self.table.read(cx).delegate().edits.as_ref().map_or(0, Edits::pending)
     }
 
@@ -490,7 +513,7 @@ impl ResultsView {
         });
     }
 
-    fn set_cell(&mut self, src: usize, col: usize, v: Option<String>, base: &str, cx: &mut Context<Self>) {
+    pub(super) fn set_cell(&mut self, src: usize, col: usize, v: Option<String>, base: &str, cx: &mut Context<Self>) {
         let r = self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
             let inserted = d.edits.as_ref().is_some_and(|e| e.is_inserted(src));
@@ -529,7 +552,7 @@ impl ResultsView {
         cx.notify();
     }
 
-    fn discard(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn discard(&mut self, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
             if let Some(e) = t.delegate_mut().edits.as_mut() {
                 e.clear();
@@ -541,6 +564,10 @@ impl ResultsView {
 
     /// 보류 중인 바꿈을 미리 보이고 확인하면 반영한다. prod 면 엔진이 confirm_prod 로 한 번 더 묻는다.
     fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stale {
+            self.status("데이터베이스를 바꾸기 전 결과라 고치거나 되돌리지 않는다 (다시 실행한다)", true, cx);
+            return;
+        }
         let cs = {
             let d = self.table.read(cx).delegate();
             let Some(e) = &d.edits else { return };
@@ -580,7 +607,11 @@ impl ResultsView {
         .detach();
     }
 
-    fn submit(&mut self, cs: ChangeSet, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn submit(&mut self, cs: ChangeSet, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stale {
+            self.status("데이터베이스를 바꾸기 전 결과라 고치거나 되돌리지 않는다 (다시 실행한다)", true, cx);
+            return;
+        }
         let conn = self.conn.clone();
         let this = cx.entity().downgrade();
         let sent = cs.clone();
@@ -608,6 +639,10 @@ impl ResultsView {
 
     /// 마지막 반영을 되돌린다(R50). 다시 읽은 뒤에도 묶음이 남아 있으면 엔진이 옛값으로 확인한다.
     fn undo_applied(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stale {
+            self.status("데이터베이스를 바꾸기 전 결과라 고치거나 되돌리지 않는다 (다시 실행한다)", true, cx);
+            return;
+        }
         let Some((cs, applied)) = self.last_applied.clone() else {
             self.status("되돌릴 것이 없다", false, cx);
             return;

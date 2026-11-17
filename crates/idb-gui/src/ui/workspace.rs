@@ -71,6 +71,8 @@ pub struct Workspace {
     /// switch_db·set_search_path 뒤의 세션(R27)
     sessions: HashMap<String, SessionState>,
     databases: HashMap<String, Vec<String>>,
+    /// 접속마다 데이터베이스를 바꾼 횟수. 요청은 보낼 때 값을 들고 가고, 답이 올 때 다르면 버린다(R27.1)
+    db_gen: HashMap<String, u64>,
     /// 사이드바에서 고른 테이블(두 번 누르면 연다)
     selected_table: Option<(String, String, String)>,
     // ─── 접속 전 ───
@@ -175,6 +177,7 @@ impl Workspace {
             editor_split,
             sessions: HashMap::new(),
             databases: HashMap::new(),
+            db_gen: HashMap::new(),
             selected_table: None,
             dir_input,
             remotes: crate::vm::runtime::remote_names(),
@@ -382,6 +385,7 @@ impl Workspace {
         self.locks.clear();
         self.sessions.clear();
         self.databases.clear();
+        self.db_gen.clear();
         self.selected_table = None;
         cx.notify();
     }
@@ -480,6 +484,63 @@ impl Workspace {
 
     // ─── 데이터베이스·스키마 ───
 
+    pub(super) fn db_gen(&self, conn: &str) -> u64 {
+        self.db_gen.get(conn).copied().unwrap_or(0)
+    }
+
+    /// 그 접속에서 만든 결과 화면들이다.
+    fn results_for(&self, conn: &str, cx: &gpui::App) -> Vec<Entity<ResultsView>> {
+        self.bodies
+            .values()
+            .filter_map(|b| match b {
+                Body::Sql { result: Some(r), .. } | Body::Table { result: Some(r) } => Some(r.clone()),
+                _ => None,
+            })
+            .filter(|r| r.read(cx).conn == conn)
+            .collect()
+    }
+
+    /// 데이터베이스를 바꾸기 전에 묻는다. 반영 안 한 바꿈이 남은 채 바꾸면 그 바꿈(같은 테이블·PK·옛값)이
+    /// 새 데이터베이스에 반영될 수 있어, 버릴지 먼저 묻는다. 요청이 도는 중에는 바꾸지 않는다.
+    pub(super) fn request_switch_db(&mut self, conn: String, db: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((label, _)) = &self.busy {
+            self.set_status(format!("{label} 이 끝난 뒤 데이터베이스를 바꾼다"), true, cx);
+            return;
+        }
+        let pending: usize = self.results_for(&conn, cx).iter().map(|r| r.read(cx).pending(cx)).sum();
+        if pending == 0 {
+            self.switch_db(conn, db, window, cx);
+            return;
+        }
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (this, conn, db) = (this.clone(), conn.clone(), db.clone());
+            alert
+                .title("반영하지 않은 바꿈")
+                .description(format!("{conn} 에 반영하지 않은 바꿈 {pending}건이 있다. 버리고 {db} 로 바꿀까?"))
+                .ok_text("버리고 바꾸기")
+                .ok_variant(ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    let _ = this.update(cx, |ws, cx| {
+                        for r in ws.results_for(&conn, cx) {
+                            r.update(cx, |v, cx| v.discard(cx));
+                        }
+                        ws.switch_db(conn.clone(), db.clone(), window, cx)
+                    });
+                    true
+                })
+        });
+    }
+
+    /// 바꾼 뒤: 세대를 올리고 그 접속의 결과는 고치기·되돌리기·다음 쪽을 막는다.
+    pub(super) fn on_db_switched(&mut self, conn: &str, cx: &mut Context<Self>) {
+        *self.db_gen.entry(conn.to_string()).or_default() += 1;
+        for r in self.results_for(conn, cx) {
+            r.update(cx, |v, cx| v.invalidate(cx));
+        }
+    }
+
     /// R27.1: 같은 서버의 다른 데이터베이스로 세션을 옮긴다. 카탈로그는 다시 읽는다.
     fn switch_db(&mut self, conn: String, db: String, window: &mut Window, cx: &mut Context<Self>) {
         let (c2, d2) = (conn.clone(), db.clone());
@@ -492,6 +553,7 @@ impl Workspace {
             Rc::new(move |ws: &mut Workspace, st: SessionState, window, cx| {
                 ws.set_status(format!("{} 로 바꿈", st.db), false, cx);
                 ws.sessions.insert(conn.clone(), st);
+                ws.on_db_switched(&conn, cx);
                 ws.catalogs.remove(&conn);
                 ws.ensure_catalog(&conn, window, cx);
             }),
@@ -566,19 +628,39 @@ impl Workspace {
             self.set_status("자리표시가 있는 문장은 ⌘↵ 로 하나씩 실행한다", true, cx);
             return;
         }
-        self.run_chain(conn, std::collections::VecDeque::from(stmts), 0, window, cx);
+        let (tab_id, gen0) = (t.id, self.db_gen(&conn));
+        self.run_chain(tab_id, conn, gen0, std::collections::VecDeque::from(stmts), 0, window, cx);
     }
 
+    /// 시작한 탭이 그대로이고 그 탭의 접속·데이터베이스가 시작할 때와 같은가. 아니면 사슬을 멈춘다.
+    fn chain_alive(&self, tab_id: u64, conn: &str, gen0: u64) -> bool {
+        self.tabs
+            .index_of(tab_id)
+            .is_some_and(|i| self.tabs.tabs[i].conn.as_deref() == Some(conn))
+            && self.db_gen(conn) == gen0
+    }
+
+    // 창(window)·cx 두 자리가 늘 붙는 GPUI 뷰 함수라 묶음 구조체를 따로 두지 않는다
+    #[allow(clippy::too_many_arguments)]
     fn run_chain(
         &mut self,
+        tab_id: u64,
         conn: String,
+        gen0: u64,
         mut rest: std::collections::VecDeque<String>,
         done_n: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.chain_alive(tab_id, &conn, gen0) {
+            self.set_status(
+                format!("모두 실행 멈춤: 탭을 닫았거나 접속·데이터베이스가 바뀌었다 ({done_n}문장 실행함)"),
+                true,
+                cx,
+            );
+            return;
+        }
         let Some(sql) = rest.pop_front() else { return };
-        let Some(tab_id) = self.tabs.active().map(|t| t.id) else { return };
         let (c2, s2) = (conn.clone(), sql.clone());
         let total = done_n + 1 + rest.len();
         self.guarded(
@@ -604,9 +686,11 @@ impl Workspace {
                         false,
                         cx,
                     );
-                    ws.show_result(tab_id, conn.clone(), Source::Query { sql: sql.clone() }, rs, false, window, cx);
+                    if ws.chain_alive(tab_id, &conn, gen0) {
+                        ws.show_result(tab_id, conn.clone(), Source::Query { sql: sql.clone() }, rs, false, window, cx);
+                    }
                 } else {
-                    ws.run_chain(conn.clone(), rest.clone(), done_n + 1, window, cx);
+                    ws.run_chain(tab_id, conn.clone(), gen0, rest.clone(), done_n + 1, window, cx);
                 }
             }),
             Confirms::default(),
@@ -621,6 +705,7 @@ impl Workspace {
         }
         let n = conn.to_string();
         let name = n.clone();
+        let gen0 = self.db_gen(conn);
         self.guarded(
             "카탈로그",
             Rc::new(move |e: Engine, _| {
@@ -628,6 +713,10 @@ impl Workspace {
                 async move { e.catalog(&n).await }
             }),
             Rc::new(move |ws: &mut Workspace, cat: Catalog, _, cx| {
+                // 바꾸기 전 데이터베이스의 카탈로그면 버린다(바꾼 뒤 다시 읽는다)
+                if ws.db_gen(&name) != gen0 {
+                    return;
+                }
                 ws.catalogs.insert(name.clone(), Rc::new(cat));
                 ws.sync_catalog_cells();
                 cx.notify();
@@ -829,6 +918,7 @@ impl Workspace {
     ) {
         let Some(tab_id) = self.tabs.active().map(|t| t.id) else { return };
         let (c2, s2) = (conn.clone(), sql.clone());
+        let gen0 = self.db_gen(&conn);
         self.guarded(
             if explain { "EXPLAIN" } else { "실행" },
             Rc::new(move |e: Engine, c: Confirms| {
@@ -851,6 +941,10 @@ impl Workspace {
             Rc::new(move |ws: &mut Workspace, rs: ResultSet, window, cx| {
                 if let Some(in_tx) = rs.in_tx {
                     ws.tx.insert(conn.clone(), in_tx);
+                }
+                if ws.db_gen(&conn) != gen0 {
+                    ws.set_status("실행 중에 데이터베이스를 바꿔 결과를 버림", true, cx);
+                    return;
                 }
                 ws.set_status(format!("{}행 · {}ms", rs.rows.len(), rs.elapsed_ms), false, cx);
                 ws.show_result(tab_id, conn.clone(), Source::Query { sql: sql.clone() }, rs, false, window, cx);
@@ -919,6 +1013,7 @@ impl Workspace {
                     ..Default::default()
                 };
                 let limit = self.prefs.row_limit as usize;
+                let gen0 = self.db_gen(&conn);
                 self.guarded(
                     "테이블 읽기",
                     Rc::new(move |e: Engine, _| {
@@ -926,6 +1021,10 @@ impl Workspace {
                         async move { e.table_page(req).await }
                     }),
                     Rc::new(move |ws: &mut Workspace, page: idb_engine::TablePage, window, cx| {
+                        if ws.db_gen(&conn) != gen0 {
+                            ws.set_status("읽는 중에 데이터베이스를 바꿔 결과를 버림", true, cx);
+                            return;
+                        }
                         let more = page.result.rows.len() >= limit;
                         ws.show_result(tab_id, conn.clone(), source.clone(), page.result, more, window, cx);
                     }),
@@ -1452,7 +1551,7 @@ impl Workspace {
                         for d in &dbs {
                             let (ws, c, d2) = (ws.clone(), c.clone(), d.clone());
                             menu = menu.item(PopupMenuItem::new(d.clone()).on_click(move |_, window, cx| {
-                                let _ = ws.update(cx, |ws, cx| ws.switch_db(c.clone(), d2.clone(), window, cx));
+                                let _ = ws.update(cx, |ws, cx| ws.request_switch_db(c.clone(), d2.clone(), window, cx));
                             }));
                         }
                     }
@@ -1955,6 +2054,113 @@ mod tests {
             let w = ws.read(cx);
             let t = w.tabs.active().unwrap();
             assert!(matches!(w.bodies.get(&t.id), Some(Body::Redis { .. })));
+        });
+    }
+
+    fn edited_result(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<ResultsView> {
+        let rs: ResultSet = serde_json::from_value(serde_json::json!({
+            "cols": ["id", "name"], "rows": [["1", "kim"]], "text": "", "truncated": false, "elapsed_ms": 1,
+            "origin": {"table": {"schema": "public", "table": "users"}, "pk": ["id"], "cols": ["id", "name"]}
+        }))
+        .unwrap();
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                let id = w.tabs.tabs[0].id;
+                w.tabs.tabs[0].conn = Some("app-stg".into());
+                w.show_result(
+                    id,
+                    "app-stg".into(),
+                    Source::Query { sql: "select 1".into() },
+                    rs,
+                    false,
+                    window,
+                    cx,
+                );
+            })
+        });
+        draw(cx);
+        let r = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            match w.bodies.get(&w.tabs.tabs[0].id) {
+                Some(Body::Sql { result: Some(r), .. }) => r.clone(),
+                _ => panic!("결과가 없다"),
+            }
+        });
+        cx.update(|_, cx| r.update(cx, |v, cx| v.set_cell(0, 1, Some("lee".into()), "kim", cx)));
+        assert_eq!(cx.update(|_, cx| r.read(cx).pending(cx)), 1);
+        r
+    }
+
+    /// 리뷰 1: DB A 에서 고친 바꿈이 B 로 바꾼 뒤 B 에 반영될 수 있었다.
+    #[gpui::test]
+    fn 반영_안_한_바꿈이_있으면_데이터베이스를_바로_바꾸지_않는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        edited_result(&ws, cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.request_switch_db("app-stg".into(), "other".into(), window, cx)));
+        draw(cx);
+        cx.update(|window, cx| {
+            assert!(window.has_active_dialog(cx), "버릴지 묻는 창이 떠야 한다");
+            let w = ws.read(cx);
+            assert!(w.busy.is_none(), "엔진에 바꾸기를 보내지 않는다");
+            assert_eq!(w.db_gen("app-stg"), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn 데이터베이스를_바꾸면_옛_결과의_바꿈을_버리고_반영을_막는다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        let r = edited_result(&ws, cx);
+        let cs = cx.update(|_, _| idb_engine::ChangeSet {
+            table: idb_engine::TableRef {
+                schema: "public".into(),
+                table: "users".into(),
+            },
+            pk: vec!["id".into()],
+            changes: vec![],
+            override_system: false,
+        });
+        cx.update(|_, cx| ws.update(cx, |w, cx| w.on_db_switched("app-stg", cx)));
+        draw(cx);
+        cx.update(|window, cx| {
+            assert!(r.read(cx).stale);
+            assert_eq!(r.read(cx).pending(cx), 0);
+            assert_eq!(ws.read(cx).db_gen("app-stg"), 1);
+            r.update(cx, |v, cx| v.submit(cs, window, cx));
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(w.busy.is_none(), "반영을 보내지 않는다");
+            assert!(w.status.0.contains("데이터베이스를 바꾸기 전"), "{:?}", w.status);
+        });
+    }
+
+    /// 리뷰 3: 모두 실행 중 탭을 바꾸면 남은 결과가 새 탭에 붙었다.
+    #[gpui::test]
+    fn 모두_실행_사슬은_시작한_탭과_접속이_그대로일_때만_이어진다(cx: &mut TestAppContext) {
+        let (ws, cx) = setup(cx);
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(offline_project()), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| {
+            ws.update(cx, |w, cx| {
+                w.tabs.tabs[0].conn = Some("app-stg".into());
+                let id = w.tabs.tabs[0].id;
+                w.new_tab(Some("app-prod".into()), window, cx);
+                // 다른 탭을 골라도 사슬은 시작한 탭을 따른다
+                assert!(w.chain_alive(id, "app-stg", 0));
+                w.tabs.tabs[0].conn = Some("app-prod".into());
+                assert!(!w.chain_alive(id, "app-stg", 0), "접속이 바뀌면 멈춘다");
+                w.tabs.tabs[0].conn = Some("app-stg".into());
+                w.on_db_switched("app-stg", cx);
+                assert!(!w.chain_alive(id, "app-stg", 0), "데이터베이스가 바뀌면 멈춘다");
+                assert!(w.chain_alive(id, "app-stg", 1));
+                w.close_tab(0, cx);
+                assert!(!w.chain_alive(id, "app-stg", 1), "탭을 닫으면 멈춘다");
+            })
         });
     }
 
