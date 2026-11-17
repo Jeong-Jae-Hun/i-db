@@ -11,6 +11,7 @@ pub mod keymap;
 pub mod palette;
 pub mod picker;
 pub mod queries;
+pub mod redisedit;
 pub mod runtime;
 pub mod safety;
 pub mod settings;

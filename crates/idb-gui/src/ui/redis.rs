@@ -9,12 +9,13 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use idb_core::sqlsafe::split_args;
-use idb_engine::{Engine, ResultSet, ScanResult};
+use idb_engine::{Engine, PatternKeys, RawValue, RedisEditResult, ResultSet, ScanResult};
 
 use super::results::{ResultsView, Source};
 use super::workspace::Workspace;
+use crate::vm::redisedit;
 use crate::vm::runtime::Runtime;
 use crate::vm::safety::Confirms;
 
@@ -23,12 +24,14 @@ pub struct RedisView {
     rt: Rc<Runtime>,
     engine: Engine,
     conn: String,
-    pattern: Entity<InputState>,
+    pub(super) pattern: Entity<InputState>,
     command: Entity<InputState>,
     keys: Vec<String>,
     more: bool,
     selected: Option<String>,
     value: Option<Entity<ResultsView>>,
+    /// 고른 키의 원값(편집에 쓴다)
+    pub(super) raw: Option<RawValue>,
     _subs: Vec<Subscription>,
 }
 
@@ -80,6 +83,7 @@ impl RedisView {
             more: false,
             selected: None,
             value: None,
+            raw: None,
             _subs: subs,
         };
         // 작업 공간의 select_conn 안에서 만들어진다. 지금 scan 하면 작업 공간을 두 번 빌려 패닉한다
@@ -135,7 +139,415 @@ impl RedisView {
                 cx,
             )
         });
+        self.load_raw(window, cx);
         cx.notify();
+    }
+
+    /// 편집용 원값을 읽는다(R34).
+    fn load_raw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.selected.clone() else { return };
+        let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
+        self.raw = None;
+        self.with_ws(window, cx, move |ws, window, cx| {
+            ws.guarded(
+                "값 읽기",
+                Rc::new(move |e: Engine, _| {
+                    let (conn, key) = (conn.clone(), key.clone());
+                    async move { e.redis_raw_value(&conn, &key).await }
+                }),
+                Rc::new(move |_: &mut Workspace, raw: RawValue, _, cx| {
+                    let _ = this.update(cx, |v, cx| {
+                        v.raw = Some(raw);
+                        cx.notify();
+                    });
+                }),
+                Confirms::default(),
+                window,
+                cx,
+            )
+        });
+    }
+
+    // ─── 편집(R34)·일괄 삭제(R42) ───
+
+    /// 편집 하나를 보낸다. prod·위험이면 엔진이 거절하고 확인 창을 거쳐 다시 보낸다.
+    pub(super) fn apply_edit(&mut self, action: redisedit::Action, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(raw) = &self.raw else {
+            self.status("값을 아직 읽지 못했다", true, cx);
+            return;
+        };
+        let edit = match redisedit::build(raw, action) {
+            Ok(e) => e,
+            Err(msg) => {
+                self.status(&msg, true, cx);
+                return;
+            }
+        };
+        let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
+        self.with_ws(window, cx, move |ws, window, cx| {
+            ws.guarded(
+                "Redis 편집",
+                Rc::new(move |e: Engine, c: Confirms| {
+                    let (conn, edit) = (conn.clone(), edit.clone());
+                    async move { e.redis_edit(&conn, edit, c.prod, c.danger).await }
+                }),
+                Rc::new(move |ws: &mut Workspace, r: RedisEditResult, window, cx| {
+                    ws.set_status(
+                        if r.status.is_empty() {
+                            "고침".to_string()
+                        } else {
+                            r.status.clone()
+                        },
+                        false,
+                        cx,
+                    );
+                    let _ = this.update(cx, |v, cx| {
+                        if r.key.is_empty() {
+                            // 키를 지웠다
+                            v.selected = None;
+                            v.raw = None;
+                            v.value = None;
+                            v.scan(window, cx);
+                        } else {
+                            if v.selected.as_deref() != Some(r.key.as_str()) {
+                                v.scan(window, cx);
+                            }
+                            v.open_key(r.key.clone(), window, cx);
+                        }
+                    });
+                }),
+                Confirms::default(),
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn status(&self, msg: &str, error: bool, cx: &mut Context<Self>) {
+        let (msg, ws) = (msg.to_string(), self.ws.clone());
+        gpui::App::defer(cx, move |cx| {
+            let _ = ws.update(cx, |ws, cx| ws.set_status(msg, error, cx));
+        });
+    }
+
+    /// 입력칸 몇 개를 받는 창을 띄우고 확인하면 동작으로 바꿔 보낸다.
+    fn open_form(
+        &mut self,
+        title: &str,
+        fields: Vec<(&'static str, String)>,
+        make: Rc<dyn Fn(Vec<String>) -> redisedit::Action>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inputs: Vec<(&'static str, Entity<InputState>)> = fields
+            .into_iter()
+            .map(|(label, v)| (label, cx.new(|cx| InputState::new(window, cx).placeholder(label).default_value(v))))
+            .collect();
+        let (this, title) = (cx.entity().downgrade(), title.to_string());
+        let first = std::cell::Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first.replace(false)
+                && let Some((_, i)) = inputs.first()
+            {
+                i.update(cx, |i, cx| i.focus(window, cx));
+            }
+            let mut d = dialog.title(title.clone()).w(px(480.));
+            for (label, i) in &inputs {
+                d = d.child(
+                    h_flex()
+                        .gap_2()
+                        .py_1()
+                        .child(div().w(px(90.)).child(*label))
+                        .child(div().flex_1().child(Input::new(i))),
+                );
+            }
+            let (this, inputs, make) = (this.clone(), inputs.clone(), make.clone());
+            let ok = Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+                let vals: Vec<String> = inputs.iter().map(|(_, i)| i.read(cx).value().to_string()).collect();
+                let action = make(vals);
+                let _ = this.update(cx, |v, cx| v.apply_edit(action, window, cx));
+            });
+            let ok2 = ok.clone();
+            d.child(
+                h_flex()
+                    .pt_3()
+                    .gap_2()
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("redis-form-cancel")
+                            .small()
+                            .label("취소")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("redis-form-ok")
+                            .small()
+                            .primary()
+                            .label("확인")
+                            .on_click(move |_, window, cx| {
+                                ok2(window, cx);
+                                window.close_dialog(cx);
+                            }),
+                    ),
+            )
+            .on_ok(move |_, window, cx| {
+                ok(window, cx);
+                true
+            })
+        });
+    }
+
+    fn confirm_delete_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.selected.clone() else { return };
+        let this = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let this = this.clone();
+            alert
+                .title("키 지우기")
+                .description(format!("{key} 를 지울까?"))
+                .ok_text("지우기")
+                .ok_variant(gpui_component::button::ButtonVariant::Danger)
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    let _ = this.update(cx, |v, cx| v.apply_edit(redisedit::Action::DeleteKey, window, cx));
+                    true
+                })
+        });
+    }
+
+    /// R42: 패턴에 맞는 키를 먼저 세어 보이고, 확인하면 지운다. prod 면 엔진이 한 번 더 묻는다.
+    pub(super) fn pattern_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pat = self.pattern.read(cx).value().trim().to_string();
+        if pat.is_empty() || pat == "*" {
+            self.status("패턴을 좁힌다 (전체 * 는 지우지 않는다)", true, cx);
+            return;
+        }
+        let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
+        self.with_ws(window, cx, move |ws, window, cx| {
+            let p2 = pat.clone();
+            ws.guarded(
+                "지울 키 세기",
+                Rc::new(move |e: Engine, _| {
+                    let (conn, pat) = (conn.clone(), p2.clone());
+                    async move { e.redis_pattern_keys(&conn, &pat).await }
+                }),
+                Rc::new(move |ws: &mut Workspace, pk: PatternKeys, window, cx| {
+                    if pk.keys.is_empty() {
+                        ws.set_status(format!("{pat} 에 맞는 키가 없다"), false, cx);
+                        return;
+                    }
+                    let q = redisedit::unlink_question(&pat, pk.keys.len(), pk.truncated);
+                    let (this, keys) = (this.clone(), pk.keys);
+                    window.open_alert_dialog(cx, move |alert, _, _| {
+                        let (this, keys) = (this.clone(), keys.clone());
+                        alert
+                            .title("패턴으로 지우기")
+                            .description(q.clone())
+                            .ok_text(format!("{}개 지우기", keys.len()))
+                            .ok_variant(gpui_component::button::ButtonVariant::Danger)
+                            .show_cancel(true)
+                            .on_ok(move |_, window, cx| {
+                                let keys = keys.clone();
+                                let _ = this.update(cx, |v, cx| v.unlink(keys, window, cx));
+                                true
+                            })
+                    });
+                }),
+                Confirms::default(),
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn unlink(&mut self, keys: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let (conn, this) = (self.conn.clone(), cx.entity().downgrade());
+        self.with_ws(window, cx, move |ws, window, cx| {
+            ws.guarded(
+                "키 지우기",
+                // 사용자가 개수를 보고 확인했다(confirm). prod 는 엔진이 confirm_prod 로 따로 묻는다
+                Rc::new(move |e: Engine, c: Confirms| {
+                    let (conn, keys) = (conn.clone(), keys.clone());
+                    async move { e.redis_unlink(&conn, keys, true, c.prod).await }
+                }),
+                Rc::new(move |ws: &mut Workspace, n: idb_engine::Count, window, cx| {
+                    ws.set_status(format!("키 {}개를 지웠다", n.rows), false, cx);
+                    let _ = this.update(cx, |v, cx| {
+                        v.selected = None;
+                        v.raw = None;
+                        v.value = None;
+                        v.scan(window, cx);
+                    });
+                }),
+                Confirms::default(),
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn render_edit_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let raw = self.raw.as_ref()?;
+        let theme = cx.theme().clone();
+        let typ = raw.typ.clone();
+        let btn = |id: &'static str, label: &'static str| Button::new(id).xsmall().ghost().label(label);
+        let mut bar = h_flex()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(div().truncate().child(raw.key.clone()))
+            .child(div().px_2().rounded_full().bg(theme.secondary).text_xs().child(typ.clone()))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("TTL {}", redisedit::ttl_label(raw.ttl_secs))),
+            )
+            .child(div().flex_1());
+        use redisedit::Action as A;
+        let cur = raw.string.clone();
+        bar = match typ.as_str() {
+            "string" => bar.child(btn("r-edit", "값 고치기").on_click(cx.listener(move |v, _, w, cx| {
+                v.open_form(
+                    "값 고치기",
+                    vec![("값", cur.clone())],
+                    Rc::new(|x| A::SetString(x[0].clone())),
+                    w,
+                    cx,
+                )
+            }))),
+            "hash" => bar
+                .child(btn("r-hset", "필드 설정").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "필드 설정",
+                        vec![("필드", String::new()), ("값", String::new())],
+                        Rc::new(|x| A::HashSet {
+                            field: x[0].clone(),
+                            value: x[1].clone(),
+                        }),
+                        w,
+                        cx,
+                    )
+                })))
+                .child(btn("r-hdel", "필드 지우기").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "필드 지우기",
+                        vec![("필드", String::new())],
+                        Rc::new(|x| A::HashDel(x[0].clone())),
+                        w,
+                        cx,
+                    )
+                }))),
+            "list" => bar
+                .child(btn("r-lpush", "끝에 추가").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "끝에 추가",
+                        vec![("값", String::new())],
+                        Rc::new(|x| A::ListPush(x[0].clone())),
+                        w,
+                        cx,
+                    )
+                })))
+                .child(btn("r-lset", "칸 고치기").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "칸 고치기",
+                        vec![("번호(0부터)", String::new()), ("값", String::new())],
+                        Rc::new(|x| A::ListSet {
+                            index: x[0].trim().parse().unwrap_or(usize::MAX),
+                            value: x[1].clone(),
+                        }),
+                        w,
+                        cx,
+                    )
+                })))
+                .child(btn("r-ldel", "칸 지우기").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "칸 지우기",
+                        vec![("번호(0부터)", String::new())],
+                        Rc::new(|x| A::ListDel(x[0].trim().parse().unwrap_or(usize::MAX))),
+                        w,
+                        cx,
+                    )
+                }))),
+            "set" => bar
+                .child(btn("r-sadd", "멤버 추가").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "멤버 추가",
+                        vec![("멤버", String::new())],
+                        Rc::new(|x| A::SetAdd(x[0].clone())),
+                        w,
+                        cx,
+                    )
+                })))
+                .child(btn("r-srem", "멤버 지우기").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "멤버 지우기",
+                        vec![("멤버", String::new())],
+                        Rc::new(|x| A::SetDel(x[0].clone())),
+                        w,
+                        cx,
+                    )
+                }))),
+            "zset" => bar
+                .child(btn("r-zadd", "점수 설정").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "점수 설정",
+                        vec![("멤버", String::new()), ("점수", String::new())],
+                        Rc::new(|x| A::ZSet {
+                            member: x[0].clone(),
+                            score: x[1].clone(),
+                        }),
+                        w,
+                        cx,
+                    )
+                })))
+                .child(btn("r-zrem", "멤버 지우기").on_click(cx.listener(|v, _, w, cx| {
+                    v.open_form(
+                        "멤버 지우기",
+                        vec![("멤버", String::new())],
+                        Rc::new(|x| A::ZDel(x[0].clone())),
+                        w,
+                        cx,
+                    )
+                }))),
+            _ => bar,
+        };
+        let ttl = if raw.ttl_secs > 0 {
+            raw.ttl_secs.to_string()
+        } else {
+            String::new()
+        };
+        let key = raw.key.clone();
+        Some(
+            bar.child(btn("r-ttl", "TTL").on_click(cx.listener(move |v, _, w, cx| {
+                v.open_form(
+                    "TTL (초, 비우면 만료 없음)",
+                    vec![("초", ttl.clone())],
+                    Rc::new(|x| A::Ttl(x[0].clone())),
+                    w,
+                    cx,
+                )
+            })))
+            .child(btn("r-rename", "이름 바꾸기").on_click(cx.listener(move |v, _, w, cx| {
+                v.open_form(
+                    "이름 바꾸기",
+                    vec![("새 이름", key.clone())],
+                    Rc::new(|x| A::Rename(x[0].clone())),
+                    w,
+                    cx,
+                )
+            })))
+            .child(
+                Button::new("r-del")
+                    .xsmall()
+                    .danger()
+                    .label("키 지우기")
+                    .on_click(cx.listener(|v, _, w, cx| v.confirm_delete_key(w, cx))),
+            )
+            .into_any_element(),
+        )
     }
 
     fn show(&mut self, rs: ResultSet, window: &mut Window, cx: &mut Context<Self>) {
@@ -187,6 +599,7 @@ impl RedisView {
 impl Render for RedisView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let edit_bar = self.render_edit_bar(cx);
         let mut list = v_flex().id("redis-keys").flex_1().min_h_0().overflow_y_scroll();
         for (i, k) in self.keys.iter().enumerate() {
             let key = k.clone();
@@ -234,12 +647,20 @@ impl Render for RedisView {
                                             .xsmall()
                                             .label("찾기")
                                             .on_click(cx.listener(|v, _, w, cx| v.scan(w, cx))),
+                                    )
+                                    .child(
+                                        Button::new("pattern-del")
+                                            .xsmall()
+                                            .ghost()
+                                            .label("지우기…")
+                                            .tooltip("패턴에 맞는 키를 세어 보이고 확인하면 지운다")
+                                            .on_click(cx.listener(|v, _, w, cx| v.pattern_delete(w, cx))),
                                     ),
                             )
                             .child(list),
                     )
                     .child(
-                        div().flex_1().min_w_0().h_full().child(match &self.value {
+                        v_flex().flex_1().min_w_0().h_full().children(edit_bar).child(match &self.value {
                             Some(v) => v.clone().into_any_element(),
                             None => div()
                                 .p_3()

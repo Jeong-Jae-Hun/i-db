@@ -2491,6 +2491,63 @@ mod tests {
         });
     }
 
+    fn redis_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".idea")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".dbtui")).unwrap();
+        for f in ["dataSources.xml", "dataSources.local.xml"] {
+            std::fs::copy(offline_project().join(".idea").join(f), dir.path().join(".idea").join(f)).unwrap();
+        }
+        std::fs::write(
+            dir.path().join(".dbtui/connections.json"),
+            r#"[{"uuid": "r1", "name": "cache-local", "group": "c", "kind": "redis", "host": "127.0.0.1", "port": 1}]"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[gpui::test]
+    fn Redis_편집은_뻔한_입력_오류를_보내지_않고_전체_패턴_삭제를_막는다(cx: &mut TestAppContext) {
+        let dir = redis_project();
+        let (ws, cx) = setup(cx);
+        let p = dir.path().to_path_buf();
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.open_target(Target::Local(p), window, cx)));
+        wait(cx, &ws, |w| w.engine.is_some());
+        cx.update(|window, cx| ws.update(cx, |w, cx| w.select_conn("cache-local".into(), window, cx)));
+        wait(cx, &ws, |w| w.busy.is_none());
+        let view = cx.update(|_, cx| {
+            let w = ws.read(cx);
+            match w.tabs.active().and_then(|t| w.bodies.get(&t.id)) {
+                Some(Body::Redis { view }) => view.clone(),
+                _ => panic!("Redis 탭이 아니다"),
+            }
+        });
+        let raw: idb_engine::RawValue = serde_json::from_value(serde_json::json!({
+            "key": "k", "type": "string", "ttl_secs": -1, "string": "v", "truncated": true
+        }))
+        .unwrap();
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.raw = Some(raw);
+                v.apply_edit(crate::vm::redisedit::Action::SetString("x".into()), window, cx);
+            })
+        });
+        draw(cx);
+        cx.update(|_, cx| {
+            let w = ws.read(cx);
+            assert!(w.busy.is_none(), "잘린 값은 보내지 않는다");
+            assert!(w.status.0.contains("일부만 읽었다"), "{:?}", w.status);
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.pattern.update(cx, |i, cx| i.set_value("*", window, cx));
+                v.pattern_delete(window, cx);
+            })
+        });
+        draw(cx);
+        cx.update(|_, cx| assert!(ws.read(cx).status.0.contains("패턴을 좁힌다"), "{:?}", ws.read(cx).status));
+    }
+
     fn edited_result(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<ResultsView> {
         edited_result_on(ws, "app-stg", cx)
     }
