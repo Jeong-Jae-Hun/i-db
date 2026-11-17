@@ -6,7 +6,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use idb_core::result::QueryResult;
+pub use idb_sources::health::Metric;
+pub use idb_sources::source::Node;
 pub use idb_sources::{Applied, Catalog, Change, ChangeOp, ChangeSet, Fk, Object, Origin, TableRef};
+
+pub use crate::flows::FlowBox;
 
 pub use crate::redis::{PatternKeys, RawValue, RedisEdit};
 use serde::{Deserialize, Serialize};
@@ -27,6 +31,16 @@ pub const REASON_CONFIRM_PROD: &str = "confirm_prod";
 pub const REASON_CONFIRM_DANGER: &str = "confirm_danger";
 /// 환경과 상관없이 늘 묻는 확인(백엔드 신호 R22.1, 패턴 일괄 삭제 R42). `confirm:true` 로 다시 보낸다
 pub const REASON_CONFIRM: &str = "confirm";
+/// 읽기 전용이 아닌 문장의 EXPLAIN ANALYZE 는 문장을 실제로 실행해 환경과 상관없이 묻는다(R9.2). `confirm_analyze:true` 로 다시 보낸다
+pub const REASON_CONFIRM_ANALYZE: &str = "confirm_analyze";
+/// 읽기 전용 저장소에 쓰기로 보이는 질의다(R60). 다시 보낼 길이 없다
+pub const REASON_READ_ONLY: &str = "read_only";
+/// Redis KEYS 다. 서버를 멈춰 확인으로도 보내지 않는다(SCAN 을 쓴다)
+pub const REASON_KEYS: &str = "keys";
+/// 전체 스캔·큰 범위 같은 비싼 저장소 질의다(R60.2). 확인 후 `force:true` 로 다시 보낸다
+pub const REASON_CONFIRM_EXPENSIVE: &str = "confirm_expensive";
+/// 요청마다 요금이 붙는 AWS 조회라 serve 쪽 DB_ALLOW_BILLED=1 없이는 막는다(R72). 확인으로 풀리지 않는다
+pub const REASON_BILLED: &str = "billed";
 
 /// 요청 하나다. op 이름은 snake_case 다. 모르는 필드는 무시해 새 필드를 더해도 옛 서버가 받는다.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,6 +302,59 @@ pub enum Request {
         #[serde(default)]
         confirm_prod: bool,
     },
+    // ─── 저장소(R60~R68): OpenSearch·Loki·Prometheus·Grafana·DynamoDB·Athena·aws ───
+    /// 트리 한 단계. path "" 는 맨 위다
+    SourceChildren {
+        conn: String,
+        #[serde(default)]
+        path: String,
+    },
+    /// 트리 Enter 미리 보기(Loki 100줄, 나머지 50행)
+    SourceOpen {
+        conn: String,
+        path: String,
+    },
+    /// 편집기 질의. logs·metrics 범위는 since_ns·until_ns 다
+    SourceRun(SourceRunRequest),
+    /// 대시보드 확인 한 번(R64.2). 모든 종류
+    Health {
+        conn: String,
+    },
+    /// 흐름 풀이(R69). names 가 비면 모두. prod 가 거짓이면 prod 접속은 묻지 않는다
+    Flows {
+        #[serde(default)]
+        names: Vec<String>,
+        #[serde(default)]
+        prod: bool,
+    },
+    /// .dbtui/boards 의 보드 목록
+    BoardList,
+    /// 보드 하나를 한 번 돌린다(R70). prod 가 거짓이면 prod 패널은 묻지 않는다
+    BoardRun {
+        name: String,
+        #[serde(default)]
+        prod: bool,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SourceRunRequest {
+    pub conn: String,
+    pub text: String,
+    /// 0 이면 종류 기본(1시간 전부터 지금까지)
+    #[serde(default)]
+    pub since_ns: i64,
+    #[serde(default)]
+    pub until_ns: i64,
+    /// 0 이면 1,000
+    #[serde(default)]
+    pub limit: usize,
+    /// Loki 방향 "forward"·"backward"(기본)
+    #[serde(default)]
+    pub direction: String,
+    /// confirm_expensive 를 확인받은 뒤
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -303,6 +370,9 @@ pub struct RunRequest {
     /// 사용자가 `위험: … y/N` 에 y 했다(R25)
     #[serde(default)]
     pub confirm_danger: bool,
+    /// 사용자가 `EXPLAIN ANALYZE 는 문장을 실제로 실행합니다: y/N` 에 y 했다(R9.2). explain 만 본다
+    #[serde(default)]
+    pub confirm_analyze: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -513,6 +583,63 @@ pub struct RedisEditResult {
     /// 다시 읽을 키. 이름을 바꿨으면 새 이름, 키를 지웠으면 빈 글이다
     pub key: String,
     pub status: String,
+}
+
+/// 대시보드 확인 결과다. err 는 비밀값을 지운 한 줄이다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthInfo {
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub version: String,
+    pub metrics: Vec<Metric>,
+    pub summary: String,
+    pub err: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlowResult {
+    pub flow: String,
+    pub boxes: Vec<FlowBox>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardSummary {
+    pub name: String,
+    pub title: String,
+    pub panels: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+/// 보드 한 번의 결과다. error 는 파일 단위 설정 오류(JSON·refresh)다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardResult {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    pub panels: Vec<PanelOut>,
+}
+
+/// 패널 한 칸이다. 숫자 패널은 value·warn, 표·차트는 result, 흐름은 boxes 다.
+/// error 는 `설정 오류: …` 이거나 실행 오류이고, note 는 묻지 않은 prod 패널 안내다.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PanelOut {
+    pub title: String,
+    pub conn: String,
+    pub flow: String,
+    pub view: String,
+    pub prod: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub warn: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultSet>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boxes: Vec<FlowBox>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

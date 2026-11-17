@@ -1,0 +1,5 @@
+args: ["flows","-p","{P}","--format","csv"]
+exit: 2
+--- stdout
+--- stderr
+db flows: --format must be one of table|tsv|json

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use futures_util::FutureExt;
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -98,7 +99,7 @@ where
                 let (engine, tx2, tasks2) = (engine.clone(), tx.clone(), tasks.clone());
                 // 잠금을 쥔 채 띄우고 넣어야 작업이 끝나 지우는 일이 넣기보다 앞서지 않는다
                 let h = tokio::spawn(async move {
-                    let res: Result<Value, EngineError> = engine.handle(req).await;
+                    let res = guarded(engine.handle(req)).await;
                     if tasks2.lock().unwrap().remove(&id).is_some() {
                         let _ = tx2.send(response_line(id, &res));
                     }
@@ -120,6 +121,14 @@ where
     drop(tx);
     let _ = writer.await;
     result
+}
+
+/// op 처리기가 패닉해도 그 요청에 `internal error` 로 답한다. 답이 없으면 클라이언트가 그 id 를 끝없이 기다린다.
+async fn guarded(fut: impl std::future::Future<Output = Result<Value, EngineError>>) -> Result<Value, EngineError> {
+    std::panic::AssertUnwindSafe(fut)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(EngineError::run("internal error")))
 }
 
 /// 줄 하나를 읽는다. 상한을 넘으면 그 줄을 끝까지 버리고 Some(Err) 다. 끝이면 None 이다.
@@ -163,6 +172,13 @@ async fn read_line<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -> std::io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn 처리기가_패닉하면_internal_error_로_답한다() {
+        let res = guarded(async { panic!("boom") }).await;
+        assert_eq!(res.unwrap_err().error, "internal error");
+        assert_eq!(guarded(async { Ok(Value::from(1)) }).await.unwrap(), Value::from(1));
+    }
 
     #[tokio::test]
     async fn 긴_줄은_버리고_다음_줄을_읽는다() {

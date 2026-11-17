@@ -1,0 +1,5 @@
+args: ["conn","add","ath","--kind","athena","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn add: region is required (dynamodb, athena, aws, sigv4)

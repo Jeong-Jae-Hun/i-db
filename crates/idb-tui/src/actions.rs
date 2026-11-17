@@ -32,6 +32,8 @@ pub struct Script {
     pub idx: usize,
     pub confirm_prod: bool,
     pub confirm_danger: bool,
+    /// 읽기 전용이 아닌 EXPLAIN ANALYZE 확인(R9.2, serve reason confirm_analyze)
+    pub confirm_analyze: bool,
     pub params: BTreeMap<String, String>,
     pub redis: bool,
     pub results: Vec<ResultSet>,
@@ -1144,6 +1146,7 @@ impl App {
             idx: 0,
             confirm_prod: false,
             confirm_danger: false,
+            confirm_analyze: false,
             params: BTreeMap::new(),
             redis: false,
             results: Vec::new(),
@@ -1185,6 +1188,7 @@ impl App {
             idx: 0,
             confirm_prod: false,
             confirm_danger: false,
+            confirm_analyze: false,
             params: BTreeMap::new(),
             redis: false,
             results: Vec::new(),
@@ -1392,6 +1396,7 @@ impl App {
                 idx: 0,
                 confirm_prod: false,
                 confirm_danger: false,
+                confirm_analyze: false,
                 params: BTreeMap::new(),
                 redis: false,
                 results: Vec::new(),
@@ -1686,6 +1691,7 @@ impl App {
             idx: 0,
             confirm_prod: false,
             confirm_danger: false,
+            confirm_analyze: false,
             params: BTreeMap::new(),
             redis,
             results: Vec::new(),
@@ -1769,6 +1775,7 @@ impl App {
                 params: s.params.clone(),
                 confirm_prod: s.confirm_prod,
                 confirm_danger: s.confirm_danger,
+                confirm_analyze: s.confirm_analyze,
             };
             match s.explain {
                 Some(analyze) => Request::Explain {
@@ -1811,7 +1818,13 @@ impl App {
                 }
                 self.show_script(ti, s);
             }
-            Err(e) if e.code == CODE_REFUSED && e.reason.as_deref() != Some(REASON_PROD_LOCKED) => {
+            Err(e)
+                if e.code == CODE_REFUSED
+                    && matches!(
+                        e.reason.as_deref(),
+                        Some(REASON_CONFIRM_PROD | REASON_CONFIRM_DANGER | REASON_CONFIRM | idb_engine::REASON_CONFIRM_ANALYZE)
+                    ) =>
+            {
                 // 확인을 받아 같은 문장부터 다시 보낸다. prod 쓰기와 위험 문장이 겹치면 한 창에 이유를 같이 보인다(R25.1)
                 let reason = e.reason.clone().unwrap_or_default();
                 let stmt = s.stmts[s.idx].clone();
@@ -1839,6 +1852,7 @@ impl App {
                         }
                         REASON_CONFIRM_DANGER => s.confirm_danger = true,
                         REASON_CONFIRM => s.confirm_prod = true,
+                        idb_engine::REASON_CONFIRM_ANALYZE => s.confirm_analyze = true,
                         _ => {}
                     }
                     a.start_script(s);

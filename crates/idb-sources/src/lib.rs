@@ -1,16 +1,28 @@
 #![allow(non_snake_case)]
-//! PostgreSQL·Redis 클라이언트. Go `internal/db` 의 CLI 가 쓰는 쪽(backend·readonly·meta·export·schemadiff·linked)을 옮긴다.
+//! PostgreSQL·Redis 클라이언트와 읽기 전용 저장소. Go `internal/db` 의 CLI 가 쓰는 쪽(backend·readonly·meta·export·schemadiff·linked)을 옮긴다.
 //! 결과 글은 Go 판과 같아야 해서 PostgreSQL 은 텍스트 형식으로 받고 명령 태그를 그대로 싣는 작은 프로토콜 구현을 둔다
 //! (tokio-postgres 는 결과를 바이너리로만 받고 명령 태그를 내주지 않는다).
+//! 읽기 전용 저장소(R60~)는 source 틀 아래 종류마다 모듈을 둔다(opensearch·obs·dynamo·athena·awsres).
 
+pub mod athena;
+mod aws;
+pub mod awsres;
 mod dns;
+pub mod dynamo;
+#[cfg(test)]
+mod fakehttp;
+pub mod health;
+mod httpc;
 pub mod linked;
 #[cfg(test)]
 mod live_tests;
 mod net;
+pub mod obs;
+pub mod opensearch;
 pub mod pg;
 pub mod redis;
 pub mod schemadiff;
+pub mod source;
 mod tls;
 
 use std::fmt;
@@ -43,11 +55,25 @@ pub enum Error {
     /// 마감(--timeout 등)이 지났다. 글은 Go `context.DeadlineExceeded` 와 같다
     Deadline,
     Other(String),
+    /// 읽기 전용 저장소에 쓰기로 보이는 질의를 보냈다(Go source.ErrWrite). 글은 덧붙일 까닭이다(비면 없음)
+    Write(String),
+    /// 전체 스캔·큰 범위처럼 비싼 질의다(Go source.ErrNeedsConfirm). 글은 확인 까닭(한국어)이다
+    NeedsConfirm(String),
+    /// 요청·스캔마다 요금이 붙는 AWS 조회를 허용 없이 부르려 했다(Go source.ErrBilled, R72). 보내기 전에 돌려준다
+    Billed,
 }
 
 impl Error {
     pub fn msg(s: impl Into<String>) -> Error {
         Error::Other(s.into())
+    }
+
+    /// NeedsConfirm 에 실린 까닭이다. 아니면 빈 글이다(Go `source.ConfirmReason`).
+    pub fn confirm_reason(&self) -> &str {
+        match self {
+            Error::NeedsConfirm(r) => r,
+            _ => "",
+        }
     }
 
     /// 서버 statement_timeout 으로 멈춘 오류(57014)인지다.
@@ -56,12 +82,20 @@ impl Error {
     }
 }
 
+const ERR_WRITE: &str = "read-only source: write requests are not sent";
+const ERR_NEEDS_CONFIRM: &str = "expensive query needs confirmation";
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Pg(e) => e.fmt(f),
             Error::Deadline => f.write_str("context deadline exceeded"),
             Error::Other(s) => f.write_str(s),
+            Error::Write(d) if d.is_empty() => f.write_str(ERR_WRITE),
+            Error::Write(d) => write!(f, "{ERR_WRITE}: {d}"),
+            Error::NeedsConfirm(r) if r.is_empty() => f.write_str(ERR_NEEDS_CONFIRM),
+            Error::NeedsConfirm(r) => write!(f, "{ERR_NEEDS_CONFIRM}: {r}"),
+            Error::Billed => write!(f, "요금이 붙는 조회라 막음 ({}=1 로 허용)", source::ALLOW_BILLED_ENV),
         }
     }
 }

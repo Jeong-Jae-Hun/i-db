@@ -12,7 +12,7 @@ use idb_core::redact::redact;
 use idb_core::result::QueryResult;
 use idb_core::sqlsafe::{
     ExplainOpt, check_read_only_sql, danger_of, danger_of_redis, explain_sql, first_sql_word, hidden_write_of, is_read_only_redis,
-    split_args, split_statements,
+    keys_refusal, split_args, split_statements,
 };
 use idb_core::statcrypt;
 use idb_core::textutil::{go_upper, printable};
@@ -31,7 +31,7 @@ const CLI_WRITE_VERBS: &[&str] = &[
     "insert", "update", "delete", "merge", "create", "alter", "drop", "truncate", "comment", "grant", "revoke", "refresh", "vacuum",
     "analyze", "reindex", "cluster", "select", "with",
 ];
-const MSG_UNSUPPORTED: &str = "이 접속 종류에서는 안 됨";
+pub(crate) const MSG_UNSUPPORTED: &str = "이 접속 종류에서는 안 됨";
 /// 종료 코드를 정한 오류다. Run 은 실행 오류(1)다.
 pub enum CmdError {
     Usage(String),
@@ -62,11 +62,11 @@ impl From<Error> for CmdError {
     }
 }
 
-fn usage(s: impl Into<String>) -> CmdError {
+pub(crate) fn usage(s: impl Into<String>) -> CmdError {
     CmdError::Usage(s.into())
 }
 
-fn refused(s: impl Into<String>) -> CmdError {
+pub(crate) fn refused(s: impl Into<String>) -> CmdError {
     CmdError::Refused(s.into())
 }
 
@@ -85,7 +85,7 @@ impl Env<'_> {
         self.err_msg(&err.text(), matches!(err, CmdError::Run(Error::Deadline)), conns)
     }
 
-    fn err_msg(&self, msg: &str, deadline: bool, conns: &[&str]) -> String {
+    pub(crate) fn err_msg(&self, msg: &str, deadline: bool, conns: &[&str]) -> String {
         let mut msg = msg.to_string();
         if deadline || Instant::now() >= self.deadline {
             msg = format!("시간 초과(--timeout {}): {msg}", duration_string(self.o.timeout_ns));
@@ -104,6 +104,11 @@ impl Env<'_> {
 pub async fn run_command(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>, stderr: &mut String) -> Result<Vec<CliResult>, CmdError> {
     let o = env.o;
     let proj = env.proj;
+    if let Some(k) = proj.conn_by_name(&o.conn).and_then(|c| c.kind).filter(|k| k.is_source())
+        && o.cmd != "user360"
+    {
+        return crate::source_cmd::run_source_command(env, k, stdin).await;
+    }
     // --force 는 PostgreSQL·Redis 에서는 --write 와 함께만 쓴다(R58.1)
     if o.force && !o.write {
         return Err(usage("--force 는 --write 와 함께 씀"));
@@ -209,7 +214,7 @@ fn names_result(col: &str, names: Vec<String>) -> QueryResult {
 }
 
 /// -c(또는 --to) 이름의 접속을 찾고 prod 허용을 확인한다. 접속을 열기 전에 거절해야 prod 에 연결 자체를 하지 않는다.
-fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind) -> Result<&'a Conn, CmdError> {
+pub(crate) fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind) -> Result<&'a Conn, CmdError> {
     if name.is_empty() {
         return Err(usage(format!("{flag} <접속 이름> 이 필요함 (db conns)")));
     }
@@ -229,7 +234,7 @@ fn pick_conn<'a>(proj: &'a Project, o: &Opts, flag: &str, name: &str, kind: Kind
 }
 
 /// 위치 인자, -f 파일, 표준 입력 순으로 SQL·명령 글을 읽는다. 빈 글이면 사용법 오류다.
-async fn read_input(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<String, CmdError> {
+pub(crate) async fn read_input(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<String, CmdError> {
     let text = match &env.o.input {
         // serve 는 클라이언트가 읽어 보낸 글만 쓴다. 서버의 -f 파일·표준 입력(프로토콜 줄)은 읽지 않는다
         Some(input) => input.clone().map_err(Error::msg)?,
@@ -340,12 +345,8 @@ async fn redis(env: &Env<'_>, stdin: Option<Box<dyn Read + Send>>) -> Result<Vec
     if args.len() <= 1 {
         args = split_args(read_input(env, stdin).await?.trim());
     }
-    if args.first().is_some_and(|a| a.eq_ignore_ascii_case("KEYS")) {
-        // KEYS 는 키 전체를 한 번에 훑어 그동안 서버가 다른 요청을 받지 못한다
-        let pat = args.get(1).map_or("…", String::as_str);
-        return Err(refused(format!(
-            "KEYS 는 CLI 에서 하지 않음 (서버를 멈춤): SCAN 0 MATCH {pat} COUNT 1000 을 쓰세요"
-        )));
+    if let Some(msg) = keys_refusal(&args) {
+        return Err(refused(msg));
     }
     if !o.write && !is_read_only_redis(&args) {
         return Err(refused("읽기 명령이 아님 (쓰기는 --write)"));

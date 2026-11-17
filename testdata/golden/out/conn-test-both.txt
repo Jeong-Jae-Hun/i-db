@@ -1,0 +1,5 @@
+args: ["conn","test","x","--url","postgres://u@h/d"]
+exit: 2
+--- stdout
+--- stderr
+db conn test: <이름> 과 --url 중 하나만 씀

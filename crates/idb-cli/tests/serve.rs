@@ -592,3 +592,147 @@ fn prod_편집_반영_가져오기_신호_일괄_삭제는_잠금과_확인을_�
     assert!(r["result"].as_array().is_some_and(|a| !a.is_empty()), "{r}");
     s.finish(&secrets(tmp.path()));
 }
+
+#[test]
+fn 저장소_op_는_쓰기_비싼_질의를_코드_3_까닭으로_거절하고_보드는_패널마다_결과다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let r = s.call(json!({"op": "source_run", "conn": "search-stg", "text": "DELETE logs"}));
+    assert_eq!(err(&r), (3, "읽기 전용 저장소라 보내지 않음", "read_only"));
+    let r = s.call(json!({"op": "source_run", "conn": "search-stg", "text": "GET logs/_search?size=20000"}));
+    let (code, _, reason) = err(&r);
+    assert_eq!((code, reason), (3, "confirm_expensive"), "{r}");
+    // Loki 7일 넘는 범위(R60.2)
+    let r = s.call(json!({"op": "source_run", "conn": "logs-stg", "text": "{a=\"1\"}", "since_ns": 8i64 * 24 * 3_600_000_000_000}));
+    assert_eq!(err(&r).2, "confirm_expensive", "{r}");
+    let r = s.call(json!({"op": "source_run", "conn": "aws-stg", "text": "x"}));
+    assert_eq!(err(&r).0, 2, "{r}");
+    let r = s.call(json!({"op": "source_children", "conn": "app-stg"}));
+    assert_eq!(err(&r).0, 2, "{r}");
+    // 닿지 않는 저장소는 실행 오류다
+    let r = s.call(json!({"op": "source_children", "conn": "search-stg", "path": ""}));
+    assert_eq!(err(&r).0, 1, "{r}");
+    let r = s.call(json!({"op": "health", "conn": "logs-stg"}));
+    assert_eq!(r["result"]["ok"], false, "{r}");
+    assert!(!r["result"]["err"].as_str().unwrap().is_empty(), "{r}");
+    let r = s.call(json!({"op": "flows", "names": ["nope"]}));
+    assert_eq!(err(&r), (2, "흐름 없음: nope (.dbtui/flows.json)", ""));
+    let r = s.call(json!({"op": "board_list"}));
+    assert_eq!(r["result"], json!([{"name": "app-stg", "title": "app stg", "panels": 1}]), "{r}");
+    let r = s.call(json!({"op": "board_run", "name": "app-stg"}));
+    let p = &r["result"]["panels"][0];
+    assert_eq!(r["result"]["title"], "app stg", "{r}");
+    assert_eq!(p["error"], "설정 오류: view must be one of number|table|chart|flow: \"\"", "{r}");
+    let r = s.call(json!({"op": "board_run", "name": "nope"}));
+    assert_eq!(err(&r), (2, "보드 없음: nope (.dbtui/boards)", ""));
+    s.finish(&secrets(tmp.path()));
+}
+
+#[test]
+fn EXPLAIN_ANALYZE_는_속_문장으로_쓰기와_위험을_가른다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let explain = |sql: &str, conn: &str, extra: Value| {
+        let mut req = json!({"op": "explain", "conn": conn, "sql": sql, "analyze": true, "buffers": true, "format": "JSON"});
+        for (k, v) in extra.as_object().unwrap() {
+            req[k] = v.clone();
+        }
+        req
+    };
+    // 쓰기 문장의 ANALYZE 는 환경과 상관없이 실행 확인(R9.2), 그다음 위험 확인(R25)
+    let r = s.call(explain("delete from t", "app-stg", json!({})));
+    assert_eq!(err(&r), (3, "EXPLAIN ANALYZE 는 문장을 실제로 실행합니다: y/N", "confirm_analyze"));
+    let r = s.call(explain("delete from t", "app-stg", json!({"confirm_analyze": true})));
+    assert_eq!(err(&r), (3, "위험: WHERE 없는 DELETE", "confirm_danger"));
+    // 잠긴 prod: 쓰기의 ANALYZE 는 확인 없이 거절, 열면 실행 확인 → prod 확인 순
+    let r = s.call(explain(
+        "delete from t where id = 1",
+        "app-prod",
+        json!({"confirm_analyze": true, "confirm_prod": true}),
+    ));
+    assert_eq!(err(&r).2, "prod_locked", "{r}");
+    s.call(json!({"op": "prod_lock", "conn": "app-prod", "unlock": true}));
+    let r = s.call(explain("delete from t where id = 1", "app-prod", json!({"confirm_prod": true})));
+    assert_eq!(err(&r).2, "confirm_analyze", "{r}");
+    let r = s.call(explain("delete from t where id = 1", "app-prod", json!({"confirm_analyze": true})));
+    assert_eq!(err(&r).2, "confirm_prod", "{r}");
+    s.call(json!({"op": "prod_lock", "conn": "app-prod", "unlock": false}));
+    // 읽기의 ANALYZE 는 잠긴 prod 에서도 쓰기로 보지 않는다(접속이 없어 실행 오류로 끝난다)
+    let r = s.call(explain("select 1", "app-prod", json!({})));
+    assert_eq!((err(&r).0, err(&r).2), (1, ""), "{r}");
+    // ANALYZE 없는 EXPLAIN 은 속 문장을 실행하지 않아 묻지 않는다(R9.1)
+    let r = s.call(json!({"op": "explain", "conn": "app-prod", "sql": "delete from t", "format": "JSON"}));
+    assert_eq!((err(&r).0, err(&r).2), (1, ""), "{r}");
+    s.finish(&secrets(tmp.path()));
+}
+
+#[test]
+fn Redis_KEYS_는_접속하기_전에_CLI_와_같은_글로_거절한다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let want = (
+        3,
+        "KEYS 는 CLI 에서 하지 않음 (서버를 멈춤): SCAN 0 MATCH * COUNT 1000 을 쓰세요",
+        "keys",
+    );
+    for conn in ["app-prod-redis", "app-stg-redis"] {
+        let r = s.call(json!({"op": "redis_run", "conn": conn, "args": ["keys", "*"], "confirm_prod": true}));
+        assert_eq!(err(&r), want, "{conn}");
+    }
+    s.finish(&secrets(tmp.path()));
+}
+
+#[test]
+fn live_편집_반영의_PK_는_세션_트랜잭션_안에서_찾는다() {
+    let Some(vars) = common::live_vars() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    common::copy_project(&common::root().join("testdata/golden/live"), tmp.path(), &vars);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let conn = "golden-local";
+    let ok = |r: &Value| -> Value {
+        assert_eq!(r["ok"], true, "{r}");
+        r["result"].clone()
+    };
+    ok(&s.call(json!({"op": "tx_begin", "conn": conn})));
+    // 아직 커밋하지 않은 테이블·PK 는 풀 연결에서 보이지 않는다
+    for sql in [
+        "create temp table pk_t (id int, v text)",
+        "alter table pk_t add primary key (id)",
+        "insert into pk_t values (1, 'a')",
+    ] {
+        ok(&s.call(json!({"op": "run", "conn": conn, "sql": sql})));
+    }
+    let cs = json!({"table": {"schema": "pg_temp", "table": "pk_t"}, "pk": ["id"], "changes": [
+        {"op": "update", "key": {"id": "1"}, "values": {"v": "b"}, "old": {"v": "a"}}]});
+    let a = ok(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": cs})));
+    assert_eq!(a["result"]["text"], "UPDATE 1", "{a}");
+    // PK 가 아닌 열이면 여전히 거절하고, 찾다 실패해도 트랜잭션은 이어진다
+    let bad = json!({"table": {"schema": "pg_temp", "table": "pk_t"}, "pk": ["v"], "changes": [
+        {"op": "delete", "key": {"v": "b"}}]});
+    assert_eq!(err(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": bad}))).0, 2);
+    let none = json!({"table": {"schema": "public", "table": "no_such_t"}, "pk": ["id"], "changes": [
+        {"op": "delete", "key": {"id": "1"}}]});
+    assert_eq!(err(&s.call(json!({"op": "apply_changes", "conn": conn, "changes": none}))).0, 1);
+    let r = ok(&s.call(json!({"op": "run", "conn": conn, "sql": "select v from pk_t"})));
+    assert_eq!((r["rows"].clone(), r["in_tx"].clone()), (json!([["b"]]), json!(true)), "{r}");
+    ok(&s.call(json!({"op": "tx_rollback", "conn": conn})));
+    s.finish(&[]);
+}
+
+#[test]
+fn 잘못된_퍼센트_뒤_한글이_있는_저장소_질의도_오류로_답한다() {
+    let tmp = offline_project(1);
+    let mut s = Serve::start(tmp.path());
+    s.hello();
+    let r = s.call(json!({"op": "source_run", "conn": "search-stg", "text": "GET logs/_search?x=%한"}));
+    assert_eq!(r["ok"], false, "{r}");
+    assert!(r["error"].as_str().unwrap().contains(r#"invalid URL escape "%\xed\x95""#), "{r}");
+    // 같은 serve 가 다음 요청에도 답한다
+    let r = s.call(json!({"op": "project"}));
+    assert_eq!(r["ok"], true, "{r}");
+    s.finish(&secrets(tmp.path()));
+}

@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use idb_core::result::{MAX_ROWS, QueryResult, cap_cell};
-use idb_core::textutil::printable;
+use idb_core::textutil::{group_digits, printable};
 use idb_sources::Error;
 use idb_sources::redis::{RedisConn, Value as RValue};
 use serde::{Deserialize, Serialize};
@@ -337,8 +337,6 @@ pub(crate) fn score_text(s: &RValue) -> String {
 pub(crate) fn command_unavailable(e: &Error) -> bool {
     matches!(e, Error::Other(m) if m.contains("unknown command") || m.contains("unknown subcommand") || m.starts_with("NOPERM"))
 }
-
-use idb_core::textutil::group_digits;
 
 fn digits(s: &str) -> String {
     match s.parse::<i64>() {

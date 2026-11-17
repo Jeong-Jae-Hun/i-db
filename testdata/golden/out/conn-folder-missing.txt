@@ -1,0 +1,5 @@
+args: ["conn","folder","nope","x","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn folder: 접속 없음: nope (db conns)

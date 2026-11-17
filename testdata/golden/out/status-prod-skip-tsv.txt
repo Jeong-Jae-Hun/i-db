@@ -1,0 +1,6 @@
+args: ["status","-p","{P}","app-prod-redis","--format","tsv"]
+exit: 0
+--- stdout
+group	name	env	kind	ok	latency_ms	version	metrics
+grp	app-prod-redis	prod	redis	-			--prod 로 확인
+--- stderr

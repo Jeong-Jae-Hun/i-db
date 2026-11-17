@@ -1,0 +1,5 @@
+args: ["conn","add","postgres://u:sekrit@h/d","-p","{P}"]
+exit: 2
+--- stdout
+--- stderr
+db conn add: 접속 이름은 영숫자·-·_ 만 받음

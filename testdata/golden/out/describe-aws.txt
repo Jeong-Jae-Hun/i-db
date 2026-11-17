@@ -1,0 +1,5 @@
+args: ["describe","-p","{P}","-c","aws-stg","t"]
+exit: 2
+--- stdout
+--- stderr
+describe(aws): 이 접속 종류에서는 안 됨

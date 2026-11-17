@@ -9,6 +9,12 @@ use idb_core::sqlsafe::{
 };
 use serde::{Deserialize, Serialize};
 
+/// 테이블의 PK 열 이름 배열(순서대로) 하나를 돌려준다. $1 은 따옴표 친 테이블 이름이다
+pub(crate) const PRIMARY_KEY_SQL: &str =
+    "select coalesce((select array(select a.attname::text from unnest(i.indkey) with ordinality k(n, o)
+			join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.n order by k.o)
+		from pg_index i where i.indrelid = $1::regclass and i.indisprimary), '{}')";
+
 use super::edit::text_array;
 use super::{Pg, TableRef, to_result};
 use crate::Error;
@@ -191,14 +197,7 @@ impl Pg {
 
     /// 테이블의 PK 열(순서대로)이다. 없으면 빈 목록이다. 편집 묶음의 pk 가 진짜 PK 인지 확인하는 데 쓴다.
     pub async fn primary_key(&self, t: &TableRef) -> Result<Vec<String>, Error> {
-        let rows = self
-            .pool_query(
-                "select coalesce((select array(select a.attname::text from unnest(i.indkey) with ordinality k(n, o)
-			join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.n order by k.o)
-		from pg_index i where i.indrelid = $1::regclass and i.indisprimary), '{}')",
-                &[Some(&t.quoted())],
-            )
-            .await?;
+        let rows = self.pool_query(PRIMARY_KEY_SQL, &[Some(&t.quoted())]).await?;
         Ok(rows.rows.first().map(|_| text_array(&rows.text(0, 0))).unwrap_or_default())
     }
 
