@@ -141,6 +141,60 @@ fn table_refs(stmt: &str) -> Vec<(String, String, String)> {
     out
 }
 
+/// `insert into <테이블> (` 로 연 괄호가 아직 닫히지 않았으면 그 테이블(스키마, 이름)이다.
+fn insert_columns_ctx(before: &str) -> Option<(String, String)> {
+    let low = before.to_lowercase();
+    let at = low.rfind("insert into")?;
+    let rest = &before[at + "insert into".len()..];
+    let open = rest.find('(')?;
+    if rest[open..].contains(')') {
+        return None;
+    }
+    let name = rest[..open].trim();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(match name.rsplit_once('.') {
+        Some((s, t)) => (unquote(s), unquote(t)),
+        None => (String::new(), unquote(name)),
+    })
+}
+
+/// 하위 명령이 있는 Redis 명령이다(Go internal/complete redis.go 와 같은 목록).
+const REDIS_SUBS: &[(&str, &[&str])] = &[
+    ("CLIENT", &["LIST", "INFO", "GETNAME", "SETNAME", "ID", "KILL", "PAUSE", "UNPAUSE"]),
+    ("CONFIG", &["GET", "SET", "RESETSTAT", "REWRITE"]),
+    ("SLOWLOG", &["GET", "LEN", "RESET"]),
+    ("MEMORY", &["USAGE", "STATS", "DOCTOR", "PURGE"]),
+    ("OBJECT", &["ENCODING", "FREQ", "IDLETIME", "REFCOUNT"]),
+    ("XINFO", &["STREAM", "GROUPS", "CONSUMERS"]),
+    ("SCRIPT", &["LOAD", "EXISTS", "FLUSH", "KILL"]),
+    ("CLUSTER", &["INFO", "NODES", "SLOTS", "SHARDS", "KEYSLOT"]),
+    ("COMMAND", &["COUNT", "DOCS", "INFO", "LIST"]),
+    ("ACL", &["WHOAMI", "LIST", "USERS", "CAT"]),
+    ("PUBSUB", &["CHANNELS", "NUMSUB", "NUMPAT"]),
+];
+
+/// 키를 받지 않는 명령(이 자리에서 키를 내밀지 않는다)이다.
+const REDIS_NO_KEY: &[&str] = &[
+    "PING",
+    "ECHO",
+    "INFO",
+    "TIME",
+    "DBSIZE",
+    "RANDOMKEY",
+    "SELECT",
+    "MULTI",
+    "EXEC",
+    "DISCARD",
+    "KEYS",
+    "SCAN",
+    "PUBLISH",
+    "SUBSCRIBE",
+    "EVAL",
+    "EVALSHA",
+];
+
 /// SQL 후보다. stmt 는 커서가 든 문장, off 는 문장 안 커서 자리다.
 pub fn sql(cat: Option<&Catalog>, stmt: &str, off: usize) -> Vec<Item> {
     let word = typed_word(stmt, off);
@@ -196,6 +250,11 @@ pub fn sql(cat: Option<&Catalog>, stmt: &str, off: usize) -> Vec<Item> {
                 }
             }
         }
+        return rank(items, prefix);
+    }
+    // INSERT INTO t ( … 의 열 목록 안이면 그 테이블 열만이다
+    if let Some((schema, table)) = insert_columns_ctx(before) {
+        push_cols(&mut items, &schema, &table);
         return rank(items, prefix);
     }
     let table_ctx = TABLE_WORDS.contains(&prev.as_str());
@@ -263,6 +322,28 @@ pub fn redis(line: &str, keys: &[String]) -> Vec<Item> {
             })
             .collect()
     } else {
+        let args: Vec<&str> = line[..word_start].split_whitespace().collect();
+        let cmd = args[0].to_uppercase();
+        if let Some((_, subs)) = REDIS_SUBS.iter().find(|(c, _)| *c == cmd)
+            && args.len() == 1
+        {
+            let items = subs
+                .iter()
+                .map(|c| Item {
+                    label: c.to_string(),
+                    insert: case_like(c, prefix),
+                    kind: "command",
+                    prefix_len: prefix.len(),
+                    ..Item::default()
+                })
+                .collect();
+            return rank(items, prefix);
+        }
+        if REDIS_NO_KEY.contains(&cmd.as_str())
+            || (REDIS_SUBS.iter().any(|(c, _)| *c == cmd) && !matches!(cmd.as_str(), "MEMORY" | "OBJECT" | "XINFO"))
+        {
+            return Vec::new();
+        }
         keys.iter()
             .map(|k| Item {
                 label: k.clone(),
@@ -325,6 +406,22 @@ mod tests {
         assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["orders"]);
         let items = sql(Some(&c), "sel", 3);
         assert!(items.iter().any(|i| i.label == "SELECT" && i.insert == "select"));
+    }
+
+    #[test]
+    fn INSERT_열_목록과_레디스_하위_명령_문맥() {
+        let c = cat();
+        let s = "insert into orders (us";
+        let items = sql(Some(&c), s, s.len());
+        assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["userId"]);
+        assert!(
+            sql(Some(&c), "insert into orders (id) values (", 31)
+                .iter()
+                .any(|i| i.kind == "keyword")
+        );
+        assert_eq!(redis("SLOWLOG g", &[])[0].label, "GET");
+        assert!(redis("PING x", &["x1".into()]).is_empty());
+        assert_eq!(redis("MEMORY USAGE u", &["user:1".into()])[0].label, "user:1");
     }
 
     #[test]
