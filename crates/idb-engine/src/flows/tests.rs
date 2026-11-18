@@ -183,6 +183,7 @@ fn type_flow() -> Flow {
     let tc = |limit: Option<i64>, consumer: &str| TypeConf {
         limit,
         consumer: consumer.into(),
+        stale: None,
     };
     Flow {
         name: "shop-outbox-stg".into(),
@@ -284,6 +285,7 @@ fn NULL_종류는_괄호_NULL_로_보이고_설정_소비자는_글자_NULL_종�
         TypeConf {
             limit: None,
             consumer: "consume-null".into(),
+            stale: None,
         },
     )]);
     let boxes = flow_boxes(

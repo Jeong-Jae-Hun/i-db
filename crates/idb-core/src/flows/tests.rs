@@ -114,7 +114,9 @@ fn 토픽_큐_없는_아웃박스_흐름과_aws_큐_한도_설정을_검사한�
 		{"name":"type-zero","outbox":{"conn":"shop-stg","table":"t","type":"x","retry":"r","types":{"A":{"limit":0}}}},
 		{"name":"empty-type","outbox":{"conn":"shop-stg","table":"t","type":"x","retry":"r","types":{" ":{"consumer":"c"}}}},
 		{"name":"limit-no-retry","outbox":{"conn":"shop-stg","table":"t","type":"x","limit":3}},
-		{"name":"types-no-retry","outbox":{"conn":"shop-stg","table":"t","type":"x","types":{"A":{"consumer":"c"}}}}
+		{"name":"types-no-retry","outbox":{"conn":"shop-stg","table":"t","type":"x","types":{"A":{"consumer":"c"}}}},
+		{"name":"type-stale-zero","outbox":{"conn":"shop-stg","table":"t","type":"x","retry":"r","due":"d","types":{"A":{"stale":0}}}},
+		{"name":"type-stale-no-due","outbox":{"conn":"shop-stg","table":"t","type":"x","retry":"r","types":{"A":{"stale":70}}}}
 	]"#,
     );
     let fs = load(dir.path(), &conns()).unwrap();
@@ -130,6 +132,8 @@ fn 토픽_큐_없는_아웃박스_흐름과_aws_큐_한도_설정을_검사한�
         "outbox.types has an empty type",
         "outbox.limit requires outbox.retry",
         "outbox.types requires outbox.retry",
+        "outbox.types.A.stale must be >= 1",
+        "outbox.types.A.stale requires outbox.due",
     ];
     for (f, w) in fs.iter().zip(want) {
         assert_eq!(f.err, w, "{}", f.name);
@@ -139,6 +143,7 @@ fn 토픽_큐_없는_아웃박스_흐름과_aws_큐_한도_설정을_검사한�
     assert_eq!(o.types["CREATE_PAYOUT"].limit, Some(20));
     assert_eq!(o.types["CLIP"].limit, None);
     assert_eq!(o.types["CLIP"].consumer, "consume-outbox-clip");
+    assert_eq!(o.types["CLIP"].stale, None);
     assert_eq!(Outbox::default().limit(), DEFAULT_LIMIT);
 }
 
@@ -181,6 +186,7 @@ fn 종류별_한도는_리터럴을_감싼_CASE_다() {
     let tc = |limit: Option<i64>, consumer: &str| TypeConf {
         limit,
         consumer: consumer.into(),
+        stale: None,
     };
     let o = Outbox {
         table: "t".into(),
@@ -291,4 +297,31 @@ fn 수_결과의_합계_줄과_NULL_종류를_읽는다() {
     assert_eq!(s.types.len(), 2);
     assert!(!s.types[0].null && s.types[1].null && s.types[1].label() == "(NULL)");
     assert!(parse_count(&QueryResult::default()).is_err());
+}
+
+#[test]
+fn 종류별_오래됨_기준은_리터럴을_감싼_CASE_이고_없으면_기본_5분이다() {
+    let tc = |stale: Option<i64>| TypeConf {
+        stale,
+        ..Default::default()
+    };
+    let o = Outbox {
+        table: "t".into(),
+        kind: "event_type".into(),
+        retry: "retry_count".into(),
+        due: "check_needed_at".into(),
+        types: BTreeMap::from([
+            ("BILLING_KEY_DELETED".to_string(), tc(Some(70))),
+            ("O'BRIEN".to_string(), tc(Some(10))),
+            ("CLIP".to_string(), tc(None)),
+        ]),
+        ..Default::default()
+    };
+    let want = r#""check_needed_at" < now() - case "event_type"::text when 'BILLING_KEY_DELETED' then interval '70 minutes' when 'O''BRIEN' then interval '10 minutes' else interval '5 minutes' end and "#;
+    assert_eq!(count_sql(&o).matches(want).count(), 1);
+    let o2 = Outbox {
+        types: BTreeMap::from([("CLIP".to_string(), tc(None))]),
+        ..o
+    };
+    assert_eq!(stale_expr(&o2), "interval '5 minutes'");
 }

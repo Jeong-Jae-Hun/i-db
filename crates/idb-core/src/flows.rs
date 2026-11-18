@@ -15,8 +15,8 @@ use crate::sqlsafe::{mask_sql, quote_ident, quote_literal, split_statements};
 
 /// 프로젝트 폴더 기준 설정 파일 자리다.
 pub const FILE: &str = ".dbtui/flows.json";
-/// due 열이 이만큼 지난 행을 `오래됨` 으로 센다.
-pub const STALE_AFTER: &str = "5 minutes";
+/// due 열이 이만큼(분) 지난 행을 `오래됨` 으로 센다. 종류별 stale 이 있으면 그것이다.
+pub const STALE_MINUTES: i64 = 5;
 /// limit 을 주지 않은 아웃박스의 재시도 한도다.
 pub const DEFAULT_LIMIT: i64 = 5;
 /// 종류 상세(재시도 중·한도 소진 행)의 최대 행 수다.
@@ -66,11 +66,13 @@ pub struct Outbox {
 }
 
 /// 이벤트 종류 하나의 설정이다. limit 이 없으면 아웃박스 한도, consumer 는 그 종류를 가져가는 잡 이름(보이기만 한다)이다.
+/// stale 은 `오래됨` 기준(분)이다. 잡 주기가 기본 기준보다 긴 종류가 늘 경고로 뜨지 않게 한다.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TypeConf {
     pub limit: Option<i64>,
     pub consumer: String,
+    pub stale: Option<i64>,
 }
 
 fn null_vec<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
@@ -157,6 +159,12 @@ fn validate(f: &Flow, conns: &[Conn]) -> Result<(), String> {
         if t.limit.is_some_and(|l| l < 1) {
             return Err(format!("outbox.types.{k}.limit must be >= 1"));
         }
+        if t.stale.is_some_and(|m| m < 1) {
+            return Err(format!("outbox.types.{k}.stale must be >= 1"));
+        }
+        if t.stale.is_some() && o.due.is_empty() {
+            return Err(format!("outbox.types.{k}.stale requires outbox.due"));
+        }
     }
     check_where(&o.filter)
 }
@@ -227,6 +235,21 @@ fn limit_expr(o: &Outbox) -> String {
     }
 }
 
+/// 행마다의 `오래됨` 기준이다. 종류별 stale 이 있으면 `case <type> when 'X' then interval '70 minutes' … else interval '5 minutes' end` 다.
+fn stale_expr(o: &Outbox) -> String {
+    let def = format!("interval '{STALE_MINUTES} minutes'");
+    let whens: String = o
+        .types
+        .iter()
+        .filter_map(|(k, t)| t.stale.map(|m| format!(" when {} then interval '{m} minutes'", quote_literal(k))))
+        .collect();
+    if whens.is_empty() {
+        def
+    } else {
+        format!("case {}{whens} else {def} end", type_text(o))
+    }
+}
+
 /// 종류별 수와 합계를 한 문장으로 묻는다(type·rows·waiting·retrying·exhausted·stale·oldest_due·type_null·total).
 /// `grouping sets ((type), ())` 의 합계 행(total = 1)이 맨 앞이라 종류가 결과 행 상한을 넘어도 합은 정확하다.
 pub fn count_sql(o: &Outbox) -> String {
@@ -247,7 +270,7 @@ pub fn count_sql(o: &Outbox) -> String {
     }
     if !o.due.is_empty() {
         let due = quote_ident(&o.due);
-        let mut cond = format!("{due} < now() - interval '{STALE_AFTER}'");
+        let mut cond = format!("{due} < now() - {}", stale_expr(o));
         oldest = format!("min({due})");
         if !live.is_empty() {
             cond.push_str(&format!(" and {live}"));
