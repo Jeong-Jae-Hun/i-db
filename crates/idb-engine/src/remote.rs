@@ -386,8 +386,7 @@ mod tests {
 
     #[test]
     fn 설정_파일의_이름으로_ssh_명령을_만든다() {
-        let raw =
-            br#"{"devbox":{"ssh":"devbox","db":"~/.local/bin/db","project":"~/work/db"},"bare":{"ssh":"h","project":"/p"}}"#;
+        let raw = br#"{"devbox":{"ssh":"devbox","db":"~/.local/bin/db","project":"~/work/db"},"bare":{"ssh":"h","project":"/p"}}"#;
         let p = std::path::Path::new("/x/remote.json");
         let s = RemoteSpec::from_config("devbox", p, raw).unwrap();
         assert_eq!(s.args.last().unwrap(), "~/.local/bin/db serve -p ~/work/db");
