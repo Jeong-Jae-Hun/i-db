@@ -408,6 +408,6 @@ The mark is a database cylinder with a dot on top (the `i`); the wordmark is `i-
 
 To be decided. Until a license file is added, no license is granted.
 
-The macOS GUI (`crates/idb-gui`) bundles the D2Coding 1.3.2 font by NAVER, unmodified, under the SIL Open Font License 1.1 (`crates/idb-gui/assets/fonts/OFL.txt`). The GUI uses an installed D2Coding first and registers the bundled copy only when it is missing; `font` and `font_size` in `~/.config/db/gui.json` change the font (default `"D2Coding"`, `13`).
+The macOS GUI (`crates/idb-gui`) bundles the D2Coding 1.3.2 font by NAVER, unmodified, under the SIL Open Font License 1.1 (`crates/idb-gui/assets/fonts/OFL.txt`). The GUI draws its chrome in the macOS system font and keeps D2Coding for the SQL editor, grid values and code; it uses an installed D2Coding first and registers the bundled copy only when it is missing. In `~/.config/db/gui.json`, `ui_font` (default `"system"`), `mono_font` (default `"D2Coding"`; the older `font` key is read as `mono_font`) and `font_size` change them. ⌘K opens the command palette and ⌘P jumps to a table.
 
 The GUI's color palette borrows the design token values of [Orca](https://github.com/stablyai/orca) (MIT, Lovecast Inc.); see `THIRD_PARTY_NOTICES.md`. `zoom`, `theme` (`system`/`light`/`dark`), `row_limit`, `sidebar_width` and `editor_height` in the same `gui.json` are written by the GUI (⌘= ⌘- ⌘0, Settings ⌘,, dragging the splitters).
