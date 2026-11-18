@@ -318,7 +318,7 @@ impl Render for SourceView {
                                 .items_center()
                                 .justify_center()
                                 .text_color(theme.muted_foreground)
-                                .child("왼쪽에서 항목을 고르거나 질의를 실행한다")
+                                .child(crate::vm::copy::EMPTY_SOURCE)
                                 .into_any_element(),
                         }),
                     ),

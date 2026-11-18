@@ -2,10 +2,12 @@
 
 pub mod brand;
 pub mod completion;
+pub mod copy;
 pub mod crashlog;
 pub mod dashboard;
 pub mod edits;
 pub mod export;
+pub mod finder;
 pub mod font;
 pub mod grid;
 pub mod history;
@@ -18,6 +20,7 @@ pub mod redisedit;
 pub mod runtime;
 pub mod safety;
 pub mod settings;
+pub mod snapshot;
 pub mod source;
 pub mod sqlcopy;
 pub mod tabs;

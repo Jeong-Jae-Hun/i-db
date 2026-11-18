@@ -42,9 +42,33 @@ pub struct Tab {
 }
 
 impl Tab {
+    /// 탭 이름이다. 첫 실행 저장이 지은 `<접속>-<날짜>-<시각>.sql` 은 사람이 지은 이름이 아니라 `쿼리 N` 으로 둔다
+    /// (전체 경로는 툴팁에 있다).
+    pub fn label(&self) -> String {
+        match &self.file {
+            Some(TabFile::Query(r)) => {
+                let name = r.rsplit('/').next().unwrap_or(r);
+                if is_auto_name(name) {
+                    format!("쿼리 {}", self.n)
+                } else {
+                    name.to_string()
+                }
+            }
+            Some(TabFile::Local(p)) => p
+                .file_name()
+                .map_or_else(|| p.display().to_string(), |f| f.to_string_lossy().into_owned()),
+            None => self.name.clone().unwrap_or_else(|| format!("쿼리 {}", self.n)),
+        }
+    }
+
+    /// 툴팁: 파일이면 전체 경로
+    pub fn tooltip(&self) -> String {
+        self.file.as_ref().map_or_else(|| self.label(), TabFile::display)
+    }
+
     pub fn title(&self) -> String {
         let base = match &self.file {
-            Some(TabFile::Query(r)) => r.rsplit('/').next().unwrap_or(r).to_string(),
+            Some(TabFile::Query(_)) => self.label(),
             Some(TabFile::Local(p)) => p
                 .file_name()
                 .map_or_else(|| p.display().to_string(), |f| f.to_string_lossy().into_owned()),
@@ -52,6 +76,33 @@ impl Tab {
         };
         if self.dirty { format!("{base} *") } else { base }
     }
+}
+
+/// 첫 실행 저장 이름(`app-stg-20261118-093000.sql`, 같은 초면 `-2` 가 붙는다)인지
+pub fn is_auto_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".sql") else { return false };
+    let parts: Vec<&str> = stem.rsplitn(4, '-').collect();
+    // 뒤에서: [번호?] 시각 날짜 접속
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    match parts.as_slice() {
+        [time, date, conn] | [time, date, conn, ..] if digits(time, 6) && digits(date, 8) && !conn.is_empty() => true,
+        [seq, time, date, ..] if seq.bytes().all(|b| b.is_ascii_digit()) && digits(time, 6) && digits(date, 8) => true,
+        _ => false,
+    }
+}
+
+/// 가운데를 줄인다(`orders_2026…_backup`). max 는 글자 수다.
+pub fn middle_ellipsis(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max || max < 5 {
+        return s.to_string();
+    }
+    let keep = max - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let h: String = s.chars().take(head).collect();
+    let t: String = s.chars().skip(n - tail).collect();
+    format!("{h}…{t}")
 }
 
 #[derive(Default)]
@@ -151,6 +202,25 @@ mod tests {
         assert_eq!(t.active().unwrap().title(), "public.users");
         t.open(None, Some(TabFile::Query("queries/app/a.sql".into())));
         assert_eq!(t.active().unwrap().title(), "a.sql");
+    }
+
+    #[test]
+    fn 자동_저장_이름은_쿼리_N_으로_보이고_긴_이름은_가운데를_줄인다() {
+        assert!(is_auto_name("app-stg-20261118-093000.sql"));
+        assert!(is_auto_name("shop-stg-read-20261118-093000.sql"));
+        assert!(is_auto_name("app-stg-20261118-093000-2.sql"));
+        assert!(!is_auto_name("daily-orders.sql"));
+        assert!(!is_auto_name("report-2026.sql"));
+        let mut t = Tabs::default();
+        t.open(None, None);
+        t.open(
+            Some("app-stg".into()),
+            Some(TabFile::Query("queries/app/app-stg-20261118-093000.sql".into())),
+        );
+        assert_eq!(t.active().unwrap().label(), "쿼리 2");
+        assert_eq!(t.active().unwrap().tooltip(), "queries/app/app-stg-20261118-093000.sql");
+        assert_eq!(middle_ellipsis("orders_2026_11_backup_final", 11), "order…final");
+        assert_eq!(middle_ellipsis("short", 11), "short");
     }
 
     #[test]

@@ -15,13 +15,25 @@ use crate::vm::settings::{SAFETY_RULES, ThemePref, parse_row_limit};
 pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let p = ws.prefs.clone();
     let font = cx.new(|cx| InputState::new(window, cx).default_value(p.font.clone()));
+    let ui_font = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("system (macOS 시스템 글꼴)")
+            .default_value(p.ui_font.clone())
+    });
     let size = cx.new(|cx| InputState::new(window, cx).default_value(format!("{}", p.font_size)));
     let rows = cx.new(|cx| InputState::new(window, cx).default_value(p.row_limit.to_string()));
     let theme = Rc::new(Cell::new(p.theme));
     let this = cx.entity().downgrade();
     window.open_dialog(cx, move |dialog, _, cx| {
         let t = cx.theme().clone();
-        let label = |s: &str| div().w(px(120.)).text_color(t.muted_foreground).child(s.to_string());
+        let label = |s: &str| {
+            div()
+                .w(px(168.))
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_color(t.muted_foreground)
+                .child(s.to_string())
+        };
         let row = |name: &str| h_flex().gap_3().py_1().child(label(name));
         let mut themes = h_flex().gap_1();
         for (i, choice) in ThemePref::ALL.into_iter().enumerate() {
@@ -45,11 +57,13 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
             rules = rules.child(div().text_xs().text_color(t.muted_foreground).child(format!("· {r}")));
         }
         let (font, size, rows, theme, this, base) = (font.clone(), size.clone(), rows.clone(), theme.clone(), this.clone(), p.clone());
-        let (font_i, size_i, rows_i) = (font.clone(), size.clone(), rows.clone());
+        let ui_font = ui_font.clone();
+        let (font_i, size_i, rows_i, ui_i) = (font.clone(), size.clone(), rows.clone(), ui_font.clone());
         dialog
             .title("설정")
             .w(px(560.))
-            .child(row("글꼴").child(div().flex_1().child(Input::new(&font_i))))
+            .child(row("화면 글꼴").child(div().flex_1().child(Input::new(&ui_i))))
+            .child(row("고정폭 글꼴 (편집기·표)").child(div().flex_1().child(Input::new(&font_i))))
             .child(row("글자 크기(px)").child(div().w(px(100.)).child(Input::new(&size_i))))
             .child(row("테마").child(themes))
             .child(row("테이블 한 쪽 행 수").child(div().w(px(100.)).child(Input::new(&rows_i))))
@@ -62,12 +76,14 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
                     .child(div().flex_1())
                     .child(
                         Button::new("settings-cancel")
-                            .label("취소")
+                            .label(crate::vm::copy::CANCEL)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(Button::new("settings-ok").primary().label("저장").on_click(move |_, window, cx| {
                         let mut next = base.clone();
                         next.font = font.read(cx).value().trim().to_string();
+                        let ui = ui_font.read(cx).value().trim().to_string();
+                        next.ui_font = if ui.is_empty() { crate::vm::font::SYSTEM_UI.into() } else { ui };
                         if let Ok(v) = size.read(cx).value().trim().parse::<f32>() {
                             next.font_size = crate::vm::font::resolve(&next.font, v, &[]).size;
                         }
@@ -85,12 +101,19 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
 pub fn open_shortcuts(window: &mut Window, cx: &mut Context<Workspace>) {
     window.open_dialog(cx, |dialog, _, cx| {
         let t = cx.theme().clone();
-        let mut body = v_flex().gap_1();
-        for m in MenuName::ALL {
-            let keyed: Vec<_> = entries_in(m).filter(|e| e.key.is_some()).collect();
-            if keyed.is_empty() {
-                continue;
-            }
+        // 두 단으로 나눠 한 화면에 다 들어가게 한다(메뉴 순서는 지킨다)
+        let menus: Vec<_> = MenuName::ALL
+            .into_iter()
+            .map(|m| (m, entries_in(m).filter(|e| e.key.is_some()).collect::<Vec<_>>()))
+            .filter(|(_, k)| !k.is_empty())
+            .collect();
+        let total: usize = menus.iter().map(|(_, k)| k.len() + 1).sum();
+        let mut cols = [v_flex().flex_1().min_w_0().gap_1(), v_flex().flex_1().min_w_0().gap_1()];
+        let mut used = 0usize;
+        for (m, keyed) in menus {
+            let c = usize::from(used * 2 >= total);
+            used += keyed.len() + 1;
+            let mut body = std::mem::replace(&mut cols[c], v_flex());
             body = body.child(div().pt_2().text_xs().text_color(t.muted_foreground).child(m.title()));
             for e in keyed {
                 body = body.child(
@@ -103,8 +126,11 @@ pub fn open_shortcuts(window: &mut Window, cx: &mut Context<Workspace>) {
                     ),
                 );
             }
+            cols[c] = body;
         }
-        dialog.title("단축키").w(px(460.)).child(body).child(
+        let [left, right] = cols;
+        let body = h_flex().items_start().gap_6().child(left).child(right);
+        dialog.title("단축키").w(px(760.)).child(body).child(
             div()
                 .pt_2()
                 .text_xs()

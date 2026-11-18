@@ -2,7 +2,7 @@
 
 pub const NAME: &str = "i-db";
 pub const TAGLINE: &str = "DataGrip 프로젝트를 그대로 여는 DB 도구";
-/// 강조색. 마크의 점·글자표의 `-`·주 버튼·초점 고리에만 쓴다
+/// 강조색. 마크의 점·글자표의 `-`·주 버튼·초점 고리·고른 탭·고른 줄(옅게)·진행 표시에만 쓴다
 pub const ACCENT: &str = "#0d9488";
 pub const ACCENT_HOVER: &str = "#0f766e";
 pub const ACCENT_ACTIVE: &str = "#115e59";

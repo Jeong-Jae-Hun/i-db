@@ -92,6 +92,11 @@ enum CellMark {
     Decrypted,
 }
 
+/// 아이콘 묶음(gpui-kit-assets 의 Lucide)의 한 아이콘
+fn icon(path: &'static str) -> gpui_component::Icon {
+    gpui_component::Icon::empty().path(path)
+}
+
 /// 칸에 보일 한 줄이다. 긴 글은 앞부분만 둔다(칸 너비 밖은 어차피 잘린다).
 fn one_line(s: &str) -> String {
     let s: String = s.chars().take(300).collect();
@@ -107,10 +112,11 @@ impl TableDelegate for GridDelegate {
         self.grid.len()
     }
 
-    fn column(&self, col_ix: usize, _: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
         let name = &self.grid.cols[col_ix];
-        let ty = self.grid.types.get(col_ix).cloned().unwrap_or_default();
-        let w = (name.chars().count().max(ty.chars().count()) as f32 * 8.0 + 40.0).clamp(80.0, 320.0);
+        // 고정폭 반각 한 칸은 글자 크기의 절반 남짓이다. 칸 안쪽 여백·정렬 단추 몫을 더한다
+        let half = f32::from(cx.theme().mono_font_size) * 0.56;
+        let w = (self.grid.col_chars(col_ix) as f32 * half + 28.0).clamp(64.0, 480.0);
         let sort = match self.grid.sort_state() {
             Some((c, Dir::Asc)) if c == col_ix => ColumnSort::Ascending,
             Some((c, Dir::Desc)) if c == col_ix => ColumnSort::Descending,
@@ -135,14 +141,16 @@ impl TableDelegate for GridDelegate {
                 cx.theme().foreground,
                 self.grid.cols[col_ix].clone(),
             ))
+            // 타입은 작고 옅게(열 이름이 먼저 읽힌다)
             .when(!ty.is_empty() || editable, |d| {
                 d.child(super::kit::text(
                     &sc,
                     sc.small(),
-                    cx.theme().muted_foreground,
-                    if editable { format!("{ty} ✎") } else { ty },
+                    cx.theme().muted_foreground.opacity(0.7),
+                    if editable { format!("{ty} · 고칠 수 있음") } else { ty },
                 ))
             })
+            .when(self.grid.numeric(col_ix), |d| d.items_end())
     }
 
     fn perform_sort(&mut self, col_ix: usize, sort: ColumnSort, _: &mut Window, _: &mut Context<TableState<Self>>) {
@@ -157,11 +165,14 @@ impl TableDelegate for GridDelegate {
         let (text, mark) = self.display(row_ix, col_ix);
         let is_null = text == NULL;
         let sc = super::kit::scale(cx.theme());
+        // 값은 고정폭(D2Coding), 숫자 열은 오른쪽 정렬
         div()
             .size_full()
             .overflow_hidden()
             .flex()
             .items_center()
+            .font_family(cx.theme().mono_font_family.clone())
+            .when(self.grid.numeric(col_ix), |d| d.justify_end())
             .text_size(px(sc.text()))
             .line_height(px(sc.line(sc.text())))
             .when(is_null, |d| d.text_color(cx.theme().muted_foreground).italic())
@@ -425,20 +436,6 @@ impl ResultsView {
         }
     }
 
-    /// 상태 줄에 보일 행 수·걸린 시간이다.
-    pub fn summary(&self, cx: &App) -> String {
-        let g = &self.table.read(cx).delegate().grid;
-        if g.cols.is_empty() {
-            return format!("{}ms", self.elapsed_ms);
-        }
-        let rows = if g.len() == g.source_len() {
-            format!("{}행", g.len())
-        } else {
-            format!("{}/{}행", g.len(), g.source_len())
-        };
-        format!("{rows} · {}ms{}", self.elapsed_ms, if self.truncated { " · 잘림" } else { "" })
-    }
-
     /// 접속의 데이터베이스가 바뀌었다. 이 결과의 바꿈·되돌리기 묶음은 옛 데이터베이스 것이라 버리고,
     /// 고치기와 다음 쪽 읽기를 막는다. 보기·복사는 그대로 둔다.
     pub fn set_frozen(&mut self, frozen: bool, cx: &mut Context<Self>) {
@@ -675,6 +672,7 @@ impl ResultsView {
                         .description(sql.clone())
                         .ok_text("반영")
                         .show_cancel(true)
+                        .cancel_text(crate::vm::copy::CANCEL)
                         .on_ok(move |_, window, cx| {
                             let _ = this.update(cx, |v, cx| v.submit(cs.clone(), window, cx));
                             true
@@ -1074,20 +1072,26 @@ impl Render for ResultsView {
             .when(editable, |d| {
                 d.child(
                     Button::new("add-row")
+                        .with_size(px(grid_sc.hit()))
                         .ghost()
-                        .label("행 추가")
+                        .icon(icon("icons/plus.svg"))
+                        .tooltip("행 추가")
                         .on_click(cx.listener(|v, _, _, cx| v.add_row(cx))),
                 )
                 .child(
                     Button::new("del-row")
+                        .with_size(px(grid_sc.hit()))
                         .ghost()
-                        .label("행 삭제")
+                        .icon(icon("icons/minus.svg"))
+                        .tooltip("고른 행 지우기 표시")
                         .on_click(cx.listener(|v, _, _, cx| v.toggle_delete(cx))),
                 )
                 .child(
                     Button::new("undo")
+                        .with_size(px(grid_sc.hit()))
                         .ghost()
-                        .label("되돌리기")
+                        .icon(icon("icons/undo-2.svg"))
+                        .tooltip("되돌리기")
                         .on_click(cx.listener(|v, _, w, cx| v.undo(w, cx))),
                 )
                 .when(pending > 0, |d| {
@@ -1105,52 +1109,70 @@ impl Render for ResultsView {
                     )
                 })
             })
-            .when(!matches!(self.source, Source::Static), |d| {
-                d.child(
-                    Button::new("full-export")
-                        .ghost()
-                        .label("전체 내보내기")
-                        .tooltip("1,000행 제한 없이 CSV 로 받는다")
-                        .on_click(cx.listener(|v, _, w, cx| v.full_export(w, cx))),
-                )
-            })
+            // 오른쪽 도구: 아이콘 단추 묶음(툴팁) + 내보내기 메뉴. 글자 단추를 늘어놓지 않는다
             .child(
-                Button::new("decrypt")
-                    .with_variant(if decrypt_on {
-                        gpui_component::button::ButtonVariant::Primary
-                    } else {
-                        gpui_component::button::ButtonVariant::Ghost
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        Button::new("decrypt")
+                            .with_size(px(grid_sc.hit()))
+                            .with_variant(if decrypt_on {
+                                gpui_component::button::ButtonVariant::Primary
+                            } else {
+                                gpui_component::button::ButtonVariant::Ghost
+                            })
+                            .icon(icon("icons/key-round.svg"))
+                            .tooltip("복호화: 암호문 칸을 그룹 키로 풀어 보인다 (보기만)")
+                            .on_click(cx.listener(|v, _, w, cx| v.toggle_decrypt(w, cx))),
+                    )
+                    .child(
+                        Button::new("copy")
+                            .with_size(px(grid_sc.hit()))
+                            .ghost()
+                            .icon(icon("icons/copy.svg"))
+                            .tooltip("고른 칸 복사 (⌘C)")
+                            .on_click(cx.listener(|v, _, _, cx| v.copy(cx))),
+                    )
+                    .child({
+                        let (o1, o2, o3) = (cx.entity().downgrade(), cx.entity().downgrade(), cx.entity().downgrade());
+                        let live = !matches!(self.source, Source::Static);
+                        Button::new("export")
+                            .with_size(px(grid_sc.hit()))
+                            .ghost()
+                            .icon(icon("icons/download.svg"))
+                            .tooltip("내보내기")
+                            .dropdown_menu(move |menu, _, _| {
+                                let (o1, o2, o3) = (o1.clone(), o2.clone(), o3.clone());
+                                let menu = menu
+                                    .item(PopupMenuItem::new("CSV 로 저장…").on_click(move |_, _, cx| {
+                                        let _ = o1.update(cx, |v, cx| v.export(false, cx));
+                                    }))
+                                    .item(PopupMenuItem::new("JSON 으로 저장…").on_click(move |_, _, cx| {
+                                        let _ = o2.update(cx, |v, cx| v.export(true, cx));
+                                    }));
+                                if live {
+                                    menu.separator()
+                                        .item(
+                                            PopupMenuItem::new("전체 내보내기 (1,000행 제한 없이 CSV)").on_click(move |_, window, cx| {
+                                                let _ = o3.update(cx, |v, cx| v.full_export(window, cx));
+                                            }),
+                                        )
+                                } else {
+                                    menu
+                                }
+                            })
                     })
-                    .label("복호화")
-                    .tooltip("암호문 칸을 그룹 키로 풀어 보인다 (보기만)")
-                    .on_click(cx.listener(|v, _, w, cx| v.toggle_decrypt(w, cx))),
-            )
-            .child(
-                Button::new("copy")
-                    .ghost()
-                    .label("복사")
-                    .on_click(cx.listener(|v, _, _, cx| v.copy(cx))),
-            )
-            .child(
-                Button::new("csv")
-                    .ghost()
-                    .label("CSV")
-                    .on_click(cx.listener(|v, _, _, cx| v.export(false, cx))),
-            )
-            .child(
-                Button::new("json")
-                    .ghost()
-                    .label("JSON")
-                    .on_click(cx.listener(|v, _, _, cx| v.export(true, cx))),
-            )
-            .when(!matches!(self.source, Source::Static), |d| {
-                d.child(
-                    Button::new("reload")
-                        .ghost()
-                        .label("다시 읽기")
-                        .on_click(cx.listener(|v, _, w, cx| v.reload(w, cx))),
-                )
-            });
+                    .when(!matches!(self.source, Source::Static), |d| {
+                        d.child(
+                            Button::new("reload")
+                                .with_size(px(grid_sc.hit()))
+                                .ghost()
+                                .icon(icon("icons/refresh-cw.svg"))
+                                .tooltip("다시 읽기")
+                                .on_click(cx.listener(|v, _, w, cx| v.reload(w, cx))),
+                        )
+                    }),
+            );
 
         v_flex()
             .size_full()

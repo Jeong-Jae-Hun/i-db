@@ -33,6 +33,8 @@ pub enum Cmd {
     ProdLock,
     Minimize,
     Shortcuts,
+    Palette,
+    GoToTable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +134,8 @@ pub const ENTRIES: &[Entry] = &[
     e(ToggleSidebar, M::View, "사이드바 보이기/숨기기", Some("cmd-b"), Workspace, true),
     e(ToggleResults, M::View, "결과 패널 보이기/숨기기", Some("cmd-j"), Workspace, false),
     e(Dashboard, M::View, "대시보드 (접속 상태·흐름·보드)", Some("cmd-g"), Workspace, true),
+    e(Palette, M::View, "명령 팔레트…", Some("cmd-k"), WorkspaceOverInput, true),
+    e(GoToTable, M::View, "테이블로 가기…", Some("cmd-p"), WorkspaceOverInput, false),
     e(Run, M::Query, "실행 (커서 문장·선택)", Some("cmd-enter"), WorkspaceOverInput, false),
     e(RunAll, M::Query, "모두 실행", Some("cmd-shift-enter"), WorkspaceOverInput, false),
     e(Explain, M::Query, "EXPLAIN", Some("cmd-e"), Workspace, false),
@@ -145,7 +149,7 @@ pub const ENTRIES: &[Entry] = &[
 ];
 
 /// `⌘+` 도 확대로 받는다(US 자판은 = 와 + 가 같은 자리).
-pub const EXTRA_KEYS: &[(&str, Cmd)] = &[("cmd-+", ZoomIn), ("cmd-shift-=", ZoomIn)];
+pub const EXTRA_KEYS: &[(&str, Cmd)] = &[("cmd-+", ZoomIn), ("cmd-shift-=", ZoomIn), ("cmd-shift-p", Palette)];
 
 pub fn entries_in(menu: MenuName) -> impl Iterator<Item = &'static Entry> {
     ENTRIES.iter().filter(move |e| e.menu == menu)

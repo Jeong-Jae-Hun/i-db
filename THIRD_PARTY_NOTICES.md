@@ -32,9 +32,9 @@ SOFTWARE.
 
 D2Coding 1.3.2 by NAVER Corporation, unmodified, under the SIL Open Font License 1.1. Full text: `crates/idb-gui/assets/fonts/OFL.txt`.
 
-## Lucide icons (assets/icons/kinds)
+## Lucide icons (assets/icons/kinds, assets/icons/ui)
 
-The connection kind icons in `assets/icons/kinds/` are unmodified Lucide icons (database, layers, search, scroll-text, activity, gauge, table-2, file-search, cloud) taken from the `gpui-kit-assets` 0.8.0 crate.
+The connection kind icons in `assets/icons/kinds/` are unmodified Lucide icons (database, layers, search, scroll-text, activity, gauge, table-2, file-search, cloud) taken from the `gpui-kit-assets` 0.8.0 crate. The toolbar icons in `assets/icons/ui/` (key-round, download, fast-forward, list-tree) are unmodified Lucide icons from the same crate.
 
 ```
 ISC License

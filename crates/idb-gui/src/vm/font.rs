@@ -19,6 +19,21 @@ pub struct FontChoice {
 }
 
 /// 설정값과 설치된 글꼴 이름으로 쓸 글꼴을 정한다.
+/// gui.json `ui_font` 기본값. macOS 시스템 UI 글꼴을 뜻한다
+pub const SYSTEM_UI: &str = "system";
+/// GPUI 가 macOS 시스템 UI 글꼴로 읽는 이름
+pub const SYSTEM_UI_FAMILY: &str = ".SystemUIFont";
+
+/// 화면 글꼴 이름을 GPUI 글꼴 이름으로 바꾼다. `system`·빈 값이나 설치되지 않은 글꼴은 시스템 UI 글꼴이다.
+pub fn ui_family(name: &str, installed: &[String]) -> String {
+    let n = name.trim();
+    if n.is_empty() || n.eq_ignore_ascii_case(SYSTEM_UI) || !installed.iter().any(|i| i == n) {
+        SYSTEM_UI_FAMILY.into()
+    } else {
+        n.into()
+    }
+}
+
 pub fn resolve(font: &str, size: f32, installed: &[String]) -> FontChoice {
     let size = if size.is_finite() {
         size.clamp(*SIZE_RANGE.start(), *SIZE_RANGE.end())
@@ -45,6 +60,15 @@ pub fn resolve(font: &str, size: f32, installed: &[String]) -> FontChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 화면_글꼴은_system_이면_시스템_UI_이고_없는_글꼴도_시스템으로_돌아간다() {
+        let installed = vec!["Pretendard".to_string()];
+        assert_eq!(ui_family("system", &installed), SYSTEM_UI_FAMILY);
+        assert_eq!(ui_family("", &installed), SYSTEM_UI_FAMILY);
+        assert_eq!(ui_family("Pretendard", &installed), "Pretendard");
+        assert_eq!(ui_family("Nope", &installed), SYSTEM_UI_FAMILY);
+    }
 
     /// sfnt `name` 표에서 글꼴 가족 이름(nameID 1, Windows 유니코드)을 읽는다. 바이트가 글꼴로 읽히는지 보는 데 쓴다.
     fn family_name(ttf: &[u8]) -> Option<String> {

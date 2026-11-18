@@ -6,6 +6,19 @@ use std::cmp::Ordering;
 use idb_engine::ResultSet;
 
 pub const NULL: &str = "NULL";
+const COL_MAX_CHARS: usize = 48;
+
+/// 고정폭 글꼴에서 차지하는 반각 칸 수다. 한글·한자·전각 기호는 2칸이다.
+pub fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| match c as u32 {
+            0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 => {
+                2
+            }
+            _ => 1,
+        })
+        .sum()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
@@ -21,6 +34,8 @@ pub struct Grid {
     view: Vec<usize>,
     sort: Option<(usize, Dir)>,
     filter: String,
+    /// 열마다 숫자 열인지(만들 때 한 번 센다, 칸을 그릴 때마다 훑지 않게)
+    numeric: Vec<bool>,
 }
 
 impl Grid {
@@ -31,8 +46,51 @@ impl Grid {
             rows: rs.rows,
             ..Default::default()
         };
+        g.numeric = (0..g.cols.len()).map(|c| g.is_numeric(c)).collect();
         g.refresh();
         g
+    }
+
+    /// 칸 너비(반각 글자 수)다. 머리(이름·타입·정렬 표시)와 앞 200행의 글을 보고, 너무 넓지 않게 48자에서 자른다.
+    /// 한글처럼 넓은 글자는 2로 센다(D2Coding 은 한글이 영문 두 배 너비다).
+    pub fn col_chars(&self, col: usize) -> usize {
+        let head = self
+            .cols
+            .get(col)
+            .map_or(0, |c| display_width(c))
+            .max(self.types.get(col).map_or(0, |t| display_width(t)))
+            + 3;
+        let body = self
+            .rows
+            .iter()
+            .take(200)
+            .filter_map(|r| r.get(col))
+            .map(|v| display_width(v.lines().next().unwrap_or("")).min(COL_MAX_CHARS))
+            .max()
+            .unwrap_or(0);
+        head.max(body).clamp(4, COL_MAX_CHARS)
+    }
+
+    /// 숫자 열이면 오른쪽 정렬한다. 타입이 있으면 타입으로, 없으면(저장소 결과) 앞 200행의 NULL 아닌 값이 모두 숫자일 때다.
+    pub fn numeric(&self, col: usize) -> bool {
+        self.numeric.get(col).copied().unwrap_or(false)
+    }
+
+    fn is_numeric(&self, col: usize) -> bool {
+        if let Some(t) = self.types.get(col).filter(|t| !t.is_empty()) {
+            let t = t.to_ascii_lowercase();
+            return ["int", "numeric", "float", "double", "real", "decimal", "serial", "money"]
+                .iter()
+                .any(|k| t.contains(k));
+        }
+        let mut vals = self
+            .rows
+            .iter()
+            .take(200)
+            .filter_map(|r| r.get(col))
+            .filter(|v| v.as_str() != NULL)
+            .peekable();
+        vals.peek().is_some() && vals.all(|v| !v.is_empty() && v.parse::<f64>().is_ok())
     }
 
     /// 다음 쪽(table_page)을 뒤에 붙인다. 거르기·정렬은 유지한다.
@@ -176,6 +234,49 @@ fn csv_field(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    #[test]
+    fn 칸_너비는_머리와_내용_중_넓은_쪽이고_한글은_두_칸이다() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("김민준"), 6);
+        let g = Grid::new(ResultSet {
+            cols: vec!["id".into(), "email".into(), "name".into(), "note".into()],
+            types: Some(vec!["int8".into(), "text".into(), "text".into(), "text".into()]),
+            rows: vec![vec!["1".into(), "user1001@example.com".into(), "김민준".into(), "x".repeat(500)]],
+            ..Default::default()
+        });
+        assert_eq!(g.col_chars(0), 7, "머리(int8+정렬 표시)");
+        assert_eq!(g.col_chars(1), 20, "이메일 전체");
+        assert_eq!(g.col_chars(2), 7);
+        assert_eq!(g.col_chars(3), 48, "긴 글은 자른다");
+    }
+
+    #[test]
+    fn 숫자_열은_타입이나_값으로_가른다() {
+        let g = Grid::new(ResultSet {
+            cols: vec!["id".into(), "email".into()],
+            types: Some(vec!["int8".into(), "text".into()]),
+            rows: vec![vec!["1".into(), "a".into()]],
+            ..Default::default()
+        });
+        assert!(g.numeric(0) && !g.numeric(1));
+        let s = Grid::new(ResultSet {
+            cols: vec!["amount".into(), "status".into(), "empty".into()],
+            rows: vec![
+                vec!["12.5".into(), "paid".into(), "NULL".into()],
+                vec!["NULL".into(), "1".into(), "NULL".into()],
+            ],
+            ..Default::default()
+        });
+        assert!(s.numeric(0), "타입 없이 값이 모두 숫자");
+        assert!(!s.numeric(1));
+        assert!(!s.numeric(2), "값이 없으면 글");
     }
 }
 

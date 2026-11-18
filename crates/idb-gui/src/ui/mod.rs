@@ -5,8 +5,10 @@ mod brand;
 mod dashboard;
 mod dialogs;
 mod kit;
+mod palette_view;
 mod redis;
 mod results;
+mod snapshot;
 mod source;
 mod sql_completion;
 mod workspace;
@@ -54,7 +56,9 @@ actions!(
         TxRollback,
         ToggleProdLock,
         Minimize,
-        ShowShortcuts
+        ShowShortcuts,
+        OpenPalette,
+        GoToTable
     ]
 );
 
@@ -93,6 +97,8 @@ fn action_for(cmd: Cmd) -> Box<dyn Action> {
         Cmd::ProdLock => Box::new(ToggleProdLock),
         Cmd::Minimize => Box::new(Minimize),
         Cmd::Shortcuts => Box::new(ShowShortcuts),
+        Cmd::Palette => Box::new(OpenPalette),
+        Cmd::GoToTable => Box::new(GoToTable),
     }
 }
 
@@ -188,13 +194,21 @@ fn load_font(prefs: &Prefs, cx: &mut App) -> FontChoice {
 }
 
 /// 화면 글·편집기·결과 표가 같은 글꼴을 쓰게 테마에 넣는다. 크기는 확대 배율을 곱한다.
-fn apply_font(f: &FontChoice, z: f32, cx: &mut App) {
+fn apply_font(f: &FontChoice, ui: &str, z: f32, cx: &mut App) {
+    let installed = if ui.eq_ignore_ascii_case(font::SYSTEM_UI) {
+        Vec::new()
+    } else {
+        cx.text_system().all_font_names()
+    };
+    let ui_family = font::ui_family(ui, &installed);
     let size = px(zoom::font_px(f.size, z));
     Theme::update(cx, |t| {
         if !f.family.is_empty() {
             t.font_family = f.family.clone().into();
             t.mono_font_family = f.family.clone().into();
         }
+        // 화면 글을 시스템 글꼴로 두면 고정폭은 편집기·표 값·코드에만 남는다
+        t.font_family = ui_family.clone().into();
         t.font_size = size;
         t.mono_font_size = size;
     });
@@ -222,13 +236,17 @@ fn apply_look(prefs: &Prefs, font: &FontChoice, window: &mut Window, cx: &mut Ap
         ThemePref::Light => Theme::change(ThemeMode::Light, Some(window), cx),
         ThemePref::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
     }
-    apply_font(font, prefs.zoom, cx);
+    apply_font(font, &prefs.ui_font, prefs.zoom, cx);
     // rem 을 키워 여백·높이·작은 글(text_xs)도 같은 배율로 커지게 한다
     window.set_rem_size(px(zoom::rem_px(prefs.zoom)));
     cx.refresh_windows();
 }
 
 pub fn run() {
+    if std::env::args().nth(1).as_deref() == Some(crate::vm::snapshot::SERVE_ARG) {
+        crate::vm::snapshot::serve_stdio();
+        return;
+    }
     crate::vm::crashlog::install();
     // AppKit 이 Touch Bar 관찰을 풀다 죽는 버그를 피한다(appkit_guard 머리 주석의 업스트림 이슈)
     appkit_guard::install(crate::vm::crashlog::log_path());
@@ -239,6 +257,43 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    // 화면 사진 모드(개발용): 가짜 serve 를 원격으로 띄워 정해 둔 장면을 찍고 끝낸다
+    // 켜짐 판단은 vm::snapshot 의 한 함수로만 한다(빈 값은 꺼짐, 폴더는 절대 경로)
+    let snap = match crate::vm::snapshot::snapshot_dir(std::env::var_os(crate::vm::snapshot::ENV_DIR)) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("i-db: {e}");
+            std::process::exit(2);
+        }
+    };
+    // 실제 원격을 찍을 때는 remote.json 의 그 원격에 붙는다(가짜 serve 를 띄우지 않는다)
+    let real = crate::vm::snapshot::real_remote(snap.is_some(), std::env::var(crate::vm::snapshot::ENV_REMOTE).ok());
+    let shots = match (&snap, std::env::var_os(crate::vm::snapshot::ENV_SCRIPT).filter(|s| !s.is_empty())) {
+        (None, _) => Vec::new(),
+        (Some(_), None) if real.is_some() => crate::vm::snapshot::real_shots(),
+        (Some(_), None) => crate::vm::snapshot::default_shots(),
+        (Some(_), Some(f)) => match std::fs::read_to_string(&f)
+            .map_err(|e| e.to_string())
+            .and_then(|t| crate::vm::snapshot::parse_script(&t))
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("i-db: {e}");
+                std::process::exit(2);
+            }
+        },
+    };
+    let initial = if snap.is_some() { None } else { initial };
+    if snap.is_some() && real.is_none() {
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+        // SAFETY: 런타임·창 스레드를 띄우기 전, 아직 스레드가 하나일 때 바꾼다
+        unsafe {
+            std::env::set_var(
+                idb_engine::remote::REMOTE_CMD_ENV,
+                format!("{exe} {}", crate::vm::snapshot::SERVE_ARG),
+            )
+        };
+    }
     let rt = match Runtime::new() {
         Ok(rt) => Rc::new(rt),
         Err(e) => {
@@ -261,8 +316,21 @@ pub fn run() {
             }
         })
         .detach();
+        // 사진 모드는 주 화면이 아닌 화면에 띄우고 초점을 뺏지 않는다
+        let display = snap.as_ref().and_then(|_| {
+            let displays = cx.displays();
+            let primary = cx.primary_display().map(|p| p.id());
+            let pi = displays.iter().position(|d| Some(d.id()) == primary).unwrap_or(0);
+            let chosen = std::env::var(crate::vm::snapshot::ENV_DISPLAY).ok().and_then(|v| v.parse().ok());
+            let i = crate::vm::snapshot::pick_display(displays.len(), pi, chosen);
+            let d = displays.get(i)?;
+            eprintln!("snapshot display {i}/{} {:?}", displays.len(), d.bounds());
+            Some(d.id())
+        });
         let opts = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1320.), px(860.)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(display, size(px(1320.), px(860.)), cx))),
+            display_id: display,
+            focus: snap.is_none(),
             // 제목 줄을 투명하게 두고 탭·단추를 그 안에 그린다(Orca). 신호등은 그 위에 앉는다
             titlebar: Some(TitlebarOptions {
                 title: Some(crate::vm::brand::NAME.into()),
@@ -271,23 +339,46 @@ pub fn run() {
             ..Default::default()
         };
         let rt = rt.clone();
+        let made: Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> = Default::default();
+        let made2 = made.clone();
+        let snapping = snap.is_some();
         let opened = cx.open_window(opts, move |window, cx| {
             apply_look(&prefs, &font, window, cx);
             appkit_guard::quiet_window_touch_bar(window);
             let ws = cx.new(|cx| {
                 let mut ws = Workspace::new(rt, font, window, cx);
+                if snapping {
+                    // 사진 모드는 사용자 설정을 읽지도 쓰지도 않는다. 고르는 화면에 보일 최근 항목만 둔다
+                    ws.prefs_path = None;
+                    ws.prefs = Prefs::default();
+                    ws.prefs.recent = vec![
+                        Target::Remote("devbox".into()),
+                        Target::Local("~/Projects/shop".into()),
+                        Target::Local("~/Projects/billing".into()),
+                    ];
+                }
                 if let Some(t) = initial {
                     ws.open_target(t, window, cx);
                 }
                 ws
             });
+            *made2.borrow_mut() = Some(ws.clone());
             cx.new(|cx| Root::new(ws, window, cx))
         });
-        if let Err(e) = opened {
-            eprintln!("i-db: {e}");
-            cx.quit();
+        match opened {
+            Err(e) => {
+                eprintln!("i-db: {e}");
+                cx.quit();
+            }
+            Ok(handle) => {
+                if let (Some(dir), Some(ws)) = (snap.clone(), made.borrow_mut().take()) {
+                    snapshot::start(handle.into(), ws, dir, shots.clone(), real.clone(), cx);
+                }
+            }
         }
-        cx.activate(true);
+        if snap.is_none() {
+            cx.activate(true);
+        }
     });
 }
 
@@ -298,16 +389,16 @@ mod tests {
     use gpui_component::ActiveTheme as _;
 
     #[gpui::test]
-    fn 기본_글꼴을_테마의_글과_편집기에_넣는다(cx: &mut TestAppContext) {
+    fn 화면은_시스템_글꼴_편집기와_표_값은_D2Coding_이다(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             let f = font::resolve(font::DEFAULT_FONT, font::DEFAULT_SIZE, &[]);
-            apply_font(&f, zoom::DEFAULT, cx);
+            apply_font(&f, font::SYSTEM_UI, zoom::DEFAULT, cx);
             let t = cx.theme();
-            assert_eq!(t.font_family.as_ref(), "D2Coding");
+            assert_eq!(t.font_family.as_ref(), font::SYSTEM_UI_FAMILY);
             assert_eq!(t.mono_font_family.as_ref(), "D2Coding");
             assert_eq!((t.font_size, t.mono_font_size), (px(14.), px(14.)));
-            apply_font(&f, 1.25, cx);
+            apply_font(&f, font::SYSTEM_UI, 1.25, cx);
             assert_eq!(cx.theme().font_size, px(18.));
         });
     }

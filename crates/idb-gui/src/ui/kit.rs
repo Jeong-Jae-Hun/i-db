@@ -21,7 +21,8 @@ pub fn row(s: &Scale, theme: &Theme, selected: bool) -> Div {
         .rounded(theme.radius)
         .text_size(px(s.text()))
         .line_height(px(s.line(s.text())))
-        .when(selected, |d| d.bg(theme.sidebar_accent))
+        // 고른 줄은 강조색을 옅게 깐다(초점·고른 탭과 같은 색)
+        .when(selected, |d| d.bg(super::brand::accent().opacity(0.16)))
 }
 
 /// 구역 머리(접속·테이블·쿼리): 11px 굵게, 흐린 색
@@ -47,23 +48,6 @@ pub fn text(s: &Scale, size: f32, color: Hsla, t: impl Into<gpui::SharedString>)
         .child(t.into())
 }
 
-/// 알약(환경·개수)
-pub fn pill(s: &Scale, bg: Hsla, fg: Hsla, t: impl Into<gpui::SharedString>) -> Div {
-    div()
-        .flex_shrink_0()
-        .h(px(s.pill_h()))
-        .px(px(s.s8()))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(bg)
-        .text_color(fg)
-        .text_size(px(s.pill()))
-        .line_height(px(s.line(s.pill())))
-        .child(t.into())
-}
-
 /// 접속 종류 아이콘(Lucide, assets/icons/kinds). 모르는 종류는 빈 자리를 둔다(줄이 어긋나지 않게).
 pub fn kind_icon(s: &Scale, kind: &str, color: Hsla) -> Div {
     let size = px(s.icon());
@@ -72,4 +56,10 @@ pub fn kind_icon(s: &Scale, kind: &str, color: Hsla) -> Div {
         Some(p) => d.child(svg().path(p).size(size).text_color(color)),
         None => d,
     }
+}
+
+/// 상태 점(환경·건강). 글 높이 가운데에 앉는 6px 원이다
+pub fn dot(s: &Scale, color: Hsla) -> Div {
+    let _ = s;
+    div().flex_shrink_0().size(px(6.)).rounded_full().bg(color)
 }

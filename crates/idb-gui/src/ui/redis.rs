@@ -27,6 +27,8 @@ pub struct RedisView {
     pub(super) pattern: Entity<InputState>,
     command: Entity<InputState>,
     keys: Vec<String>,
+    /// 한 번이라도 찾았다(빈 목록과 아직 안 찾음을 가른다)
+    scanned: bool,
     more: bool,
     pub(super) selected: Option<String>,
     /// 키를 고를 때마다 오른다. 값 읽기 답은 이 값과 키가 맞을 때만 받는다
@@ -57,10 +59,12 @@ impl RedisView {
         rt: Rc<Runtime>,
         engine: Engine,
         conn: String,
+        pattern: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> RedisView {
-        let pattern = cx.new(|cx| InputState::new(window, cx).placeholder("키 패턴 (예: user:*)").default_value("*"));
+        let first = pattern.to_string();
+        let pattern = cx.new(|cx| InputState::new(window, cx).placeholder("키 패턴 (예: user:*)").default_value(first));
         let command = cx.new(|cx| InputState::new(window, cx).placeholder("Redis 명령 (예: GET key) — Enter 또는 ⌘↵"));
         let subs = vec![
             cx.subscribe_in(&pattern, window, |this, _, ev: &InputEvent, window, cx| {
@@ -82,6 +86,7 @@ impl RedisView {
             pattern,
             command,
             keys: Vec::new(),
+            scanned: false,
             more: false,
             selected: None,
             value: None,
@@ -112,6 +117,7 @@ impl RedisView {
                     );
                     let _ = this.update(cx, |v, cx| {
                         v.keys = r.keys;
+                        v.scanned = true;
                         v.more = r.more;
                         cx.notify();
                     });
@@ -330,6 +336,7 @@ impl RedisView {
                 .ok_text("지우기")
                 .ok_variant(gpui_component::button::ButtonVariant::Danger)
                 .show_cancel(true)
+                .cancel_text(crate::vm::copy::CANCEL)
                 .on_ok(move |_, window, cx| {
                     let k = key2.clone();
                     let _ = this.update(cx, |v, cx| v.apply_edit(&k, redisedit::Action::DeleteKey, window, cx));
@@ -373,6 +380,7 @@ impl RedisView {
                             .ok_text(format!("{}개 지우기", keys.len()))
                             .ok_variant(gpui_component::button::ButtonVariant::Danger)
                             .show_cancel(true)
+                            .cancel_text(crate::vm::copy::CANCEL)
                             .on_ok(move |_, window, cx| {
                                 let keys = keys.clone();
                                 let _ = this.update(cx, |v, cx| v.unlink(keys, window, cx));
@@ -639,7 +647,13 @@ impl Render for RedisView {
         let theme = cx.theme().clone();
         let sc = super::kit::scale(&theme);
         let edit_bar = self.render_edit_bar(cx);
-        let mut list = v_flex().id("redis-keys").flex_1().min_h_0().overflow_y_scroll();
+        // 키는 데이터라 고정폭으로 둔다
+        let mut list = v_flex()
+            .id("redis-keys")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .font_family(theme.mono_font_family.clone());
         for (i, k) in self.keys.iter().enumerate() {
             let key = k.clone();
             let selected = self.selected.as_deref() == Some(k.as_str());
@@ -656,6 +670,16 @@ impl Render for RedisView {
                     .hover(|s| s.bg(theme.list_hover))
                     .child(k.clone())
                     .on_click(cx.listener(move |v, _, w, cx| v.open_key(key.clone(), w, cx))),
+            );
+        }
+        if self.scanned && self.keys.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py(px(sc.s8()))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(crate::vm::copy::EMPTY_KEYS),
             );
         }
         if self.more {
@@ -701,7 +725,7 @@ impl Render for RedisView {
                             None => div()
                                 .p_3()
                                 .text_color(theme.muted_foreground)
-                                .child("키를 고르면 값을 보인다")
+                                .child(crate::vm::copy::EMPTY_VALUE)
                                 .into_any_element(),
                         }),
                     ),

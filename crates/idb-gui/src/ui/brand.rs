@@ -51,6 +51,16 @@ pub fn kind_icon_path(kind: &str) -> Option<&'static str> {
     KINDS.iter().find(|(k, _, _)| *k == kind).map(|(_, p, _)| *p)
 }
 const MARK_DOT: &[u8] = include_bytes!("../../../../assets/brand/mark-dot.svg");
+/// gpui-kit 기본 묶음에 없는 도구 아이콘(Lucide, ISC — THIRD_PARTY_NOTICES.md)
+const UI_ICONS: &[(&str, &[u8])] = &[
+    ("icons/key-round.svg", include_bytes!("../../../../assets/icons/ui/key-round.svg")),
+    ("icons/download.svg", include_bytes!("../../../../assets/icons/ui/download.svg")),
+    (
+        "icons/fast-forward.svg",
+        include_bytes!("../../../../assets/icons/ui/fast-forward.svg"),
+    ),
+    ("icons/list-tree.svg", include_bytes!("../../../../assets/icons/ui/list-tree.svg")),
+];
 
 /// 앱 자산: 브랜드 마크 조각 + gpui-kit 아이콘
 pub struct Assets;
@@ -60,6 +70,7 @@ impl AssetSource for Assets {
         match path {
             "brand/mark-body.svg" => Ok(Some(Cow::Borrowed(MARK_BODY))),
             "brand/mark-dot.svg" => Ok(Some(Cow::Borrowed(MARK_DOT))),
+            p if UI_ICONS.iter().any(|(k, _)| *k == p) => Ok(UI_ICONS.iter().find(|(k, _)| *k == p).map(|(_, b)| Cow::Borrowed(*b))),
             p if p.starts_with("kind/") => Ok(KINDS.iter().find(|(_, kp, _)| *kp == p).map(|(_, _, b)| Cow::Borrowed(*b))),
             _ => gpui_kit_assets::Assets.load(path),
         }
@@ -107,6 +118,8 @@ pub fn wordmark(size: Pixels, ink: Hsla) -> impl IntoElement {
         .flex()
         .flex_row()
         .text_size(size)
+        // 글자표는 늘 D2Coding Bold 다(화면 글꼴이 시스템이어도)
+        .font_family(crate::vm::font::DEFAULT_FONT)
         .font_weight(FontWeight::BOLD)
         .text_color(ink)
         .child("i")
