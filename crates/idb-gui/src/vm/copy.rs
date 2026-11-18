@@ -12,3 +12,4 @@ pub const EMPTY_FILTER: &str = "맞는 행이 없다";
 pub const EMPTY_KEYS: &str = "맞는 키가 없다 · 패턴을 바꿔 다시 찾는다";
 pub const EMPTY_VALUE: &str = "키를 고르면 값을 보인다";
 pub const EMPTY_SOURCE: &str = "왼쪽에서 항목을 고르거나 질의를 실행한다";
+pub const EMPTY_PALETTE: &str = "맞는 것이 없다 · 낱말을 줄이거나 초성으로 찾는다";

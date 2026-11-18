@@ -15,6 +15,11 @@ use crate::vm::settings::{SAFETY_RULES, ThemePref, parse_row_limit};
 pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let p = ws.prefs.clone();
     let font = cx.new(|cx| InputState::new(window, cx).default_value(p.font.clone()));
+    let ui_font = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("system (macOS 시스템 글꼴)")
+            .default_value(p.ui_font.clone())
+    });
     let size = cx.new(|cx| InputState::new(window, cx).default_value(format!("{}", p.font_size)));
     let rows = cx.new(|cx| InputState::new(window, cx).default_value(p.row_limit.to_string()));
     let theme = Rc::new(Cell::new(p.theme));
@@ -52,11 +57,13 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
             rules = rules.child(div().text_xs().text_color(t.muted_foreground).child(format!("· {r}")));
         }
         let (font, size, rows, theme, this, base) = (font.clone(), size.clone(), rows.clone(), theme.clone(), this.clone(), p.clone());
-        let (font_i, size_i, rows_i) = (font.clone(), size.clone(), rows.clone());
+        let ui_font = ui_font.clone();
+        let (font_i, size_i, rows_i, ui_i) = (font.clone(), size.clone(), rows.clone(), ui_font.clone());
         dialog
             .title("설정")
             .w(px(560.))
-            .child(row("글꼴").child(div().flex_1().child(Input::new(&font_i))))
+            .child(row("화면 글꼴").child(div().flex_1().child(Input::new(&ui_i))))
+            .child(row("고정폭 글꼴 (편집기·표)").child(div().flex_1().child(Input::new(&font_i))))
             .child(row("글자 크기(px)").child(div().w(px(100.)).child(Input::new(&size_i))))
             .child(row("테마").child(themes))
             .child(row("테이블 한 쪽 행 수").child(div().w(px(100.)).child(Input::new(&rows_i))))
@@ -75,6 +82,8 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
                     .child(Button::new("settings-ok").primary().label("저장").on_click(move |_, window, cx| {
                         let mut next = base.clone();
                         next.font = font.read(cx).value().trim().to_string();
+                        let ui = ui_font.read(cx).value().trim().to_string();
+                        next.ui_font = if ui.is_empty() { crate::vm::font::SYSTEM_UI.into() } else { ui };
                         if let Ok(v) = size.read(cx).value().trim().parse::<f32>() {
                             next.font_size = crate::vm::font::resolve(&next.font, v, &[]).size;
                         }

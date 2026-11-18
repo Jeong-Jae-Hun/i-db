@@ -252,6 +252,60 @@ async fn run_shot(
             sleep(cx, 300).await;
             wait_for(cx, ws, limit, |w| !w.is_busy()).await;
         }
+        Scene::Palette | Scene::PaletteQuery | Scene::PaletteKorean | Scene::GoTo => {
+            // 카탈로그를 읽어 테이블이 팔레트에 들게 하고, 자주 쓴 것을 몇 개 둔다
+            if let Some(pg) = names.pg.clone() {
+                expand(cx, pg.clone());
+                let node = pg.clone();
+                wait_for(cx, ws, limit, move |w| w.tree.is_settled(&node)).await;
+            }
+            let (q, tables_only) = match shot.scene {
+                Scene::PaletteQuery => ("users", false),
+                Scene::PaletteKorean => ("ㄷㅅ", false),
+                Scene::GoTo => ("ord", true),
+                _ => ("", false),
+            };
+            let pg = names.pg.clone().unwrap_or_default();
+            on_ws(cx, handle, ws, move |w, window, cx| {
+                if w.prefs.palette_uses.is_empty() {
+                    let now = chrono::Utc::now().timestamp();
+                    for (k, n) in [("cmd:Run", 5), ("cmd:Dashboard", 3), ("cmd:ToggleSidebar", 2)] {
+                        for _ in 0..n {
+                            crate::vm::finder::record(&mut w.prefs.palette_uses, k, now);
+                        }
+                    }
+                    let _ = pg;
+                }
+                w.open_palette(tables_only, window, cx);
+                if let Some(p) = w.palette.clone() {
+                    let q = q.to_string();
+                    window.defer(cx, move |window, cx| p.update(cx, |p, cx| p.set_query(&q, window, cx)));
+                }
+            });
+        }
+        Scene::Titlebar => {
+            // 탭 꼴 모음: 이름 없는 쿼리(고침), 자동 저장 파일, 데이터 탭, prod 탭
+            if let Some(pg) = names.pg.clone() {
+                expand(cx, pg.clone());
+                let p2 = pg.clone();
+                on_ws(cx, handle, ws, move |w, window, cx| {
+                    w.new_tab(Some(p2.clone()), window, cx);
+                    w.set_active_sql("select 1;", window, cx);
+                    w.open_table(p2, "public".into(), "orders".into(), window, cx);
+                });
+            }
+            if let Some(prod) = names.prod.clone() {
+                on_ws(cx, handle, ws, move |w, window, cx| w.new_tab(Some(prod), window, cx));
+            }
+            on_ws(cx, handle, ws, |w, _, cx| {
+                // 두 번째 탭(쿼리)을 고른 채 고친 표시를 둔다
+                if w.tabs.tabs.len() > 1 {
+                    w.tabs.tabs[1].dirty = true;
+                    w.tabs.activate(1);
+                }
+                cx.notify();
+            });
+        }
         Scene::Dashboard => on_ws(cx, handle, ws, |w, window, cx| {
             w.open_dashboard(window, cx);
             w.close_tab(0, cx);

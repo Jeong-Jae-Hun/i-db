@@ -33,10 +33,15 @@ pub enum Scene {
     Shortcuts,
     Confirm,
     Files,
+    Palette,
+    PaletteQuery,
+    PaletteKorean,
+    GoTo,
+    Titlebar,
 }
 
 impl Scene {
-    pub const ALL: [Scene; 12] = [
+    pub const ALL: [Scene; 17] = [
         Scene::Picker,
         Scene::Tree,
         Scene::Sql,
@@ -49,6 +54,11 @@ impl Scene {
         Scene::Shortcuts,
         Scene::Confirm,
         Scene::Files,
+        Scene::Palette,
+        Scene::PaletteQuery,
+        Scene::PaletteKorean,
+        Scene::GoTo,
+        Scene::Titlebar,
     ];
 
     pub fn name(self) -> &'static str {
@@ -65,6 +75,11 @@ impl Scene {
             Scene::Shortcuts => "shortcuts",
             Scene::Confirm => "confirm",
             Scene::Files => "files",
+            Scene::Palette => "palette",
+            Scene::PaletteQuery => "palette-query",
+            Scene::PaletteKorean => "palette-korean",
+            Scene::GoTo => "goto",
+            Scene::Titlebar => "titlebar",
         }
     }
 }

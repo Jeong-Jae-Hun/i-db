@@ -5,6 +5,7 @@ mod brand;
 mod dashboard;
 mod dialogs;
 mod kit;
+mod palette_view;
 mod redis;
 mod results;
 mod snapshot;
@@ -55,7 +56,9 @@ actions!(
         TxRollback,
         ToggleProdLock,
         Minimize,
-        ShowShortcuts
+        ShowShortcuts,
+        OpenPalette,
+        GoToTable
     ]
 );
 
@@ -94,6 +97,8 @@ fn action_for(cmd: Cmd) -> Box<dyn Action> {
         Cmd::ProdLock => Box::new(ToggleProdLock),
         Cmd::Minimize => Box::new(Minimize),
         Cmd::Shortcuts => Box::new(ShowShortcuts),
+        Cmd::Palette => Box::new(OpenPalette),
+        Cmd::GoToTable => Box::new(GoToTable),
     }
 }
 
@@ -189,13 +194,21 @@ fn load_font(prefs: &Prefs, cx: &mut App) -> FontChoice {
 }
 
 /// 화면 글·편집기·결과 표가 같은 글꼴을 쓰게 테마에 넣는다. 크기는 확대 배율을 곱한다.
-fn apply_font(f: &FontChoice, z: f32, cx: &mut App) {
+fn apply_font(f: &FontChoice, ui: &str, z: f32, cx: &mut App) {
+    let installed = if ui.eq_ignore_ascii_case(font::SYSTEM_UI) {
+        Vec::new()
+    } else {
+        cx.text_system().all_font_names()
+    };
+    let ui_family = font::ui_family(ui, &installed);
     let size = px(zoom::font_px(f.size, z));
     Theme::update(cx, |t| {
         if !f.family.is_empty() {
             t.font_family = f.family.clone().into();
             t.mono_font_family = f.family.clone().into();
         }
+        // 화면 글을 시스템 글꼴로 두면 고정폭은 편집기·표 값·코드에만 남는다
+        t.font_family = ui_family.clone().into();
         t.font_size = size;
         t.mono_font_size = size;
     });
@@ -223,7 +236,7 @@ fn apply_look(prefs: &Prefs, font: &FontChoice, window: &mut Window, cx: &mut Ap
         ThemePref::Light => Theme::change(ThemeMode::Light, Some(window), cx),
         ThemePref::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
     }
-    apply_font(font, prefs.zoom, cx);
+    apply_font(font, &prefs.ui_font, prefs.zoom, cx);
     // rem 을 키워 여백·높이·작은 글(text_xs)도 같은 배율로 커지게 한다
     window.set_rem_size(px(zoom::rem_px(prefs.zoom)));
     cx.refresh_windows();
@@ -372,16 +385,16 @@ mod tests {
     use gpui_component::ActiveTheme as _;
 
     #[gpui::test]
-    fn 기본_글꼴을_테마의_글과_편집기에_넣는다(cx: &mut TestAppContext) {
+    fn 화면은_시스템_글꼴_편집기와_표_값은_D2Coding_이다(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             let f = font::resolve(font::DEFAULT_FONT, font::DEFAULT_SIZE, &[]);
-            apply_font(&f, zoom::DEFAULT, cx);
+            apply_font(&f, font::SYSTEM_UI, zoom::DEFAULT, cx);
             let t = cx.theme();
-            assert_eq!(t.font_family.as_ref(), "D2Coding");
+            assert_eq!(t.font_family.as_ref(), font::SYSTEM_UI_FAMILY);
             assert_eq!(t.mono_font_family.as_ref(), "D2Coding");
             assert_eq!((t.font_size, t.mono_font_size), (px(14.), px(14.)));
-            apply_font(&f, 1.25, cx);
+            apply_font(&f, font::SYSTEM_UI, 1.25, cx);
             assert_eq!(cx.theme().font_size, px(18.));
         });
     }

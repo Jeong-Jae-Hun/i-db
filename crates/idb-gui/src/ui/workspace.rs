@@ -32,8 +32,9 @@ use super::results::{ResultsView, Source};
 use super::source::SourceView;
 use super::sql_completion::{CatalogCell, SqlCompletion};
 use super::{
-    About, CancelRun, CloseTab, ExplainQuery, Minimize, NewTab, OpenFile, OpenSettings, RunAll, RunQuery, SaveFile, ShowDashboard,
-    ShowShortcuts, SwitchConn, ToggleProdLock, ToggleResults, ToggleSidebar, TxBegin, TxCommit, TxRollback, ZoomIn, ZoomOut, ZoomReset,
+    About, CancelRun, CloseTab, ExplainQuery, GoToTable, Minimize, NewTab, OpenFile, OpenPalette, OpenSettings, RunAll, RunQuery, SaveFile,
+    ShowDashboard, ShowShortcuts, SwitchConn, ToggleProdLock, ToggleResults, ToggleSidebar, TxBegin, TxCommit, TxRollback, ZoomIn, ZoomOut,
+    ZoomReset,
 };
 use crate::vm::copy;
 use crate::vm::font::FontChoice;
@@ -153,12 +154,14 @@ pub struct Workspace {
     connecting: bool,
     // ─── 접속 뒤 ───
     pub(super) engine: Option<Engine>,
+    /// 열린 명령 팔레트(⌘K)·테이블로 가기(⌘P)
+    pub(super) palette: Option<Entity<super::palette_view::PaletteView>>,
     /// Redis 탭을 열 때 처음 찾을 패턴(실제 원격을 찍는 사진 모드는 좁힌다)
     pub(super) redis_pattern: String,
     target: Option<Target>,
     pub(super) tree: ConnTree,
     tree_filter: Entity<InputState>,
-    tabs: Tabs,
+    pub(super) tabs: Tabs,
     bodies: HashMap<u64, Body>,
     catalogs: HashMap<String, Rc<Catalog>>,
     tx: HashMap<String, bool>,
@@ -283,6 +286,7 @@ impl Workspace {
             remotes: crate::vm::runtime::remote_names(),
             connecting: false,
             engine: None,
+            palette: None,
             redis_pattern: "*".into(),
             target: None,
             tree: ConnTree::default(),
@@ -321,7 +325,7 @@ impl Workspace {
 
     /// 설정 창에서 바꾼 값을 반영한다.
     pub(super) fn apply_settings(&mut self, prefs: Prefs, window: &mut Window, cx: &mut Context<Self>) {
-        let font_changed = prefs.font != self.prefs.font || prefs.font_size != self.prefs.font_size;
+        let font_changed = prefs.font != self.prefs.font || prefs.font_size != self.prefs.font_size || prefs.ui_font != self.prefs.ui_font;
         self.prefs = prefs;
         if font_changed {
             self.font = super::load_font(&self.prefs, cx);
@@ -574,6 +578,7 @@ impl Workspace {
         self.switching.clear();
         self.queries = None;
         self.queries_err = None;
+        self.palette = None;
         self.queued.clear();
         self.file_text.clear();
         self.autosave_stopped.clear();
@@ -1280,6 +1285,161 @@ impl Workspace {
         self.busy.is_some()
     }
 
+    // ─── 명령 팔레트(R40·R75.2) ───
+
+    /// 팔레트 항목을 모은다. tables_only 면 테이블·뷰만(⌘P).
+    fn palette_items(&self, tables_only: bool) -> Vec<crate::vm::finder::Item> {
+        use crate::vm::finder::{Group, Item, Target as T};
+        let mut items = Vec::new();
+        let env_of = |c: &str| self.conn(c).map(|s| s.env.clone()).unwrap_or_default();
+        if !tables_only {
+            for e in crate::vm::keymap::ENTRIES {
+                // 입력칸·표 편집 명령은 거기서 쓰는 것이라 뺀다. 팔레트 자신도 뺀다
+                if e.bind == crate::vm::keymap::Bind::Builtin || matches!(e.cmd, crate::vm::keymap::Cmd::Palette) {
+                    continue;
+                }
+                items.push(Item {
+                    group: Group::Command,
+                    key: format!("cmd:{:?}", e.cmd),
+                    title: e.label.trim_end_matches('…').to_string(),
+                    detail: e.menu.title().to_string(),
+                    hint: e.key.map(crate::vm::keymap::display_key).unwrap_or_default(),
+                    env: String::new(),
+                    target: T::Command(e.cmd),
+                });
+            }
+            for t in crate::vm::settings::ThemePref::ALL {
+                items.push(Item {
+                    group: Group::Command,
+                    key: format!("theme:{t:?}"),
+                    title: format!("테마: {}", t.label()),
+                    detail: "보기".into(),
+                    hint: String::new(),
+                    env: String::new(),
+                    target: T::Theme(t),
+                });
+            }
+            for c in &self.tree.conns {
+                items.push(Item {
+                    group: Group::Conn,
+                    key: format!("conn:{}", if c.uuid.is_empty() { &c.name } else { &c.uuid }),
+                    title: c.name.clone(),
+                    detail: format!("{} · {}", c.kind, c.host),
+                    hint: String::new(),
+                    env: c.env.clone(),
+                    target: T::Conn(c.name.clone()),
+                });
+            }
+        }
+        // 읽어 둔 카탈로그의 테이블·뷰
+        let mut conns: Vec<&String> = self.catalogs.keys().collect();
+        conns.sort();
+        for c in conns {
+            for s in &self.catalogs[c].schemas {
+                for t in &s.tables {
+                    items.push(Item {
+                        group: Group::Table,
+                        key: format!("table:{c}.{}.{}", s.name, t.name),
+                        title: format!("{}.{}", s.name, t.name),
+                        detail: if t.view { format!("{c} · 뷰") } else { c.clone() },
+                        hint: String::new(),
+                        env: env_of(c),
+                        target: T::Table {
+                            conn: c.clone(),
+                            schema: s.name.clone(),
+                            table: t.name.clone(),
+                            view: t.view,
+                        },
+                    });
+                }
+            }
+        }
+        if !tables_only {
+            for f in self.queries.iter().flatten() {
+                items.push(Item {
+                    group: Group::File,
+                    key: format!("file:{}", f.rel),
+                    title: f.name.clone(),
+                    detail: f.conn.clone().unwrap_or_default(),
+                    hint: String::new(),
+                    env: f.conn.as_deref().map(env_of).unwrap_or_default(),
+                    target: T::File(f.rel.clone()),
+                });
+            }
+            for t in &self.tabs.tabs {
+                items.push(Item {
+                    group: Group::Tab,
+                    key: format!("tab:{}", t.id),
+                    title: t.label(),
+                    detail: t.conn.clone().unwrap_or_default(),
+                    hint: String::new(),
+                    env: t.conn.as_deref().map(env_of).unwrap_or_default(),
+                    target: T::Tab(t.id),
+                });
+            }
+            for (c, k) in self.tree.loaded_redis_keys().into_iter().take(500) {
+                items.push(Item {
+                    group: Group::Key,
+                    key: format!("key:{c}:{k}"),
+                    title: k.clone(),
+                    detail: c.clone(),
+                    hint: String::new(),
+                    env: env_of(&c),
+                    target: T::Key { conn: c, key: k },
+                });
+            }
+        }
+        crate::vm::finder::disambiguate(&mut items);
+        items
+    }
+
+    pub(super) fn open_palette(&mut self, tables_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.palette_items(tables_only);
+        let uses = self.prefs.palette_uses.clone();
+        let ws = cx.entity().downgrade();
+        let ph = if tables_only {
+            "테이블로 가기 (스키마.테이블, 초성)"
+        } else {
+            "명령·접속·테이블·파일 찾기 (초성도 된다)"
+        };
+        self.palette = Some(cx.new(|cx| super::palette_view::PaletteView::new(ws, items, uses, ph, window, cx)));
+        cx.notify();
+    }
+
+    pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// 팔레트에서 고른 것을 실행한다. alt 는 테이블이면 DDL 이다.
+    pub(super) fn palette_pick(&mut self, item: crate::vm::finder::Item, alt: bool, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::vm::finder::Target as T;
+        crate::vm::finder::record(&mut self.prefs.palette_uses, &item.key, chrono::Utc::now().timestamp());
+        self.save_prefs();
+        self.close_palette(window, cx);
+        match item.target {
+            // 메뉴·단축키와 같은 동작으로 보낸다(확인이 필요한 명령은 그 흐름을 그대로 탄다)
+            T::Command(cmd) => window.dispatch_action(super::action_for(cmd), cx),
+            T::Theme(t) => {
+                self.prefs.theme = t;
+                self.save_prefs();
+                super::apply_look(&self.prefs, &self.font, window, cx);
+            }
+            T::Conn(c) => self.select_conn(c, window, cx),
+            T::Table { conn, schema, table, .. } if alt => self.show_ddl(conn, schema, table, window, cx),
+            T::Table { conn, schema, table, .. } => self.open_table(conn, schema, table, window, cx),
+            T::File(rel) => self.open_query(rel, window, cx),
+            T::Tab(id) => {
+                if let Some(i) = self.tabs.index_of(id) {
+                    self.tabs.activate(i);
+                }
+            }
+            T::Key { conn, key } => self.open_redis_key(conn, key, window, cx),
+        }
+        cx.notify();
+    }
+
     /// 고른 SQL 탭의 편집기 글을 바꾼다(화면 사진 모드).
     pub(super) fn set_active_sql(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Body::Sql { editor, .. }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
@@ -1940,7 +2100,8 @@ impl Workspace {
                     ws.set_status("실행 중에 데이터베이스를 바꿔 결과를 버림", true, cx);
                     return;
                 }
-                ws.set_status(format!("{}행 · {}ms", rs.rows.len(), rs.elapsed_ms), false, cx);
+                // 행 수·시간은 결과 도구 줄이 보인다(상태 줄에 겹쳐 쓰지 않는다)
+                ws.set_status("", false, cx);
                 ws.show_result(tab_id, conn.clone(), Source::Query { sql: sql.clone() }, rs, false, window, cx);
             }),
             Confirms::default(),
@@ -2367,7 +2528,6 @@ impl Workspace {
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let dark = theme.is_dark();
         let active = self.active_conn();
         let sc = self.scale();
         let mut list = v_flex().id("conn-tree").py(px(sc.s4())).gap(px(sc.row_gap()));
@@ -2397,17 +2557,18 @@ impl Workspace {
                             .text_size(px(sc.group()))
                             .line_height(px(sc.line(sc.group())))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(if row.tone == Tone::Prod {
-                                theme.danger
-                            } else {
-                                theme.muted_foreground
-                            })
+                            .text_color(theme.muted_foreground)
                             .debug_selector(move || format!("folder-row-{i}"))
                             .child(div().flex_shrink_0().size(px(sc.icon())).child(
                                 Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(sc.icon())),
                             ))
                             .child(div().flex_1().min_w_0().truncate().child(row.label))
-                            .child(kit::pill(&sc, theme.secondary, theme.muted_foreground, count.to_string()))
+                            // prod 가 든 폴더는 빨간 글 대신 작은 점으로 알린다
+                            .when(row.tone == Tone::Prod, |d| d.child(kit::dot(&sc, theme.danger)))
+                            .child(
+                                kit::text(&sc, sc.small(), theme.muted_foreground.opacity(0.8), count.to_string())
+                                    .font_weight(gpui::FontWeight::NORMAL),
+                            )
                             .on_click(cx.listener(move |ws, _, _, cx| {
                                 ws.tree.toggle(&label);
                                 ws.save_tree_memory();
@@ -2423,15 +2584,14 @@ impl Workspace {
                         let (n_open, n_ref, n_copy) = (c.name.clone(), c.name.clone(), c.name.clone());
                         let tip = format!("{} · {} {}\n{}", c.kind, c.host, c.db, c.group);
                         let ws = cx.entity().downgrade();
-                        let (pbg, pfg) = palette::pill(tone(&c.env), dark);
-                        let name_color = if tone(&c.env) == Tone::Prod {
-                            theme.danger
-                        } else {
-                            theme.foreground
+                        let env_color = match tone(&c.env) {
+                            Tone::Prod => theme.danger,
+                            Tone::Stg => theme.warning,
+                            Tone::Local => theme.muted_foreground.opacity(0.6),
                         };
-                        // 접속 줄: 아이콘·이름(14 중간 굵기)·환경 알약이 한 줄, 아래 12px 호스트 줄. 높이는 내용에서 셈한다.
-                        // 사이드바가 좁으면 둘째 줄을 빼고 툴팁에만 둔다
-                        let two_line = self.prefs.sidebar_width >= NARROW_SIDEBAR;
+                        // 접속 줄: 화살표·종류 아이콘·이름·환경(점 + 작은 글) 한 줄. 호스트는 툴팁에 둔다.
+                        // 설정(sidebar_detail)을 켜고 사이드바가 넓을 때만 둘째 줄에 호스트를 보인다
+                        let two_line = self.prefs.sidebar_detail && self.prefs.sidebar_width >= WIDE_SIDEBAR;
                         v_flex()
                             .id(("conn", i))
                             .mx(px(sc.s4()))
@@ -2442,7 +2602,7 @@ impl Workspace {
                             .justify_center()
                             .rounded(theme.radius)
                             .cursor_pointer()
-                            .when(selected, |d| d.bg(theme.sidebar_accent))
+                            .when(selected, |d| d.bg(super::brand::accent().opacity(0.16)))
                             .hover(|s| s.bg(theme.sidebar_accent))
                             .debug_selector(move || format!("conn-row-{i}"))
                             .child(
@@ -2466,13 +2626,14 @@ impl Workspace {
                                             })),
                                     )
                                     .child(kit::kind_icon(&sc, &c.kind, theme.muted_foreground))
+                                    .child(kit::text(&sc, sc.text(), theme.foreground, c.name.clone()).flex_1().min_w_0())
                                     .child(
-                                        kit::text(&sc, sc.text(), name_color, c.name.clone())
-                                            .flex_1()
-                                            .min_w_0()
-                                            .font_weight(gpui::FontWeight::MEDIUM),
-                                    )
-                                    .child(kit::pill(&sc, hex(pbg), hex(pfg), c.env.clone())),
+                                        h_flex()
+                                            .flex_shrink_0()
+                                            .gap(px(sc.s4()))
+                                            .child(kit::dot(&sc, env_color))
+                                            .child(kit::text(&sc, sc.small(), theme.muted_foreground, c.env.clone())),
+                                    ),
                             )
                             .when(two_line, |d| {
                                 d.child(
@@ -2880,7 +3041,7 @@ impl Workspace {
                     Button::new("run-all")
                         .with_size(px(sc.hit()))
                         .ghost()
-                        .icon(IconName::ArrowRight)
+                        .icon(Icon::empty().path("icons/fast-forward.svg"))
                         .tooltip("편집기 문장 모두 실행 (⇧⌘↵)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_all(w, cx))),
                 )
@@ -2888,7 +3049,7 @@ impl Workspace {
                     Button::new("explain")
                         .with_size(px(sc.hit()))
                         .ghost()
-                        .icon(IconName::Search)
+                        .icon(Icon::empty().path("icons/list-tree.svg"))
                         .tooltip("실행 계획 (⌘E)")
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_query(true, w, cx))),
                 )
@@ -2987,48 +3148,69 @@ impl Workspace {
                 .as_ref()
                 .and_then(|c| self.conn(c))
                 .is_some_and(|c| tone(&c.env) == Tone::Prod);
-            let mut base = t.clone();
-            base.dirty = false;
+            let env = t.conn.as_ref().and_then(|c| self.conn(c)).map(|c| tone(&c.env));
+            let (label, tip) = (crate::vm::tabs::middle_ellipsis(&t.label(), 28), t.tooltip());
+            let dirty = t.dirty;
+            // 탭: 고른 탭은 한 단 밝은 바탕 + 안쪽 아래 2px 강조선, 나머지는 흐린 글. 닫기는 올렸을 때(고친 탭은 점)
             bar = bar.child(
                 h_flex()
                     .id(("tab", i))
                     .group(SharedString::from(format!("tab-{i}")))
-                    .min_h(px(sc.tab()))
-                    .pl_2p5()
-                    .pr_1()
-                    .gap_1()
+                    .relative()
+                    .h(px(sc.tab()))
+                    .pl(px(sc.s12()))
+                    .pr(px(sc.s4()))
+                    .gap(px(sc.s8()))
+                    .items_center()
                     .rounded(theme.radius)
                     .cursor_pointer()
-                    .text_xs()
+                    .text_size(px(sc.small()))
                     .text_color(if active { theme.foreground } else { theme.muted_foreground })
                     .when(active, |d| {
-                        d.bg(theme.secondary)
-                            .border_b_2()
-                            .border_color(if prod { theme.danger } else { theme.ring })
+                        d.bg(theme.secondary).child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left(px(sc.s8()))
+                                .right(px(sc.s8()))
+                                .h(px(2.))
+                                .rounded_full()
+                                .bg(if prod { theme.danger } else { super::brand::accent() }),
+                        )
                     })
-                    .when(!active, |d| d.hover(|s| s.bg(theme.secondary.opacity(0.5))))
-                    .when(prod && !active, |d| d.text_color(theme.danger.opacity(0.8)))
-                    .child(div().max_w(px(180.)).truncate().child(base.title()))
+                    .when(!active, |d| {
+                        d.hover(|s| s.bg(theme.secondary.opacity(0.6)).text_color(theme.foreground))
+                    })
+                    // 접속 환경은 작은 점(prod 빨강·stg 호박)
+                    .when_some(env.filter(|e| *e != Tone::Local), |d, e| {
+                        d.child(kit::dot(&sc, if e == Tone::Prod { theme.danger } else { theme.warning }))
+                    })
+                    .child(div().whitespace_nowrap().child(label))
                     .child(
                         div()
                             .id(("close", i))
-                            .size(px(sc.icon() + sc.s4()))
+                            .size(px(sc.icon()))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(theme.radius)
                             .hover(|s| s.bg(theme.accent))
-                            // 고친 탭은 점을 늘 보이고, 아니면 올렸을 때만 닫기 단추가 보인다
-                            .when(!t.dirty && !active, |d| {
-                                d.opacity(0.).group_hover(format!("tab-{i}"), |s| s.opacity(1.))
+                            .child(if dirty {
+                                kit::dot(&sc, theme.muted_foreground).into_any_element()
+                            } else {
+                                Icon::new(IconName::Close)
+                                    .size(px(sc.icon() * 0.75))
+                                    .text_color(theme.muted_foreground)
+                                    .into_any_element()
                             })
-                            .child(if t.dirty { "●" } else { "×" })
+                            .when(!dirty, |d| d.opacity(0.).group_hover(format!("tab-{i}"), |s| s.opacity(1.)))
                             .tooltip(|window, cx| Tooltip::new("탭 닫기 (⌘W)").build(window, cx))
                             .on_click(cx.listener(move |ws, _, _, cx| {
                                 cx.stop_propagation();
                                 ws.close_tab(i, cx)
                             })),
                     )
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .on_mouse_down(MouseButton::Middle, cx.listener(move |ws, _, _, cx| ws.close_tab(i, cx)))
                     .on_click(cx.listener(move |ws, _, _, cx| {
                         // 탭을 옮길 때 자동 저장한다(R45.2)
@@ -3118,10 +3300,7 @@ impl Workspace {
             lock_label(&l)
         });
         let in_tx = conn.as_ref().is_some_and(|c| self.tx.get(c).copied().unwrap_or(false));
-        let summary = self.tabs.active().and_then(|t| match self.bodies.get(&t.id) {
-            Some(Body::Sql { result: Some(r), .. }) | Some(Body::Table { result: Some(r) }) => Some(r.read(cx).summary(cx)),
-            _ => None,
-        });
+
         let pill = |text: String, bg: gpui::Hsla, fg: gpui::Hsla| div().px_2().rounded_full().bg(bg).text_color(fg).child(text);
         let selector = self.render_conn_selector(cx);
         let sc = self.scale();
@@ -3162,8 +3341,10 @@ impl Workspace {
                     .text_color(if self.status.1 { theme.danger } else { theme.muted_foreground })
                     .child(self.status.0.clone()),
             )
-            .when_some(summary, |d, s| d.child(div().child(s)))
-            .child(div().pr_2().child(self.target.as_ref().map(Target::label).unwrap_or_default()))
+            // 연 곳은 사이드바 머리가 보인다. 사이드바를 숨겼을 때만 여기 둔다
+            .when(!self.show_sidebar, |d| {
+                d.child(div().pr_2().child(self.target.as_ref().map(Target::label).unwrap_or_default()))
+            })
             .when(self.prefs.zoom != zoom::DEFAULT, |d| {
                 d.child(div().child(zoom::label(self.prefs.zoom)))
             })
@@ -3241,7 +3422,7 @@ enum TreeData {
 }
 
 /// 이보다 좁은 사이드바는 접속 줄을 한 줄로 접는다(호스트는 툴팁)
-const NARROW_SIDEBAR: f32 = 220.0;
+const WIDE_SIDEBAR: f32 = 260.0;
 
 /// 환경 알약 배지. prod 빨강·stg 호박색 기운, local 은 무채색이다(vm::palette).
 fn env_pill(env: &str, dark: bool) -> impl IntoElement + use<> {
@@ -3268,6 +3449,7 @@ impl Render for Workspace {
         let _ = window;
         let root = div()
             .id("workspace")
+            .relative()
             .key_context("Workspace")
             .track_focus(&self.focus)
             .size_full()
@@ -3309,15 +3491,13 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|ws, _: &OpenSettings, w, cx| super::dialogs::open_settings(ws, w, cx)))
             .on_action(cx.listener(|_, _: &ShowShortcuts, w, cx| super::dialogs::open_shortcuts(w, cx)))
+            .on_action(cx.listener(|ws, _: &OpenPalette, w, cx| ws.open_palette(false, w, cx)))
+            .on_action(cx.listener(|ws, _: &GoToTable, w, cx| ws.open_palette(true, w, cx)))
             .on_action(cx.listener(|_, _: &About, w, cx| super::dialogs::open_about(w, cx)))
             .on_action(cx.listener(|_, _: &Minimize, w, _| w.minimize_window()));
         if self.engine.is_none() {
-            let bar = TitleBar::new().h(px(self.scale().titlebar())).child(
-                h_flex()
-                    .gap_2()
-                    .child(super::brand::mark(px(16.), theme.foreground, super::brand::accent()))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(brand::NAME)),
-            );
+            // 제목 줄은 창 단추 자리만 둔다(브랜드는 시작 화면 가운데에 있다)
+            let bar = TitleBar::new().h(px(self.scale().titlebar()));
             return root.child(
                 v_flex()
                     .size_full()
@@ -3335,23 +3515,23 @@ impl Render for Workspace {
         let titlebar = TitleBar::new().h(px(sc.titlebar())).child(
             h_flex()
                 .size_full()
-                .gap_1()
+                .items_center()
+                .gap(px(sc.s8()))
                 .child(
                     Button::new("toggle-sidebar")
                         .with_size(px(sc.hit()))
                         .ghost()
-                        .icon(if self.show_sidebar {
-                            IconName::PanelLeftClose
-                        } else {
-                            IconName::PanelLeftOpen
-                        })
+                        .icon(
+                            Icon::new(IconName::PanelLeft)
+                                .size(px(sc.icon()))
+                                .text_color(theme.muted_foreground),
+                        )
                         .tooltip("사이드바 (⌘B)")
                         .on_click(cx.listener(|ws, _, _, cx| {
                             ws.show_sidebar = !ws.show_sidebar;
                             cx.notify();
                         })),
                 )
-                .child(super::brand::mark(px(16.), theme.foreground, super::brand::accent()))
                 .child(div().flex_1().min_w_0().h_full().child(tabs))
                 .child(actions),
         );
@@ -3376,6 +3556,8 @@ impl Render for Workspace {
                 )
                 .child(status),
         )
+        // 팔레트는 모든 것 위에 뜬다
+        .when_some(self.palette.clone(), |d, p| d.child(p))
     }
 }
 
@@ -3595,6 +3777,9 @@ mod tests {
                 w.tree.toggle_node("app-stg");
                 w.tree.set_catalog("app-stg", &cat);
                 w.tree.toggle_node("app-stg\u{1f}s:public");
+                // 둘째 줄(호스트)까지 재려고 켠다. 기본은 한 줄이다
+                w.prefs.sidebar_detail = true;
+                w.prefs.sidebar_width = 300.0;
             })
         });
         let n_rows = cx.update(|_, cx| ws.read(cx).tree.rows().len());

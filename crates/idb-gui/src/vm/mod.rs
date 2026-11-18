@@ -7,6 +7,7 @@ pub mod crashlog;
 pub mod dashboard;
 pub mod edits;
 pub mod export;
+pub mod finder;
 pub mod font;
 pub mod grid;
 pub mod history;

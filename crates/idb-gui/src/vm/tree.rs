@@ -160,6 +160,17 @@ impl ConnTree {
         self.conns.iter().position(|c| c.name == name)
     }
 
+    /// 이미 SCAN 으로 받은 Redis 키(접속, 키). 팔레트가 새로 찾지 않고 이것만 보인다
+    pub fn loaded_redis_keys(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .redis_keys
+            .iter()
+            .flat_map(|(c, ks)| ks.iter().map(move |k| (c.clone(), k.clone())))
+            .collect();
+        out.sort();
+        out
+    }
+
     /// 마디 읽기가 끝났다(읽었거나 실패). 읽기를 보낸 적 없으면 false 다.
     pub fn is_settled(&self, node: &str) -> bool {
         matches!(self.loads.get(node), Some(Load::Loaded(_) | Load::Failed(_)))

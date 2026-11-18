@@ -34,6 +34,8 @@ pub struct Grid {
     view: Vec<usize>,
     sort: Option<(usize, Dir)>,
     filter: String,
+    /// 열마다 숫자 열인지(만들 때 한 번 센다, 칸을 그릴 때마다 훑지 않게)
+    numeric: Vec<bool>,
 }
 
 impl Grid {
@@ -44,6 +46,7 @@ impl Grid {
             rows: rs.rows,
             ..Default::default()
         };
+        g.numeric = (0..g.cols.len()).map(|c| g.is_numeric(c)).collect();
         g.refresh();
         g
     }
@@ -66,6 +69,28 @@ impl Grid {
             .max()
             .unwrap_or(0);
         head.max(body).clamp(4, COL_MAX_CHARS)
+    }
+
+    /// 숫자 열이면 오른쪽 정렬한다. 타입이 있으면 타입으로, 없으면(저장소 결과) 앞 200행의 NULL 아닌 값이 모두 숫자일 때다.
+    pub fn numeric(&self, col: usize) -> bool {
+        self.numeric.get(col).copied().unwrap_or(false)
+    }
+
+    fn is_numeric(&self, col: usize) -> bool {
+        if let Some(t) = self.types.get(col).filter(|t| !t.is_empty()) {
+            let t = t.to_ascii_lowercase();
+            return ["int", "numeric", "float", "double", "real", "decimal", "serial", "money"]
+                .iter()
+                .any(|k| t.contains(k));
+        }
+        let mut vals = self
+            .rows
+            .iter()
+            .take(200)
+            .filter_map(|r| r.get(col))
+            .filter(|v| v.as_str() != NULL)
+            .peekable();
+        vals.peek().is_some() && vals.all(|v| !v.is_empty() && v.parse::<f64>().is_ok())
     }
 
     /// 다음 쪽(table_page)을 뒤에 붙인다. 거르기·정렬은 유지한다.
@@ -230,6 +255,28 @@ mod width_tests {
         assert_eq!(g.col_chars(1), 20, "이메일 전체");
         assert_eq!(g.col_chars(2), 7);
         assert_eq!(g.col_chars(3), 48, "긴 글은 자른다");
+    }
+
+    #[test]
+    fn 숫자_열은_타입이나_값으로_가른다() {
+        let g = Grid::new(ResultSet {
+            cols: vec!["id".into(), "email".into()],
+            types: Some(vec!["int8".into(), "text".into()]),
+            rows: vec![vec!["1".into(), "a".into()]],
+            ..Default::default()
+        });
+        assert!(g.numeric(0) && !g.numeric(1));
+        let s = Grid::new(ResultSet {
+            cols: vec!["amount".into(), "status".into(), "empty".into()],
+            rows: vec![
+                vec!["12.5".into(), "paid".into(), "NULL".into()],
+                vec!["NULL".into(), "1".into(), "NULL".into()],
+            ],
+            ..Default::default()
+        });
+        assert!(s.numeric(0), "타입 없이 값이 모두 숫자");
+        assert!(!s.numeric(1));
+        assert!(!s.numeric(2), "값이 없으면 글");
     }
 }
 

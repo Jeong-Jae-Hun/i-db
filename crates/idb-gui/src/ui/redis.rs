@@ -647,7 +647,13 @@ impl Render for RedisView {
         let theme = cx.theme().clone();
         let sc = super::kit::scale(&theme);
         let edit_bar = self.render_edit_bar(cx);
-        let mut list = v_flex().id("redis-keys").flex_1().min_h_0().overflow_y_scroll();
+        // 키는 데이터라 고정폭으로 둔다
+        let mut list = v_flex()
+            .id("redis-keys")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .font_family(theme.mono_font_family.clone());
         for (i, k) in self.keys.iter().enumerate() {
             let key = k.clone();
             let selected = self.selected.as_deref() == Some(k.as_str());

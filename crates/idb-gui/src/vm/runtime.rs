@@ -121,9 +121,12 @@ impl Runtime {
 pub struct Prefs {
     #[serde(default)]
     pub recent: Vec<Target>,
-    /// 화면 전체(글·편집기·결과 표) 글꼴. 없으면 넣어 둔 D2Coding 을 쓴다
-    #[serde(default = "default_font")]
+    /// 고정폭 글꼴(편집기·표 값·코드). 없으면 넣어 둔 D2Coding 을 쓴다. 옛 `font` 키도 이것으로 읽는다
+    #[serde(rename = "mono_font", alias = "font", default = "default_font")]
     pub font: String,
+    /// 화면(메뉴·목록·단추) 글꼴. `system` 이면 macOS 시스템 글꼴(SF Pro, 한글은 Apple SD Gothic Neo 로 이어진다)
+    #[serde(default = "default_ui_font")]
+    pub ui_font: String,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
     /// 화면 확대 배율(⌘= ⌘- ⌘0)
@@ -136,6 +139,12 @@ pub struct Prefs {
     pub row_limit: u64,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    /// 팔레트에서 고른 것의 자주 씀(R75.2). 명령·접속·테이블 열쇠만 싣고 값은 없다
+    #[serde(default)]
+    pub palette_uses: super::finder::Uses,
+    /// 접속 줄 아래 호스트 줄. 켜도 사이드바가 넓을 때만 보인다(평소엔 툴팁)
+    #[serde(default)]
+    pub sidebar_detail: bool,
     #[serde(default = "default_editor_height")]
     pub editor_height: f32,
     /// 테이블 보기 WHERE·ORDER BY 기록. 테이블마다 두고 prod 접속 것은 남기지 않는다(R75.5).
@@ -170,6 +179,10 @@ fn default_font() -> String {
     super::font::DEFAULT_FONT.into()
 }
 
+fn default_ui_font() -> String {
+    super::font::SYSTEM_UI.into()
+}
+
 fn default_font_size() -> f32 {
     super::font::DEFAULT_SIZE
 }
@@ -184,6 +197,9 @@ impl Default for Prefs {
             theme: Default::default(),
             row_limit: default_row_limit(),
             sidebar_width: default_sidebar_width(),
+            ui_font: default_ui_font(),
+            sidebar_detail: false,
+            palette_uses: Default::default(),
             editor_height: default_editor_height(),
             table_history: Default::default(),
             layout: LAYOUT_VERSION,
@@ -304,6 +320,17 @@ mod tests {
             (p.zoom, p.row_limit, p.theme),
             (1.0, 500, super::super::settings::ThemePref::System)
         );
+    }
+
+    #[test]
+    fn 옛_font_키는_고정폭_글꼴로_읽고_화면_글꼴은_시스템이_기본이다() {
+        let old: Prefs = serde_json::from_str(r#"{"font": "JetBrains Mono"}"#).unwrap();
+        assert_eq!(old.font, "JetBrains Mono");
+        assert_eq!(old.ui_font, "system");
+        let new: Prefs = serde_json::from_str(r#"{"mono_font": "D2Coding", "ui_font": "Pretendard"}"#).unwrap();
+        assert_eq!((new.font.as_str(), new.ui_font.as_str()), ("D2Coding", "Pretendard"));
+        let json = serde_json::to_value(&new).unwrap();
+        assert!(json.get("mono_font").is_some() && json.get("font").is_none(), "새 키로 쓴다");
     }
 
     #[test]
