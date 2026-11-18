@@ -32,10 +32,11 @@ pub enum Scene {
     Settings,
     Shortcuts,
     Confirm,
+    Files,
 }
 
 impl Scene {
-    pub const ALL: [Scene; 11] = [
+    pub const ALL: [Scene; 12] = [
         Scene::Picker,
         Scene::Tree,
         Scene::Sql,
@@ -47,6 +48,7 @@ impl Scene {
         Scene::Settings,
         Scene::Shortcuts,
         Scene::Confirm,
+        Scene::Files,
     ];
 
     pub fn name(self) -> &'static str {
@@ -62,6 +64,7 @@ impl Scene {
             Scene::Settings => "settings",
             Scene::Shortcuts => "shortcuts",
             Scene::Confirm => "confirm",
+            Scene::Files => "files",
         }
     }
 }
@@ -139,6 +142,64 @@ pub fn parse_script(text: &str) -> Result<Vec<Shot>, String> {
 }
 
 pub const ENV_DISPLAY: &str = "IDB_GUI_SNAPSHOT_DISPLAY";
+/// 가짜 serve 대신 이 원격(remote.json 이름)에 실제로 붙어 찍는다. stg·local 접속만 쓰고 읽기만 한다
+pub const ENV_REMOTE: &str = "IDB_GUI_SNAPSHOT_REMOTE";
+/// 실제 원격 Redis 에서 처음 찾을 좁은 패턴
+pub const ENV_REDIS_PATTERN: &str = "IDB_GUI_SNAPSHOT_REDIS_PATTERN";
+/// 실제 원격에 쓰는 시험 쿼리 파일. 찍은 뒤 지운다(엔진에 지우기 op 가 없어 serve 쪽에서 지운다)
+pub const REAL_QUERY_FILE: &str = "queries/_snapshot_test/snapshot.sql";
+
+/// 실제 원격에서 찍을 접속이다. prod 는 고르지 않는다.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RealPick {
+    pub pg: Option<String>,
+    pub redis: Option<String>,
+    pub search: Option<String>,
+    pub logs: Option<String>,
+}
+
+pub fn pick_real(conns: &[ConnSummary]) -> RealPick {
+    let safe = |c: &&ConnSummary| c.env == "stg" || c.env == "local";
+    let first = |kind: &str| {
+        // stg 를 먼저, 없으면 local
+        let of = |env: &str| {
+            conns
+                .iter()
+                .filter(safe)
+                .find(|c| c.kind == kind && c.env == env)
+                .map(|c| c.name.clone())
+        };
+        of("stg").or_else(|| of("local"))
+    };
+    RealPick {
+        pg: first("postgresql"),
+        redis: first("redis"),
+        search: first("opensearch"),
+        logs: first("loki"),
+    }
+}
+
+/// 실제 원격 기본 장면: prod 를 건드리는 대시보드(흐름 prod 확인)·확인 창은 뺀다.
+pub fn real_shots() -> Vec<Shot> {
+    [
+        Scene::Picker,
+        Scene::Tree,
+        Scene::Sql,
+        Scene::Table,
+        Scene::Files,
+        Scene::Redis,
+        Scene::Search,
+        Scene::Logs,
+        Scene::Settings,
+    ]
+    .into_iter()
+    .map(|scene| Shot {
+        scene,
+        dark: true,
+        zoom: 1.0,
+    })
+    .collect()
+}
 
 /// 찍을 화면을 고른다. 정한 번호가 있으면 그것, 없으면 주 화면(메뉴 막대)이 아닌 첫 화면, 하나뿐이면 주 화면이다.
 /// 사용자가 쓰는 주 화면을 가리지 않으려는 것이다.
@@ -719,6 +780,27 @@ mod tests {
         }))
         .unwrap_err();
         assert_eq!(e.reason.as_deref(), Some("confirm_prod"));
+    }
+
+    #[test]
+    fn 실제_원격은_prod_를_고르지_않고_stg_를_먼저_고른다() {
+        let c = |n: &str, k: &str, e: &str| ConnSummary {
+            name: n.into(),
+            kind: k.into(),
+            env: e.into(),
+            ..Default::default()
+        };
+        let p = pick_real(&[
+            c("a-prod", "postgresql", "prod"),
+            c("a-local", "postgresql", "local"),
+            c("a-stg", "postgresql", "stg"),
+            c("r-prod", "redis", "prod"),
+            c("s-local", "opensearch", "local"),
+        ]);
+        assert_eq!(p.pg.as_deref(), Some("a-stg"));
+        assert_eq!(p.redis, None, "prod 뿐이면 고르지 않는다");
+        assert_eq!(p.search.as_deref(), Some("s-local"));
+        assert!(real_shots().iter().all(|s| !matches!(s.scene, Scene::Dashboard | Scene::Confirm)));
     }
 
     #[test]

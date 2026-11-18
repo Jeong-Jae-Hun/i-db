@@ -153,8 +153,10 @@ pub struct Workspace {
     connecting: bool,
     // ─── 접속 뒤 ───
     pub(super) engine: Option<Engine>,
+    /// Redis 탭을 열 때 처음 찾을 패턴(실제 원격을 찍는 사진 모드는 좁힌다)
+    pub(super) redis_pattern: String,
     target: Option<Target>,
-    tree: ConnTree,
+    pub(super) tree: ConnTree,
     tree_filter: Entity<InputState>,
     tabs: Tabs,
     bodies: HashMap<u64, Body>,
@@ -281,6 +283,7 @@ impl Workspace {
             remotes: crate::vm::runtime::remote_names(),
             connecting: false,
             engine: None,
+            redis_pattern: "*".into(),
             target: None,
             tree: ConnTree::default(),
             tree_filter,
@@ -618,7 +621,8 @@ impl Workspace {
                 let id = self.tabs.open_named(Some(name.clone()), name.clone());
                 let (rt, engine, ws) = (self.rt.clone(), self.engine.clone(), cx.entity().downgrade());
                 let Some(engine) = engine else { return };
-                let view = cx.new(|cx| RedisView::new(ws, rt, engine, name.clone(), window, cx));
+                let pattern = self.redis_pattern.clone();
+                let view = cx.new(|cx| RedisView::new(ws, rt, engine, name.clone(), &pattern, window, cx));
                 self.bodies.insert(id, Body::Redis { view });
                 self.refresh_conn_state(&name, window, cx);
             }
@@ -1262,6 +1266,18 @@ impl Workspace {
                 result: None,
             },
         );
+    }
+
+    pub(super) fn status_text(&self) -> String {
+        self.status.0.clone()
+    }
+
+    pub(super) fn has_query(&self, rel: &str) -> bool {
+        self.queries.as_ref().is_some_and(|q| q.iter().any(|f| f.rel == rel))
+    }
+
+    pub(super) fn is_busy(&self) -> bool {
+        self.busy.is_some()
     }
 
     /// 고른 SQL 탭의 편집기 글을 바꾼다(화면 사진 모드).

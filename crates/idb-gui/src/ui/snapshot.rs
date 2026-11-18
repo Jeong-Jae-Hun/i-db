@@ -11,21 +11,47 @@ use gpui_component::WindowExt as _;
 use super::workspace::Workspace;
 use crate::vm::runtime::Target;
 use crate::vm::settings::ThemePref;
-use crate::vm::snapshot::{REMOTE, Scene, Shot};
+use crate::vm::snapshot::{REAL_QUERY_FILE, REMOTE, Scene, Shot, pick_real};
 use crate::vm::tree::child_id;
 
+/// 찍을 접속 이름들이다. 가짜 serve 는 정해 둔 이름, 실제 원격은 붙은 뒤 stg·local 에서 고른다.
+#[derive(Clone, Debug, Default)]
+struct Names {
+    pg: Option<String>,
+    prod: Option<String>,
+    redis: Option<String>,
+    search: Option<String>,
+    logs: Option<String>,
+}
+
+fn fake_names() -> Names {
+    let s = |n: &str| Some(n.to_string());
+    Names {
+        pg: s("app-stg"),
+        prod: s("app-prod"),
+        redis: s("cache-stg"),
+        search: s("search-stg"),
+        logs: s("logs"),
+    }
+}
+
 /// 장면을 차례로 찍고 끝낸다. 실패해도 다음 장면으로 가고, 끝에 앱을 닫는다.
-pub fn start(handle: AnyWindowHandle, ws: Entity<Workspace>, dir: PathBuf, shots: Vec<Shot>, cx: &mut App) {
+/// real 이 있으면 가짜 serve 대신 그 원격에 실제로 붙는다(stg·local 만, 읽기만).
+pub fn start(handle: AnyWindowHandle, ws: Entity<Workspace>, dir: PathBuf, shots: Vec<Shot>, real: Option<String>, cx: &mut App) {
     // 다른 창에 가리면 GPUI 가 그리기를 멈춘다(가림 상태). ssh 로 띄우면 앞으로 오지 못하니 떠 있는 창으로 둔다
     let _ = handle.update(cx, |_, window, _| float_window(window));
     cx.spawn(async move |cx| {
         let _ = std::fs::create_dir_all(&dir);
         for (i, shot) in shots.iter().enumerate() {
             let file = dir.join(shot.file_name(i + 1));
-            if let Err(e) = run_shot(cx, handle, &ws, shot, &file).await {
-                eprintln!("snapshot {}: {e}", file.display());
-            } else {
-                eprintln!("snapshot {}", file.display());
+            let started = std::time::Instant::now();
+            match run_shot(cx, handle, &ws, shot, real.as_deref(), &file).await {
+                Err(e) => eprintln!("snapshot {}: {e}", file.display()),
+                Ok(()) => eprintln!("snapshot {} ({}ms)", file.display(), started.elapsed().as_millis()),
+            }
+            let status = ws.read_with(cx, |w, _| w.status_text());
+            if !status.is_empty() {
+                eprintln!("  status: {status}");
             }
         }
         cx.update(|cx| cx.quit());
@@ -35,6 +61,18 @@ pub fn start(handle: AnyWindowHandle, ws: Entity<Workspace>, dir: PathBuf, shots
 
 async fn sleep(cx: &mut AsyncApp, ms: u64) {
     cx.background_executor().timer(Duration::from_millis(ms)).await;
+}
+
+/// pred 가 맞을 때까지 기다린다. 시간 안에 안 되면 false.
+async fn wait_for(cx: &mut AsyncApp, ws: &Entity<Workspace>, ms: u64, pred: impl Fn(&Workspace) -> bool) -> bool {
+    let steps = ms / 50;
+    for _ in 0..steps {
+        if ws.read_with(cx, |w, _| pred(w)) {
+            return true;
+        }
+        sleep(cx, 50).await;
+    }
+    false
 }
 
 fn on_ws(
@@ -47,7 +85,17 @@ fn on_ws(
     let _ = handle.update(cx, |_, window, cx| ws.update(cx, |w, cx| f(w, window, cx)));
 }
 
-async fn run_shot(cx: &mut AsyncApp, handle: AnyWindowHandle, ws: &Entity<Workspace>, shot: &Shot, file: &Path) -> Result<(), String> {
+async fn run_shot(
+    cx: &mut AsyncApp,
+    handle: AnyWindowHandle,
+    ws: &Entity<Workspace>,
+    shot: &Shot,
+    real: Option<&str>,
+    file: &Path,
+) -> Result<(), String> {
+    if real.is_some() && matches!(shot.scene, Scene::Dashboard | Scene::Confirm) {
+        return Err("실제 원격에서는 prod 를 건드리는 장면(대시보드·확인 창)을 찍지 않는다".into());
+    }
     let (dark, zoom) = (shot.dark, shot.zoom);
     on_ws(cx, handle, ws, move |w, window, cx| {
         window.close_all_dialogs(cx);
@@ -58,100 +106,172 @@ async fn run_shot(cx: &mut AsyncApp, handle: AnyWindowHandle, ws: &Entity<Worksp
         super::apply_look(&w.prefs, &w.font, window, cx);
     });
     sleep(cx, 300).await;
+    let mut names = fake_names();
     if shot.scene != Scene::Picker {
-        on_ws(cx, handle, ws, |w, window, cx| {
-            w.open_target(Target::Remote(REMOTE.into()), window, cx)
-        });
-        let mut ok = false;
-        for _ in 0..100 {
-            sleep(cx, 50).await;
-            if ws.read_with(cx, |w, _| w.engine.is_some()) {
-                ok = true;
-                break;
-            }
+        let target = Target::Remote(real.unwrap_or(REMOTE).to_string());
+        on_ws(cx, handle, ws, |w, window, cx| w.open_target(target, window, cx));
+        // 실제 원격은 ssh·VPN 을 거쳐 늦다
+        if !wait_for(cx, ws, if real.is_some() { 30_000 } else { 5_000 }, |w| w.engine.is_some()).await {
+            return Err(format!("원격에 붙지 못함: {}", ws.read_with(cx, |w, _| w.status_text())));
         }
-        if !ok {
-            return Err("가짜 serve 에 붙지 못함".into());
+        if real.is_some() {
+            // 실제 원격에서는 첫 실행 저장·자동 저장으로 사용자 queries/ 에 파일을 만들지 않는다
+            on_ws(cx, handle, ws, |w, _, _| w.autosave_on = false);
+            let p = ws.read_with(cx, |w, _| pick_real(&w.tree.conns));
+            names = Names {
+                pg: p.pg,
+                prod: None,
+                redis: p.redis,
+                search: p.search,
+                logs: p.logs,
+            };
         }
     }
+    let limit = if real.is_some() { 20_000 } else { 3_000 };
     let expand = |cx: &mut AsyncApp, node: String| on_ws(cx, handle, ws, move |w, window, cx| w.tree_toggle(node, window, cx));
+    let need = |n: &Option<String>, what: &str| n.clone().ok_or_else(|| format!("찍을 {what} 접속이 없다(stg·local)"));
     match shot.scene {
         Scene::Picker => {}
         Scene::Tree => {
-            expand(cx, "app-stg".into());
-            sleep(cx, 400).await;
-            expand(cx, child_id("app-stg", "s", "public"));
-            expand(cx, "cache-stg".into());
-            sleep(cx, 400).await;
-            expand(cx, child_id("cache-stg", "r", "user"));
+            let pg = need(&names.pg, "PostgreSQL")?;
+            expand(cx, pg.clone());
+            let node = pg.clone();
+            wait_for(cx, ws, limit, move |w| w.tree.is_settled(&node)).await;
+            expand(cx, child_id(&pg, "s", "public"));
+            // 실제 원격의 Redis 트리는 전체 SCAN 이라 펼치지 않는다
+            if real.is_none() {
+                let r = need(&names.redis, "Redis")?;
+                expand(cx, r.clone());
+                let node = r.clone();
+                wait_for(cx, ws, limit, move |w| w.tree.is_settled(&node)).await;
+                expand(cx, child_id(&r, "r", "user"));
+            }
         }
-        Scene::Sql | Scene::Confirm => {
-            let (conn, sql) = if shot.scene == Scene::Sql {
-                (
-                    "app-stg",
+        Scene::Sql | Scene::Confirm | Scene::Table if real.is_some() || shot.scene != Scene::Table => {
+            let (conn, sql) = match (shot.scene, real.is_some()) {
+                (Scene::Confirm, _) => (need(&names.prod, "prod")?, "update users\nset status = 'active'\nwhere id = 1001;"),
+                (Scene::Sql, true) => (
+                    need(&names.pg, "PostgreSQL")?,
+                    "select now() as now, current_database() as db, current_user as role, version() as version;",
+                ),
+                (Scene::Table, true) => (
+                    need(&names.pg, "PostgreSQL")?,
+                    "select table_schema, count(*) as tables\nfrom information_schema.tables\ngroup by 1\norder by 1;",
+                ),
+                _ => (
+                    need(&names.pg, "PostgreSQL")?,
                     "select id, email, name, status, created_at, last_login_at, deleted_at\nfrom users\nwhere status <> 'banned'\norder by id\nlimit 200;",
-                )
-            } else {
-                ("app-prod", "update users\nset status = 'active'\nwhere id = 1001;")
+                ),
             };
-            expand(cx, conn.into());
-            sleep(cx, 300).await;
+            expand(cx, conn.clone());
             on_ws(cx, handle, ws, move |w, window, cx| {
-                w.new_tab(Some(conn.into()), window, cx);
+                w.new_tab(Some(conn), window, cx);
                 w.close_tab(0, cx);
                 w.set_active_sql(sql, window, cx);
                 w.run_query(false, window, cx);
             });
+            sleep(cx, 200).await;
+            wait_for(cx, ws, limit, |w| !w.is_busy()).await;
         }
-        Scene::Table => {
-            expand(cx, "app-stg".into());
-            sleep(cx, 300).await;
-            expand(cx, child_id("app-stg", "s", "public"));
-            on_ws(cx, handle, ws, |w, window, cx| {
-                w.open_table("app-stg".into(), "public".into(), "users".into(), window, cx);
+        Scene::Table | Scene::Sql | Scene::Confirm => {
+            let pg = need(&names.pg, "PostgreSQL")?;
+            expand(cx, pg.clone());
+            let node = pg.clone();
+            wait_for(cx, ws, limit, move |w| w.tree.is_settled(&node)).await;
+            expand(cx, child_id(&pg, "s", "public"));
+            on_ws(cx, handle, ws, move |w, window, cx| {
+                w.open_table(pg, "public".into(), "users".into(), window, cx);
                 w.close_tab(0, cx);
             });
+        }
+        Scene::Files => {
+            let rel = if real.is_some() {
+                // 실제 원격은 시험 폴더에만 쓴다(찍은 뒤 serve 쪽에서 지운다)
+                let engine = ws.read_with(cx, |w, _| w.engine.clone()).ok_or("엔진 없음")?;
+                let rt = ws.read_with(cx, |w, _| w.rt.clone());
+                let job = rt.spawn(async move {
+                    crate::vm::queries::write(
+                        &engine,
+                        REAL_QUERY_FILE,
+                        "-- i-db 화면 사진 시험 파일(지워도 된다)\nselect 1;\n",
+                        None,
+                        true,
+                    )
+                    .await
+                });
+                job.rx.await.map_err(|_| "멈춤".to_string())??;
+                REAL_QUERY_FILE.to_string()
+            } else {
+                "queries/app/daily-orders.sql".to_string()
+            };
+            on_ws(cx, handle, ws, |w, _, cx| w.refresh_queries(cx));
+            let r2 = rel.clone();
+            wait_for(cx, ws, limit, move |w| w.has_query(&r2)).await;
+            on_ws(cx, handle, ws, move |w, window, cx| w.open_query(rel, window, cx));
+            sleep(cx, 300).await;
+            on_ws(cx, handle, ws, |w, _, cx| w.close_tab(0, cx));
         }
         Scene::Redis => {
-            expand(cx, "cache-stg".into());
-            sleep(cx, 300).await;
-            on_ws(cx, handle, ws, |w, window, cx| {
-                w.open_redis_key("cache-stg".into(), "user:1002:profile".into(), window, cx);
-                w.close_tab(0, cx);
-            });
+            let r = need(&names.redis, "Redis")?;
+            if real.is_some() {
+                let pat = std::env::var(crate::vm::snapshot::ENV_REDIS_PATTERN).unwrap_or_else(|_| "config*".into());
+                on_ws(cx, handle, ws, move |w, window, cx| {
+                    w.redis_pattern = pat;
+                    w.select_conn(r, window, cx);
+                    w.close_tab(0, cx);
+                });
+                sleep(cx, 300).await;
+                wait_for(cx, ws, limit, |w| !w.is_busy()).await;
+            } else {
+                expand(cx, r.clone());
+                on_ws(cx, handle, ws, move |w, window, cx| {
+                    w.open_redis_key(r, "user:1002:profile".into(), window, cx);
+                    w.close_tab(0, cx);
+                });
+            }
         }
         Scene::Search | Scene::Logs => {
             let (conn, path) = if shot.scene == Scene::Search {
-                ("search-stg", "orders-2026.11")
+                (need(&names.search, "OpenSearch")?, "orders-2026.11")
             } else {
-                ("logs", "app/api")
+                (need(&names.logs, "Loki")?, "app/api")
             };
-            expand(cx, conn.into());
-            sleep(cx, 300).await;
+            expand(cx, conn.clone());
+            let node = conn.clone();
+            wait_for(cx, ws, limit, move |w| w.tree.is_settled(&node)).await;
+            let real_mode = real.is_some();
             on_ws(cx, handle, ws, move |w, window, cx| {
-                w.open_source_path(conn.into(), path.into(), window, cx);
+                // 실제 원격은 목록(인덱스·라벨)만 보고 내용은 열지 않는다
+                if real_mode {
+                    w.select_conn(conn, window, cx);
+                } else {
+                    w.open_source_path(conn, path.into(), window, cx);
+                }
                 w.close_tab(0, cx);
             });
+            sleep(cx, 300).await;
+            wait_for(cx, ws, limit, |w| !w.is_busy()).await;
         }
         Scene::Dashboard => on_ws(cx, handle, ws, |w, window, cx| {
             w.open_dashboard(window, cx);
             w.close_tab(0, cx);
         }),
         Scene::Settings => {
-            expand(cx, "app-stg".into());
+            if let Some(pg) = names.pg.clone() {
+                expand(cx, pg);
+            }
             on_ws(cx, handle, ws, super::dialogs::open_settings);
         }
         Scene::Shortcuts => {
-            expand(cx, "app-stg".into());
+            if let Some(pg) = names.pg.clone() {
+                expand(cx, pg);
+            }
             on_ws(cx, handle, ws, |_, window, cx| super::dialogs::open_shortcuts(window, cx));
         }
     }
     // 답·애니메이션이 끝날 때까지 기다린 뒤 한 번 더 그린다
     sleep(cx, 1500).await;
-    on_ws(cx, handle, ws, |w, window, cx| {
-        w.set_status("", false, cx);
-        window.refresh();
-    });
+    on_ws(cx, handle, ws, |_, window, _| window.refresh());
     sleep(cx, 400).await;
     let file = file.to_path_buf();
     handle

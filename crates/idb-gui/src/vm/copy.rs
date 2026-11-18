@@ -9,3 +9,4 @@ pub const EMPTY_NO_CONN: (&str, &str) = ("접속을 고른다", "왼쪽 목록�
 pub const EMPTY_READY: (&str, &str) = ("⌘↵ 로 실행한다", "커서가 든 문장(선택이 있으면 선택)을 실행한다 · ⇧⌘↵ 모두 실행");
 pub const EMPTY_ROWS: &str = "행이 없다";
 pub const EMPTY_FILTER: &str = "맞는 행이 없다";
+pub const EMPTY_KEYS: &str = "맞는 키가 없다 · 패턴을 바꿔 다시 찾는다";

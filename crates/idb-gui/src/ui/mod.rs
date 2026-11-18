@@ -248,6 +248,7 @@ pub fn run() {
     let snap = std::env::var_os(crate::vm::snapshot::ENV_DIR).map(std::path::PathBuf::from);
     let shots = match (&snap, std::env::var_os(crate::vm::snapshot::ENV_SCRIPT).filter(|s| !s.is_empty())) {
         (None, _) => Vec::new(),
+        (Some(_), None) if std::env::var_os(crate::vm::snapshot::ENV_REMOTE).is_some() => crate::vm::snapshot::real_shots(),
         (Some(_), None) => crate::vm::snapshot::default_shots(),
         (Some(_), Some(f)) => match std::fs::read_to_string(&f)
             .map_err(|e| e.to_string())
@@ -261,7 +262,12 @@ pub fn run() {
         },
     };
     let initial = if snap.is_some() { None } else { initial };
-    if snap.is_some() {
+    // 실제 원격을 찍을 때는 remote.json 의 그 원격에 붙는다(가짜 serve 를 띄우지 않는다)
+    let real = snap
+        .as_ref()
+        .and_then(|_| std::env::var(crate::vm::snapshot::ENV_REMOTE).ok())
+        .filter(|r| !r.is_empty());
+    if snap.is_some() && real.is_none() {
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
         // SAFETY: 런타임·창 스레드를 띄우기 전, 아직 스레드가 하나일 때 바꾼다
         unsafe {
@@ -349,7 +355,7 @@ pub fn run() {
             }
             Ok(handle) => {
                 if let (Some(dir), Some(ws)) = (snap.clone(), made.borrow_mut().take()) {
-                    snapshot::start(handle.into(), ws, dir, shots.clone(), cx);
+                    snapshot::start(handle.into(), ws, dir, shots.clone(), real.clone(), cx);
                 }
             }
         }

@@ -160,6 +160,11 @@ impl ConnTree {
         self.conns.iter().position(|c| c.name == name)
     }
 
+    /// 마디 읽기가 끝났다(읽었거나 실패). 읽기를 보낸 적 없으면 false 다.
+    pub fn is_settled(&self, node: &str) -> bool {
+        matches!(self.loads.get(node), Some(Load::Loaded(_) | Load::Failed(_)))
+    }
+
     pub fn is_expanded(&self, node: &str) -> bool {
         self.expanded.contains(node)
     }
