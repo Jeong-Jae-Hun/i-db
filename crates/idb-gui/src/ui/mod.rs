@@ -7,6 +7,7 @@ mod dialogs;
 mod kit;
 mod redis;
 mod results;
+mod snapshot;
 mod source;
 mod sql_completion;
 mod workspace;
@@ -229,6 +230,10 @@ fn apply_look(prefs: &Prefs, font: &FontChoice, window: &mut Window, cx: &mut Ap
 }
 
 pub fn run() {
+    if std::env::args().nth(1).as_deref() == Some(crate::vm::snapshot::SERVE_ARG) {
+        crate::vm::snapshot::serve_stdio();
+        return;
+    }
     crate::vm::crashlog::install();
     // AppKit 이 Touch Bar 관찰을 풀다 죽는 버그를 피한다(appkit_guard 머리 주석의 업스트림 이슈)
     appkit_guard::install(crate::vm::crashlog::log_path());
@@ -239,6 +244,33 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    // 화면 사진 모드(개발용): 가짜 serve 를 원격으로 띄워 정해 둔 장면을 찍고 끝낸다
+    let snap = std::env::var_os(crate::vm::snapshot::ENV_DIR).map(std::path::PathBuf::from);
+    let shots = match (&snap, std::env::var_os(crate::vm::snapshot::ENV_SCRIPT).filter(|s| !s.is_empty())) {
+        (None, _) => Vec::new(),
+        (Some(_), None) => crate::vm::snapshot::default_shots(),
+        (Some(_), Some(f)) => match std::fs::read_to_string(&f)
+            .map_err(|e| e.to_string())
+            .and_then(|t| crate::vm::snapshot::parse_script(&t))
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("i-db: {e}");
+                std::process::exit(2);
+            }
+        },
+    };
+    let initial = if snap.is_some() { None } else { initial };
+    if snap.is_some() {
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+        // SAFETY: 런타임·창 스레드를 띄우기 전, 아직 스레드가 하나일 때 바꾼다
+        unsafe {
+            std::env::set_var(
+                idb_engine::remote::REMOTE_CMD_ENV,
+                format!("{exe} {}", crate::vm::snapshot::SERVE_ARG),
+            )
+        };
+    }
     let rt = match Runtime::new() {
         Ok(rt) => Rc::new(rt),
         Err(e) => {
@@ -261,8 +293,21 @@ pub fn run() {
             }
         })
         .detach();
+        // 사진 모드는 주 화면이 아닌 화면에 띄우고 초점을 뺏지 않는다
+        let display = snap.as_ref().and_then(|_| {
+            let displays = cx.displays();
+            let primary = cx.primary_display().map(|p| p.id());
+            let pi = displays.iter().position(|d| Some(d.id()) == primary).unwrap_or(0);
+            let chosen = std::env::var(crate::vm::snapshot::ENV_DISPLAY).ok().and_then(|v| v.parse().ok());
+            let i = crate::vm::snapshot::pick_display(displays.len(), pi, chosen);
+            let d = displays.get(i)?;
+            eprintln!("snapshot display {i}/{} {:?}", displays.len(), d.bounds());
+            Some(d.id())
+        });
         let opts = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1320.), px(860.)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(display, size(px(1320.), px(860.)), cx))),
+            display_id: display,
+            focus: snap.is_none(),
             // 제목 줄을 투명하게 두고 탭·단추를 그 안에 그린다(Orca). 신호등은 그 위에 앉는다
             titlebar: Some(TitlebarOptions {
                 title: Some(crate::vm::brand::NAME.into()),
@@ -271,23 +316,46 @@ pub fn run() {
             ..Default::default()
         };
         let rt = rt.clone();
+        let made: Rc<std::cell::RefCell<Option<gpui::Entity<Workspace>>>> = Default::default();
+        let made2 = made.clone();
+        let snapping = snap.is_some();
         let opened = cx.open_window(opts, move |window, cx| {
             apply_look(&prefs, &font, window, cx);
             appkit_guard::quiet_window_touch_bar(window);
             let ws = cx.new(|cx| {
                 let mut ws = Workspace::new(rt, font, window, cx);
+                if snapping {
+                    // 사진 모드는 사용자 설정을 읽지도 쓰지도 않는다. 고르는 화면에 보일 최근 항목만 둔다
+                    ws.prefs_path = None;
+                    ws.prefs = Prefs::default();
+                    ws.prefs.recent = vec![
+                        Target::Remote("devbox".into()),
+                        Target::Local("~/Projects/shop".into()),
+                        Target::Local("~/Projects/billing".into()),
+                    ];
+                }
                 if let Some(t) = initial {
                     ws.open_target(t, window, cx);
                 }
                 ws
             });
+            *made2.borrow_mut() = Some(ws.clone());
             cx.new(|cx| Root::new(ws, window, cx))
         });
-        if let Err(e) = opened {
-            eprintln!("i-db: {e}");
-            cx.quit();
+        match opened {
+            Err(e) => {
+                eprintln!("i-db: {e}");
+                cx.quit();
+            }
+            Ok(handle) => {
+                if let (Some(dir), Some(ws)) = (snap.clone(), made.borrow_mut().take()) {
+                    snapshot::start(handle.into(), ws, dir, shots.clone(), cx);
+                }
+            }
         }
-        cx.activate(true);
+        if snap.is_none() {
+            cx.activate(true);
+        }
     });
 }
 

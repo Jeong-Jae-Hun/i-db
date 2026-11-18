@@ -18,6 +18,7 @@ pub mod redisedit;
 pub mod runtime;
 pub mod safety;
 pub mod settings;
+pub mod snapshot;
 pub mod source;
 pub mod sqlcopy;
 pub mod tabs;

@@ -104,7 +104,7 @@ pub struct Workspace {
     focus: FocusHandle,
     pub(super) prefs: Prefs,
     /// 설정 파일 자리. 시험은 None 으로 두어 사용자 gui.json 을 건드리지 않는다
-    prefs_path: Option<PathBuf>,
+    pub(super) prefs_path: Option<PathBuf>,
     /// 설정·설치 여부로 정한 글꼴(확대 전 크기)
     pub(super) font: FontChoice,
     pub(super) show_sidebar: bool,
@@ -152,7 +152,7 @@ pub struct Workspace {
     remotes: Result<Vec<String>, String>,
     connecting: bool,
     // ─── 접속 뒤 ───
-    engine: Option<Engine>,
+    pub(super) engine: Option<Engine>,
     target: Option<Target>,
     tree: ConnTree,
     tree_filter: Entity<InputState>,
@@ -309,7 +309,7 @@ impl Workspace {
 
     // ─── 확대·보기 ───
 
-    fn set_zoom(&mut self, z: f32, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_zoom(&mut self, z: f32, window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.zoom = zoom::normalize(z);
         self.save_prefs();
         super::apply_look(&self.prefs, &self.font, window, cx);
@@ -545,7 +545,7 @@ impl Workspace {
         );
     }
 
-    fn disconnect(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn disconnect(&mut self, cx: &mut Context<Self>) {
         // 닫기 전에 저장을 보내고, 엔진은 그 쓰기가 끝난 뒤(20초까지) 닫는다
         self.flush_saves(cx);
         self.session += 1;
@@ -587,7 +587,7 @@ impl Workspace {
     }
 
     /// 트리에서 접속을 누르면 지금 탭의 접속으로 삼는다. Redis 면 Redis 탭을 연다.
-    fn select_conn(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_conn(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(c) = self.conn(&name).cloned() else { return };
         match c.kind.as_str() {
             "postgresql" => {
@@ -1039,7 +1039,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_redis_key(&mut self, conn: String, key: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_redis_key(&mut self, conn: String, key: String, window: &mut Window, cx: &mut Context<Self>) {
         self.select_conn(conn.clone(), window, cx);
         if let Some(Body::Redis { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
             let view = view.clone();
@@ -1047,7 +1047,7 @@ impl Workspace {
         }
     }
 
-    fn open_source_path(&mut self, conn: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_source_path(&mut self, conn: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.select_conn(conn, window, cx);
         if let Some(Body::Source { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
             let view = view.clone();
@@ -1223,7 +1223,7 @@ impl Workspace {
 
     // ─── 탭 ───
 
-    fn new_tab(&mut self, conn: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_tab(&mut self, conn: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let conn = conn.or_else(|| self.active_conn());
         let id = self.tabs.open(conn, None);
         self.insert_sql_body(id, String::new(), window, cx);
@@ -1262,7 +1262,15 @@ impl Workspace {
         );
     }
 
-    fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+    /// 고른 SQL 탭의 편집기 글을 바꾼다(화면 사진 모드).
+    pub(super) fn set_active_sql(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Body::Sql { editor, .. }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
+            let text = text.to_string();
+            editor.update(cx, |e, cx| e.set_value(text, window, cx));
+        }
+    }
+
+    pub(super) fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         // 닫기 전에 자동 저장하고(R45.2), 덮을 수 없는 글은 충돌 사본에 남긴다(R45.3)
         if let Some(id) = self.tabs.tabs.get(i).map(|t| t.id) {
             self.autosave(id, cx);
@@ -1750,7 +1758,7 @@ impl Workspace {
         false
     }
 
-    fn open_table(&mut self, conn: String, schema: String, table: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_table(&mut self, conn: String, schema: String, table: String, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.tabs.open_named(Some(conn.clone()), format!("{schema}.{table}"));
         self.bodies.insert(id, Body::Table { result: None });
         self.load_source(
@@ -1779,7 +1787,7 @@ impl Workspace {
         Some((t.conn.clone()?, sql))
     }
 
-    fn run_query(&mut self, explain: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run_query(&mut self, explain: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Body::Redis { view }) = self.tabs.active().and_then(|t| self.bodies.get(&t.id)) {
             // RedisView 가 작업 공간을 다시 빌리므로 지금 대여가 끝난 뒤에 부른다
             let view = view.clone();

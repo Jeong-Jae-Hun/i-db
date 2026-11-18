@@ -122,7 +122,7 @@ pub struct ConnTree {
     remembered: BTreeSet<String>,
 }
 
-fn child_id(parent: &str, tag: &str, path: &str) -> String {
+pub fn child_id(parent: &str, tag: &str, path: &str) -> String {
     format!("{parent}\u{1f}{tag}:{path}")
 }
 
