@@ -301,26 +301,34 @@ fn 수_결과의_합계_줄과_NULL_종류를_읽는다() {
 
 #[test]
 fn 종류별_오래됨_기준은_리터럴을_감싼_CASE_이고_없으면_기본_5분이다() {
-    let tc = |stale: Option<i64>| TypeConf {
-        stale,
-        ..Default::default()
-    };
     let o = Outbox {
         table: "t".into(),
         kind: "event_type".into(),
         retry: "retry_count".into(),
         due: "check_needed_at".into(),
         types: BTreeMap::from([
-            ("BILLING_KEY_DELETED".to_string(), tc(Some(70))),
-            ("O'BRIEN".to_string(), tc(Some(10))),
-            ("CLIP".to_string(), tc(None)),
+            (
+                "BILLING_KEY_DELETED".to_string(),
+                TypeConf {
+                    stale: Some(70),
+                    ..Default::default()
+                },
+            ),
+            (
+                "O'BRIEN".to_string(),
+                TypeConf {
+                    stale: Some(10),
+                    ..Default::default()
+                },
+            ),
+            ("CLIP".to_string(), TypeConf::default()),
         ]),
         ..Default::default()
     };
     let want = r#""check_needed_at" < now() - case "event_type"::text when 'BILLING_KEY_DELETED' then interval '70 minutes' when 'O''BRIEN' then interval '10 minutes' else interval '5 minutes' end and "#;
     assert_eq!(count_sql(&o).matches(want).count(), 1);
     let o2 = Outbox {
-        types: BTreeMap::from([("CLIP".to_string(), tc(None))]),
+        types: BTreeMap::from([("CLIP".to_string(), TypeConf::default())]),
         ..o
     };
     assert_eq!(stale_expr(&o2), "interval '5 minutes'");
