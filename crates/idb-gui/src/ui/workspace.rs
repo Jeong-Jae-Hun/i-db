@@ -2299,7 +2299,15 @@ impl Workspace {
                     .gap_3()
                     .child(super::brand::mark(px(64.), theme.foreground, super::brand::accent()))
                     .child(super::brand::wordmark(px(40.), theme.foreground))
-                    .child(div().text_color(theme.muted_foreground).child(brand::TAGLINE)),
+                    // 강조색 짧은 선 하나(한 화면 한 번)
+                    .child(div().w(px(24.)).h(px(2.)).rounded_full().bg(super::brand::accent()))
+                    .child(div().text_color(theme.muted_foreground).child(brand::TAGLINE))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground.opacity(0.7))
+                            .child(format!("v{}", brand::version()).replace("vdev", "dev")),
+                    ),
             )
             .child(
                 v_flex()
@@ -2350,7 +2358,7 @@ impl Workspace {
                     .text_xs()
                     .text_color(if self.status.1 { theme.danger } else { theme.muted_foreground })
                     .child(if self.status.0.is_empty() {
-                        format!("{} · ⌘, 설정 · ⌘/ 단축키", brand::version())
+                        "⌘, 설정 · ⌘/ 단축키".to_string()
                     } else {
                         self.status.0.clone()
                     }),
@@ -2641,9 +2649,20 @@ impl Workspace {
         let filter = self.tree_filter.read(cx).value().to_lowercase();
         let queries_el = self.render_queries(&filter, cx);
         let section = |title: &'static str| kit::section(&sc, &theme, title);
+        let place = self.target.as_ref().map(Target::label).unwrap_or_default();
         v_flex()
             .size_full()
             .bg(theme.sidebar)
+            // 머리: 글자표와 지금 연 곳(브랜드는 여기와 제목 줄 마크에만 둔다)
+            .child(
+                h_flex()
+                    .px(px(sc.s12()))
+                    .pt(px(sc.s8()))
+                    .gap(px(sc.s8()))
+                    .items_center()
+                    .child(super::brand::wordmark(px(sc.text()), theme.foreground))
+                    .child(kit::text(&sc, sc.small(), theme.muted_foreground, place).truncate()),
+            )
             .child(
                 h_flex()
                     .p_2()
@@ -2695,7 +2714,7 @@ impl Workspace {
                 .gap_2()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(gpui_component::spinner::Spinner::new().xsmall())
+                .child(gpui_component::spinner::Spinner::new().xsmall().color(super::brand::accent()))
                 .child("queries/ 읽는 중…")
                 .into_any_element();
         };
@@ -3124,7 +3143,7 @@ impl Workspace {
                 d.child(
                     h_flex()
                         .gap_1()
-                        .child(gpui_component::spinner::Spinner::new().xsmall())
+                        .child(gpui_component::spinner::Spinner::new().xsmall().color(super::brand::accent()))
                         .child("저장 중"),
                 )
             })
@@ -3296,7 +3315,7 @@ impl Render for Workspace {
             let bar = TitleBar::new().h(px(self.scale().titlebar())).child(
                 h_flex()
                     .gap_2()
-                    .child(super::brand::mark(px(14.), theme.foreground, super::brand::accent()))
+                    .child(super::brand::mark(px(16.), theme.foreground, super::brand::accent()))
                     .child(div().text_xs().text_color(theme.muted_foreground).child(brand::NAME)),
             );
             return root.child(
@@ -3332,7 +3351,7 @@ impl Render for Workspace {
                             cx.notify();
                         })),
                 )
-                .child(super::brand::mark(px(14.), theme.foreground, super::brand::accent()))
+                .child(super::brand::mark(px(16.), theme.foreground, super::brand::accent()))
                 .child(div().flex_1().min_w_0().h_full().child(tabs))
                 .child(actions),
         );

@@ -21,7 +21,8 @@ pub fn row(s: &Scale, theme: &Theme, selected: bool) -> Div {
         .rounded(theme.radius)
         .text_size(px(s.text()))
         .line_height(px(s.line(s.text())))
-        .when(selected, |d| d.bg(theme.sidebar_accent))
+        // 고른 줄은 강조색을 옅게 깐다(초점·고른 탭과 같은 색)
+        .when(selected, |d| d.bg(super::brand::accent().opacity(0.16)))
 }
 
 /// 구역 머리(접속·테이블·쿼리): 11px 굵게, 흐린 색

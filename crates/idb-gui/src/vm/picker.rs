@@ -10,8 +10,7 @@ pub const RECENT_SECTION: &str = "최근";
 pub const DIR_PLACEHOLDER: &str = "프로젝트 폴더 (예: ~/Projects/app/db)";
 pub const PICK_DIR: &str = "폴더 선택…";
 pub const OPEN: &str = "열기";
-pub const NO_REMOTES: &str =
-    "~/.config/db/remote.json 에 원격이 없다 (예: {\"devbox\": {\"ssh\": \"devbox\", \"project\": \"~/Projects/app/db\"}})";
+pub const NO_REMOTES: &str = "원격이 없다 · ~/.config/db/remote.json 에 이름을 더하면 여기 보인다";
 
 /// 원격 버튼 하나다.
 #[derive(Clone, Debug, PartialEq, Eq)]
