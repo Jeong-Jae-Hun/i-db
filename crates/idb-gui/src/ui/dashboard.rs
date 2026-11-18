@@ -16,6 +16,9 @@ use idb_engine::{BoardResult, BoardSummary, ConnSummary, Engine, FlowResult, Hea
 use crate::vm::dashboard::{self, PanelKind, State};
 use crate::vm::runtime::Runtime;
 
+const TYPE_NAME_W: f32 = 300.;
+const TYPE_METRICS_W: f32 = 280.;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Health,
@@ -299,43 +302,89 @@ impl DashboardView {
                     })),
             );
         }
-        let mut boxes = h_flex().gap_2().flex_wrap().items_start();
-        for (i, b) in flows[sel].boxes.iter().enumerate() {
-            if i > 0 {
-                boxes = boxes.child(div().pt_4().text_color(theme.muted_foreground).child("→"));
+        let bs = &flows[sel].boxes;
+        let layout = dashboard::flow_layout(bs);
+        let mut diagram = h_flex().gap_2().items_start();
+        for (k, &i) in layout.head.iter().enumerate() {
+            if k > 0 {
+                diagram = diagram.child(flow_arrow(&theme));
             }
-            let color = if !b.err.is_empty() {
-                theme.danger
-            } else if b.warn {
-                theme.warning
-            } else {
-                theme.border
-            };
-            boxes = boxes.child(
-                v_flex()
-                    .p_3()
-                    .min_w(px(160.))
-                    .max_w(px(260.))
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(color)
-                    .bg(theme.popover)
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(b.stage.clone()))
-                    .child(div().truncate().child(b.name.clone()))
-                    .when(!b.metrics.is_empty(), |d| d.child(div().text_xs().child(b.metrics.clone())))
-                    .when(!b.err.is_empty(), |d| {
-                        d.child(div().text_xs().text_color(theme.danger).child(b.err.clone()))
-                    })
-                    .when(!b.note.is_empty(), |d| {
-                        d.child(div().text_xs().text_color(theme.muted_foreground).child(b.note.clone()))
-                    }),
-            );
+            diagram = diagram.child(flow_card(&bs[i], &theme));
+        }
+        if !layout.branches.is_empty() {
+            if !layout.head.is_empty() {
+                diagram = diagram.child(flow_arrow(&theme));
+            }
+            // 큐마다 한 줄이고 왼쪽 세로선이 토픽에서 갈라짐을 보인다
+            let mut col = v_flex().gap_2().pl_2().border_l_1().border_color(theme.border);
+            for br in &layout.branches {
+                let mut queue = v_flex().gap_1().child(flow_card(&bs[br.queue], &theme));
+                for &i in &br.dlq {
+                    queue = queue.child(
+                        div()
+                            .pl_3()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("└ DLQ {}", bs[i].name)),
+                    );
+                }
+                let mut row = h_flex().gap_2().items_start().child(queue);
+                // 같은 큐를 읽는 함수끼리는 이어지지 않아 첫 함수 앞에만 화살표를 둔다(TUI 와 같음)
+                if !br.lambdas.is_empty() {
+                    row = row.child(flow_arrow(&theme));
+                }
+                for &i in &br.lambdas {
+                    row = row.child(flow_card(&bs[i], &theme));
+                }
+                col = col.child(row);
+            }
+            diagram = diagram.child(col);
+        }
+        // 그림이 폭을 넘으면 오른쪽 상자가 잘리지 않게 그림만 가로로 스크롤한다
+        let mut body = v_flex().gap_4().child(div().id("flow-diagram").overflow_x_scroll().child(diagram));
+        if !layout.types.is_empty() {
+            // 종류 줄(R69.6)은 서로 이어지지 않는 아웃박스 내역이라 화살표 없이 표로 보인다
+            let mut table = v_flex()
+                .gap_px()
+                .child(div().text_sm().child(format!("아웃박스 종류별 {}개", layout.types.len())))
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(div().w(px(TYPE_NAME_W)).child("종류"))
+                        .child(div().w(px(TYPE_METRICS_W)).child("수치"))
+                        .child(div().child("소비 큐")),
+                );
+            for &i in &layout.types {
+                let b = &bs[i];
+                let (metrics, consumer) = dashboard::split_type_metrics(&b.metrics);
+                let color = if !b.err.is_empty() {
+                    theme.danger
+                } else if b.warn {
+                    theme.warning
+                } else if b.idle {
+                    theme.muted_foreground
+                } else {
+                    theme.foreground
+                };
+                table = table.child(
+                    h_flex()
+                        .gap_3()
+                        .text_sm()
+                        .text_color(color)
+                        .child(div().w(px(TYPE_NAME_W)).truncate().child(b.name.clone()))
+                        .child(div().w(px(TYPE_METRICS_W)).child(metrics.to_string()))
+                        .child(div().text_color(theme.muted_foreground).truncate().child(consumer.to_string())),
+                );
+            }
+            body = body.child(table);
         }
         h_flex()
             .gap_4()
             .items_start()
             .child(list)
-            .child(div().flex_1().child(boxes))
+            .child(div().flex_1().child(body))
             .into_any_element()
     }
 
@@ -554,4 +603,35 @@ impl Render for DashboardView {
             )
             .child(div().id("dash-body").flex_1().min_h_0().overflow_y_scroll().p_4().child(body))
     }
+}
+
+fn flow_arrow(theme: &gpui_component::Theme) -> gpui::Div {
+    div().pt_4().text_color(theme.muted_foreground).child("→")
+}
+
+fn flow_card(b: &idb_engine::FlowBox, theme: &gpui_component::Theme) -> gpui::Div {
+    let color = if !b.err.is_empty() {
+        theme.danger
+    } else if b.warn {
+        theme.warning
+    } else {
+        theme.border
+    };
+    v_flex()
+        .p_3()
+        .min_w(px(160.))
+        .max_w(px(260.))
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(color)
+        .bg(theme.popover)
+        .child(div().text_xs().text_color(theme.muted_foreground).child(b.stage.clone()))
+        .child(div().truncate().child(b.name.clone()))
+        .when(!b.metrics.is_empty(), |d| d.child(div().text_xs().child(b.metrics.clone())))
+        .when(!b.err.is_empty(), |d| {
+            d.child(div().text_xs().text_color(theme.danger).child(b.err.clone()))
+        })
+        .when(!b.note.is_empty(), |d| {
+            d.child(div().text_xs().text_color(theme.muted_foreground).child(b.note.clone()))
+        })
 }

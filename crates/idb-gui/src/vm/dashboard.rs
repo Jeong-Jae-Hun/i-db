@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use idb_engine::{ConnSummary, FlowResult, HealthInfo, PanelOut};
+use idb_engine::{ConnSummary, FlowBox, FlowResult, HealthInfo, PanelOut};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -21,6 +21,23 @@ impl State {
             State::Pending => "…",
         }
     }
+}
+
+/// 흐름 그림의 자리다(R69.4). 상자 목록은 한 줄 사슬이 아니다: 머리(아웃박스 → SNS)에서 큐마다 갈래가 나뉘고,
+/// 아웃박스 종류 줄(R69.6)은 서로 이어지지 않는 아웃박스의 내역이다. 값은 상자 자리(index)다.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FlowLayout {
+    pub head: Vec<usize>,
+    pub branches: Vec<Branch>,
+    pub types: Vec<usize>,
+}
+
+/// 큐 하나의 갈래다. lambdas 는 큐 뒤에 잇고 dlq 는 큐 밑에 붙인다.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Branch {
+    pub queue: usize,
+    pub dlq: Vec<usize>,
+    pub lambdas: Vec<usize>,
 }
 
 /// 접속 한 줄의 상태다. 수치 하나라도 경고면 경고다.
@@ -83,6 +100,29 @@ pub fn flow_state(f: Option<&FlowResult>) -> State {
         Some(f) if f.boxes.iter().any(|b| b.warn) => State::Warn,
         Some(_) => State::Ok,
     }
+}
+
+/// 엔진 상자 순서(아웃박스 → SNS → 큐(→ DLQ·Lambda) → 종류 줄)를 그림 자리로 나눈다.
+pub fn flow_layout(bs: &[FlowBox]) -> FlowLayout {
+    let mut l = FlowLayout::default();
+    for (i, b) in bs.iter().enumerate() {
+        match (b.stage.as_str(), l.branches.last_mut()) {
+            ("outbox-type", _) => l.types.push(i),
+            ("sqs", _) => l.branches.push(Branch {
+                queue: i,
+                ..Default::default()
+            }),
+            ("dlq", Some(br)) => br.dlq.push(i),
+            ("lambda", Some(br)) => br.lambdas.push(i),
+            _ => l.head.push(i),
+        }
+    }
+    l
+}
+
+/// 종류 줄 수치 `대기 0 · 재시도 0 · 한도 소진 0 · → consumer` 를 수치와 소비 큐로 나눈다.
+pub fn split_type_metrics(m: &str) -> (&str, &str) {
+    m.split_once(" · → ").unwrap_or((m, ""))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +194,57 @@ mod tests {
         assert_eq!(s.len(), 3);
         let s = summary(&conns, &health, 7);
         assert_eq!(s[3], ("아웃박스 한도 소진".to_string(), "7".to_string(), true));
+    }
+
+    fn fb(stage: &str, name: &str) -> FlowBox {
+        FlowBox {
+            stage: stage.into(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn 흐름_그림은_종류_줄을_사슬에서_뺀다() {
+        let bs = [
+            fb("outbox", "o"),
+            fb("sns", "t"),
+            fb("sqs", "q1"),
+            fb("dlq", "q1-dlq"),
+            fb("lambda", "w1"),
+            fb("sqs", "q2"),
+            fb("outbox-type", "CLIP"),
+            fb("outbox-type", "PAY"),
+        ];
+        let l = flow_layout(&bs);
+        assert_eq!(l.head, vec![0, 1]);
+        assert_eq!(
+            l.branches,
+            vec![
+                Branch {
+                    queue: 2,
+                    dlq: vec![3],
+                    lambdas: vec![4]
+                },
+                Branch {
+                    queue: 5,
+                    ..Default::default()
+                }
+            ]
+        );
+        assert_eq!(l.types, vec![6, 7]);
+        // 토픽·큐 없는 아웃박스 흐름은 머리 하나와 종류 줄뿐이다
+        let l = flow_layout(&[fb("outbox", "o"), fb("outbox-type", "CLIP")]);
+        assert_eq!((l.head, l.branches.len(), l.types), (vec![0], 0, vec![1]));
+    }
+
+    #[test]
+    fn 종류_수치와_소비_큐를_나눈다() {
+        assert_eq!(
+            split_type_metrics("대기 3 · 한도 소진 1 · → consume-clip"),
+            ("대기 3 · 한도 소진 1", "consume-clip")
+        );
+        assert_eq!(split_type_metrics("대기 3"), ("대기 3", ""));
     }
 
     #[test]
