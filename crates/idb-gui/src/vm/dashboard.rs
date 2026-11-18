@@ -23,6 +23,23 @@ impl State {
     }
 }
 
+/// 흐름 그림의 자리다(R69.4). 상자 목록은 한 줄 사슬이 아니다: 머리(아웃박스 → SNS)에서 큐마다 갈래가 나뉘고,
+/// 아웃박스 종류 줄(R69.6)은 서로 이어지지 않는 아웃박스의 내역이다. 값은 상자 자리(index)다.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FlowLayout {
+    pub head: Vec<usize>,
+    pub branches: Vec<Branch>,
+    pub types: Vec<usize>,
+}
+
+/// 큐 하나의 갈래다. lambdas 는 큐 뒤에 잇고 dlq 는 큐 밑에 붙인다.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Branch {
+    pub queue: usize,
+    pub dlq: Vec<usize>,
+    pub lambdas: Vec<usize>,
+}
+
 /// 접속 한 줄의 상태다. 수치 하나라도 경고면 경고다.
 pub fn health_state(h: Option<&Result<HealthInfo, String>>) -> State {
     match h {
@@ -83,23 +100,6 @@ pub fn flow_state(f: Option<&FlowResult>) -> State {
         Some(f) if f.boxes.iter().any(|b| b.warn) => State::Warn,
         Some(_) => State::Ok,
     }
-}
-
-/// 흐름 그림의 자리다(R69.4). 상자 목록은 한 줄 사슬이 아니다: 머리(아웃박스 → SNS)에서 큐마다 갈래가 나뉘고,
-/// 아웃박스 종류 줄(R69.6)은 서로 이어지지 않는 아웃박스의 내역이다. 값은 상자 자리(index)다.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct FlowLayout {
-    pub head: Vec<usize>,
-    pub branches: Vec<Branch>,
-    pub types: Vec<usize>,
-}
-
-/// 큐 하나의 갈래다. lambdas 는 큐 뒤에 잇고 dlq 는 큐 밑에 붙인다.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Branch {
-    pub queue: usize,
-    pub dlq: Vec<usize>,
-    pub lambdas: Vec<usize>,
 }
 
 /// 엔진 상자 순서(아웃박스 → SNS → 큐(→ DLQ·Lambda) → 종류 줄)를 그림 자리로 나눈다.

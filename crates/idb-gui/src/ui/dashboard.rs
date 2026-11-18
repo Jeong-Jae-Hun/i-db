@@ -16,6 +16,9 @@ use idb_engine::{BoardResult, BoardSummary, ConnSummary, Engine, FlowResult, Hea
 use crate::vm::dashboard::{self, PanelKind, State};
 use crate::vm::runtime::Runtime;
 
+const TYPE_NAME_W: f32 = 300.;
+const TYPE_METRICS_W: f32 = 280.;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Health,
@@ -326,14 +329,19 @@ impl DashboardView {
                     );
                 }
                 let mut row = h_flex().gap_2().items_start().child(queue);
+                // 같은 큐를 읽는 함수끼리는 이어지지 않아 첫 함수 앞에만 화살표를 둔다(TUI 와 같음)
+                if !br.lambdas.is_empty() {
+                    row = row.child(flow_arrow(&theme));
+                }
                 for &i in &br.lambdas {
-                    row = row.child(flow_arrow(&theme)).child(flow_card(&bs[i], &theme));
+                    row = row.child(flow_card(&bs[i], &theme));
                 }
                 col = col.child(row);
             }
             diagram = diagram.child(col);
         }
-        let mut body = v_flex().gap_4().child(diagram);
+        // 그림이 폭을 넘으면 오른쪽 상자가 잘리지 않게 그림만 가로로 스크롤한다
+        let mut body = v_flex().gap_4().child(div().id("flow-diagram").overflow_x_scroll().child(diagram));
         if !layout.types.is_empty() {
             // 종류 줄(R69.6)은 서로 이어지지 않는 아웃박스 내역이라 화살표 없이 표로 보인다
             let mut table = v_flex()
@@ -597,14 +605,10 @@ impl Render for DashboardView {
     }
 }
 
-const TYPE_NAME_W: f32 = 300.;
-const TYPE_METRICS_W: f32 = 280.;
-
 fn flow_arrow(theme: &gpui_component::Theme) -> gpui::Div {
     div().pt_4().text_color(theme.muted_foreground).child("→")
 }
 
-/// 흐름 상자 하나의 카드다. 오류는 빨강, 경고는 노랑 테두리다.
 fn flow_card(b: &idb_engine::FlowBox, theme: &gpui_component::Theme) -> gpui::Div {
     let color = if !b.err.is_empty() {
         theme.danger
