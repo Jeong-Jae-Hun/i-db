@@ -1,6 +1,6 @@
 # db serve 프로토콜
 
-`db serve -p <프로젝트>`는 표준 입출력으로 엔진 요청을 받는다. 포트를 열지 않는다. Mac 의 `db`는 `ssh <호스트> <db> serve -p <프로젝트>`를 띄워 WSL 에 있는 접속을 쓴다. 접속 정의·`.env` 비밀번호·VPN 경로는 serve 쪽에만 있고, 안전장치(읽기 전용, prod 확인·잠금, 위험 문장, 가리기)도 serve 쪽이 정한다. 클라이언트는 사용자가 확인했다는 표시만 보낸다.
+`db serve -p <프로젝트>`는 표준 입출력으로 엔진 요청을 받는다. 포트를 열지 않는다. Mac 의 `db`는 `ssh <호스트> <db> serve -p <프로젝트>`를 띄워 WSL 에 있는 접속을 쓴다. 접속 정의·`.env` 비밀번호·VPN 경로는 serve 쪽에만 있다. 안전장치(읽기 전용, prod 확인·잠금, 위험 문장, 가리기)도 serve 쪽이 정한다. 클라이언트는 사용자가 확인했다는 표시만 보낸다.
 
 ## 줄
 
@@ -18,7 +18,7 @@ code 는 CLI 종료 코드와 같다. 1 실행 오류, 2 요청·사용법 오�
 
 판 1 은 op 를 더하기만 한다. 옛 클라이언트는 새 op 를 쓰지 않으면 그대로 돌고, 새 클라이언트가 옛 serve 에 새 op 를 보내면 code 2 `bad request: unknown variant …`다.
 
-입력이 닫히면 serve 는 남은 요청을 60초까지 기다려 답한 뒤 멈추고, 세션을 닫아 열린 트랜잭션을 서버가 되돌리게 한 뒤 끝난다.
+입력이 닫히면 serve 는 남은 요청을 60초까지 기다려 답한 뒤 멈춘다. 이어 세션을 닫아 열린 트랜잭션을 서버가 되돌리게 한 뒤 끝난다.
 
 ## op
 
@@ -99,13 +99,13 @@ ResultSet 은 `{cols, types?, rows, text, truncated, elapsed_ms, in_tx?, note?, 
 
 ## 전체 내보내기
 
-`export_start`는 문장을 거른 뒤 COPY 를 serve 안의 따로 도는 작업으로 띄우고 id 를 돌려준다. 거절은 code 2 이고 글은 화면 글이다: 문장이 둘 이상이면 `문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)`, 읽기 문장(R6.1)이 아니면 `읽기 문장만 전체 내보내기`, `select`·`with`·`values`·`table`로 시작하지 않으면 `SELECT 문만 전체 내보내기`, `:이름` 파라미터가 있으면 `파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음`이다. 부수 효과 함수(`pg_terminate_backend` 등, `read_query`와 같은 목록)는 READ ONLY 트랜잭션 안에서도 돌아 code 3 `read_only`로 거절하고, 위험 문장(R25)도 내보내지 않는다. prod 잠금(R54)과 상관없이 같다. enc()는 serve 가 바꾸고 알림은 note 다(R52).
+`export_start`는 문장을 거른 뒤 COPY 를 serve 안의 따로 도는 작업으로 띄우고 id 를 돌려준다. 거절은 code 2 이고 글은 화면 글이다: 문장이 둘 이상이면 `문장 하나만 전체 내보내기 (커서 문장으로 다시 실행)`, 읽기 문장(R6.1)이 아니면 `읽기 문장만 전체 내보내기`, `select`·`with`·`values`·`table`로 시작하지 않으면 `SELECT 문만 전체 내보내기`, `:이름` 파라미터가 있으면 `파라미터(:name·$n)가 있는 문장은 전체 내보내지 않음`이다. 부수 효과 함수(`pg_terminate_backend` 등, `read_query`와 같은 목록)는 READ ONLY 트랜잭션 안에서도 돌아 code 3 `read_only`로 거절한다. 위험 문장(R25)도 내보내지 않는다. prod 잠금(R54)과 상관없이 같다. enc()는 serve 가 바꾸고 알림은 note 다(R52).
 
-COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN READ ONLY` 트랜잭션에서 `COPY (<문장>\n) TO STDOUT WITH (FORMAT csv, HEADER)`로 돈다. 편집기에서 고른 데이터베이스(R27.1)와 `search_path`(R27.2, `SET LOCAL`)를 따르고, 편집기의 열린 트랜잭션을 기다리거나 막지 않는다. 읽기만 하는 트랜잭션이라 prod 도 묻지 않고 잠금(R54)에 걸리지 않는다. 첫 단어 판정이 놓친 CTE 안 쓰기는 서버의 READ ONLY 가 거절한다.
+COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN READ ONLY` 트랜잭션에서 `COPY (<문장>\n) TO STDOUT WITH (FORMAT csv, HEADER)`로 돈다. 편집기에서 고른 데이터베이스(R27.1)와 `search_path`(R27.2, `SET LOCAL`)를 따른다. 편집기의 열린 트랜잭션을 기다리거나 막지도 않는다. 읽기만 하는 트랜잭션이라 prod 도 묻지 않고 잠금(R54)에 걸리지 않는다. 첫 단어 판정이 놓친 CTE 안 쓰기는 서버의 READ ONLY 가 거절한다.
 
 클라이언트는 `done`이 올 때까지 `export_read`를 부른다. 조각은 1MiB 안팎이고 serve 는 조각 4개까지만 쌓는다. 클라이언트가 읽지 않으면 COPY 가 멈추고, 5분 넘게 읽지 않으면 버린 것으로 보고 연결을 닫는다. data 는 CSV 바이트를 글자 경계와 상관없이 자른 것이라 base64 다. bytes 는 지금까지 받은 합, done 일 때 rows 는 COPY 행 수다. done·오류 뒤 그 id 는 사라진다. 파일은 클라이언트가 쓴다(`~/Downloads`, 없으면 임시 폴더, 새 파일만, R14). serve 쪽에 파일을 만들지 않아 원격도 같다.
 
-멈추려면 `export_cancel`을 보낸다. 그 id 의 작업을 멈추고 COPY 연결은 풀에 돌려주지 않고 닫는다. 기다리던 `export_read`를 `cancel`로 끊는 것은 그 기다림만 끊고 내보내기는 이어지며 조각도 잃지 않는다. 접속을 고치거나 지우면(아래) 그 접속의 내보내기도 멈춘다.
+멈추려면 `export_cancel`을 보낸다. 그 id 의 작업을 멈추고 COPY 연결은 풀에 돌려주지 않고 닫는다. 기다리던 `export_read`를 `cancel`로 끊으면 그 기다림만 끊긴다. 내보내기는 이어지고 조각도 잃지 않는다. 접속을 고치거나 지우면(아래) 그 접속의 내보내기도 멈춘다.
 
 ## 쿼리 파일
 
@@ -115,7 +115,7 @@ COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN R
 - 읽기·쓰기 전마다 링크를 따라간 실제 경로가 프로젝트 `queries/` 의 실제 경로 안인지 본다. 밖이면 code 2 `쿼리 파일의 실제 경로가 queries 밖`이고, 쓴 뒤에도 한 번 더 본다. `query_list` 는 밖을 가리키는 링크를 빼고 보여 준다.
 - 한 파일은 1MiB 까지다. 읽기는 일반 파일만 받는다.
 - 쓰기는 같은 폴더 임시 파일에 쓰고 rename 한다. 원래 파일의 권한을 따른다.
-- 해시 확인과 쓰기, 새 이름 고르기, 매핑 고치기는 `queries/` 폴더의 flock 하나로 줄 세운다. 같은 serve 의 동시 요청도 프로세스끼리도 이것을 기다린다. 10초 안에 못 얻으면 code 1 이고, 기다리는 일은 serve 의 다른 요청을 막지 않는다. 새 파일은 create_new 로 먼저 잡아 같은 이름을 둘이 쓰지 않는다.
+- 해시 확인과 쓰기, 새 이름 고르기, 매핑 고치기는 `queries/` 폴더의 flock 하나로 줄 세운다. 같은 serve 의 동시 요청도 프로세스끼리도 이것을 기다린다. 10초 안에 못 얻으면 code 1 이다. 기다리는 동안에도 serve 의 다른 요청은 막지 않는다. 새 파일은 create_new 로 먼저 잡아 같은 이름을 둘이 쓰지 않는다.
 - 즐겨찾기는 `.dbtui/favorites.json` 이다. `.dbtui` 나 그 파일이 링크이거나 실제 경로가 프로젝트 밖이면 읽지도 쓰지도 않는다(code 2). SQL 한 개는 256KiB, 수는 1,000개, 파일은 4MiB 까지이고 넘으면 code 2 다. 파일 크기는 실제로 쓸 JSON 바이트로 재며, 넘으면 원본을 그대로 둔다. 목록도 1,000개까지만 돌려준다.
 - 프로젝트가 디스크에서 읽기 전용이거나 권한이 없으면 code 1 `쿼리 파일을 쓰지 못함: …`이다. 화면은 이 글을 상태 줄에 띄우고 편집 내용은 버리지 않는다.
 
@@ -123,7 +123,7 @@ COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN R
 
 ## 접속 편집
 
-`conn_get`·`conn_save`·`conn_delete`와 비밀번호가 실린 `conn_test`는 화면이 그 기계의 프로젝트를 쓸 때(`Engine::Local`)만 받는다. `db serve`는 code 3 `remote_conn_edit`(`원격 serve 에서는 접속을 고치지 않음 (그 기계에서 db conn 으로 고침)`)로 거절하고 확인으로도 풀리지 않는다. 까닭은 둘이다. 이 프로토콜은 어느 줄에도 비밀번호를 싣지 않는다는 약속을 지켜야 하고, 원격 프로젝트는 그 기계의 CLI·다른 클라이언트가 같이 쓰는 원본이라 Mac 화면에서 고칠 곳이 아니다. 원격 접속은 그 기계에서 `db conn add|edit|rm`(R59.4)으로 고친다. 클라이언트(`RemoteEngine`)도 이 요청들을 줄로 만들기 전에 같은 사유로 거절해, 사용자가 친 비밀번호가 ssh 너머로 나가지 않는다. 화면은 `--remote`에서 접속 창을 열지 않는다. 저장된 접속을 이름으로 시험하는 `conn_test {name}`와 비밀값이 없는 `conn_folder`만 원격에서도 받는다. 창의 값으로 시험하는 `conn_test {conn}`은 비밀번호 칸이 비어도 원격에서 거절한다. 빈 비밀번호와 저장된 이름, 고른 호스트를 함께 보내 저장된 비밀번호를 다른 호스트로 흘릴 수 있어서다.
+`conn_get`·`conn_save`·`conn_delete`와 비밀번호가 실린 `conn_test`는 화면이 그 기계의 프로젝트를 쓸 때(`Engine::Local`)만 받는다. `db serve`는 code 3 `remote_conn_edit`(`원격 serve 에서는 접속을 고치지 않음 (그 기계에서 db conn 으로 고침)`)로 거절하고 확인으로도 풀리지 않는다. 까닭은 둘이다. 이 프로토콜은 어느 줄에도 비밀번호를 싣지 않는다는 약속을 지켜야 한다. 또 원격 프로젝트는 그 기계의 CLI·다른 클라이언트가 같이 쓰는 원본이라 Mac 화면에서 고칠 곳이 아니다. 원격 접속은 그 기계에서 `db conn add|edit|rm`(R59.4)으로 고친다. 클라이언트(`RemoteEngine`)도 이 요청들을 줄로 만들기 전에 같은 사유로 거절한다. 그래서 사용자가 친 비밀번호가 ssh 너머로 나가지 않는다. 화면은 `--remote`에서 접속 창을 열지 않는다. 저장된 접속을 이름으로 시험하는 `conn_test {name}`와 비밀값이 없는 `conn_folder`만 원격에서도 받는다. 창의 값으로 시험하는 `conn_test {conn}`은 비밀번호 칸이 비어도 원격에서 거절한다. 빈 비밀번호와 저장된 이름, 고른 호스트를 함께 보내 저장된 비밀번호를 다른 호스트로 흘릴 수 있어서다.
 
 `conn_save`는 `db conn add|edit`와 같은 파일 쓰기다(`.dbtui/connections.json`을 쓰고 `.env`에 `PG_<이름>_PASSWORD` 등을 URL 인코딩해 둔다, R59.1). 시험은 하지 않는다. 화면은 `conn_test`를 먼저 부르고 실패하면 `저장할까요? y/N`을 묻는다(R59.2). 이름은 영숫자·`-`·`_`만, DataGrip 접속은 `DataGrip 접속은 DataGrip 에서 고침`으로 code 2 다. 고칠 때 비밀번호가 비면 그대로 두고, 이름이 바뀌면 `.env` 키를 옮긴다. `.env`를 고치지 못하면 접속은 저장된 채 env_error 에 `connection saved but .env was not updated: …`가 온다. URL 붙여 넣기는 화면이 `idb_core::connstore::parse_conn_url`·`parse_http_url`로 칸을 채운다. 평문·AWS 밖 서명 경고는 warning 이다.
 
@@ -131,7 +131,7 @@ COPY 는 Go `CopyOut`처럼 편집기 세션이 아니라 풀 연결의 `BEGIN R
 
 ## 결과 표 편집
 
-ChangeSet 은 `{table:{schema,table}, pk:[…], changes:[{op:"update"|"insert"|"delete", key:{pk열:값}, values:{열:값|null}, old:{열:값|null}}], override?}`다. 화면은 결과의 origin 으로 이것을 만든다. serve 는 pk 가 그 테이블의 진짜 PK 와 같은지 확인하고(아니면 code 2) 편집기 세션에서 한 트랜잭션(열린 트랜잭션이면 SAVEPOINT)으로 바꿈마다 하나씩 보낸다. UPDATE·DELETE 가 정확히 한 행이 아니거나 old 가 지금 값과 다르면 묶음 전체를 되돌린다. 답의 applied(`{rows, generated, no_returning}`)를 그대로 `undo_changes`에 넘기면 되돌린다. RETURNING 권한이 없으면 no_returning 이 켜지고 되돌릴 수 없다.
+ChangeSet 은 `{table:{schema,table}, pk:[…], changes:[{op:"update"|"insert"|"delete", key:{pk열:값}, values:{열:값|null}, old:{열:값|null}}], override?}`다. 화면은 결과의 origin 으로 이것을 만든다. serve 는 pk 가 그 테이블의 진짜 PK 와 같은지 확인한다(아니면 code 2). 그다음 편집기 세션에서 한 트랜잭션(열린 트랜잭션이면 SAVEPOINT)으로 바꿈마다 하나씩 보낸다. UPDATE·DELETE 가 정확히 한 행이 아니거나 old 가 지금 값과 다르면 묶음 전체를 되돌린다. 답의 applied(`{rows, generated, no_returning}`)를 그대로 `undo_changes`에 넘기면 되돌린다. RETURNING 권한이 없으면 no_returning 이 켜지고 되돌릴 수 없다.
 
 ## Redis 연결
 
@@ -149,6 +149,6 @@ ChangeSet 은 `{table:{schema,table}, pk:[…], changes:[{op:"update"|"insert"|"
 {"devbox": {"ssh": "devbox", "db": "~/.local/bin/db", "project": "~/work/db"}}
 ```
 
-띄우는 명령은 `ssh -o BatchMode=yes -o ConnectTimeout=15 -T devbox '~/.local/bin/db serve -p ~/work/db'`다. 시스템 ssh 라 `~/.ssh/config`·키·ProxyJump 가 그대로 듣고, 비밀번호·호스트 키를 묻지 않고 실패한다. ssh 가 끝나면 종료 코드와 ssh 가 남긴 마지막 글을 오류에 붙인다.
+띄우는 명령은 `ssh -o BatchMode=yes -o ConnectTimeout=15 -T devbox '~/.local/bin/db serve -p ~/work/db'`다. 시스템 ssh 라 `~/.ssh/config`·키·ProxyJump 가 그대로 듣는다. 비밀번호·호스트 키는 묻지 않고 실패한다. ssh 가 끝나면 종료 코드와 ssh 가 남긴 마지막 글을 오류에 붙인다.
 
 `DB_REMOTE_CMD`는 시험 전용이다. 있으면 설정 파일과 ssh 대신 그 명령(공백으로 나눔, 예: `db serve -p /tmp/proj`)을 띄운다.
