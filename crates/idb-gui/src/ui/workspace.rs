@@ -1277,8 +1277,9 @@ impl Workspace {
         self.status.0.clone()
     }
 
-    pub(super) fn has_query(&self, rel: &str) -> bool {
-        self.queries.as_ref().is_some_and(|q| q.iter().any(|f| f.rel == rel))
+    /// 목록 맨 위(최근 수정) 쿼리 파일
+    pub(super) fn first_query(&self) -> Option<String> {
+        self.queries.as_ref().and_then(|q| q.first()).map(|f| f.rel.clone())
     }
 
     pub(super) fn is_busy(&self) -> bool {

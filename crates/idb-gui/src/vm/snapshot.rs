@@ -161,8 +161,6 @@ pub const ENV_DISPLAY: &str = "IDB_GUI_SNAPSHOT_DISPLAY";
 pub const ENV_REMOTE: &str = "IDB_GUI_SNAPSHOT_REMOTE";
 /// 실제 원격 Redis 에서 처음 찾을 좁은 패턴
 pub const ENV_REDIS_PATTERN: &str = "IDB_GUI_SNAPSHOT_REDIS_PATTERN";
-/// 실제 원격에 쓰는 시험 쿼리 파일. 찍은 뒤 지운다(엔진에 지우기 op 가 없어 serve 쪽에서 지운다)
-pub const REAL_QUERY_FILE: &str = "queries/_snapshot_test/snapshot.sql";
 
 /// 실제 원격에서 찍을 접속이다. prod 는 고르지 않는다.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -214,6 +212,26 @@ pub fn real_shots() -> Vec<Shot> {
         zoom: 1.0,
     })
     .collect()
+}
+
+/// 사진 모드를 켤지와 찍을 폴더다. 없거나 비었거나 공백뿐이면 꺼짐(물려받은 빈 값으로 켜지지 않게)이고,
+/// 켜려면 절대 경로여야 한다(작업 폴더에 찍지 않게).
+pub fn snapshot_dir(v: Option<std::ffi::OsString>) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(v) = v else { return Ok(None) };
+    let s = v.to_string_lossy();
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    let p = std::path::PathBuf::from(s.trim());
+    if !p.is_absolute() {
+        return Err(format!("{ENV_DIR} 는 절대 경로여야 한다: {}", p.display()));
+    }
+    Ok(Some(p))
+}
+
+/// 실제 원격 이름. 사진 모드가 켜졌을 때만, 비지 않은 값만 쓴다.
+pub fn real_remote(on: bool, v: Option<String>) -> Option<String> {
+    v.filter(|_| on).map(|r| r.trim().to_string()).filter(|r| !r.is_empty())
 }
 
 /// 찍을 화면을 고른다. 정한 번호가 있으면 그것, 없으면 주 화면(메뉴 막대)이 아닌 첫 화면, 하나뿐이면 주 화면이다.
@@ -826,6 +844,22 @@ mod tests {
         assert_eq!(p.redis, None, "prod 뿐이면 고르지 않는다");
         assert_eq!(p.search.as_deref(), Some("s-local"));
         assert!(real_shots().iter().all(|s| !matches!(s.scene, Scene::Dashboard | Scene::Confirm)));
+    }
+
+    #[test]
+    fn 빈_값은_사진_모드를_켜지_않고_폴더는_절대_경로여야_한다() {
+        assert_eq!(snapshot_dir(None), Ok(None));
+        assert_eq!(snapshot_dir(Some("".into())), Ok(None));
+        assert_eq!(snapshot_dir(Some("  ".into())), Ok(None));
+        assert!(snapshot_dir(Some("shots".into())).is_err());
+        assert_eq!(snapshot_dir(Some("/tmp/shots".into())), Ok(Some("/tmp/shots".into())));
+        assert_eq!(
+            real_remote(false, Some("devbox".into())),
+            None,
+            "사진 모드가 꺼지면 원격 값은 안 본다"
+        );
+        assert_eq!(real_remote(true, Some(" ".into())), None);
+        assert_eq!(real_remote(true, Some("devbox".into())).as_deref(), Some("devbox"));
     }
 
     #[test]

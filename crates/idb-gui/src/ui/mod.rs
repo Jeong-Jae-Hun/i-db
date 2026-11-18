@@ -258,10 +258,19 @@ pub fn run() {
         }
     };
     // 화면 사진 모드(개발용): 가짜 serve 를 원격으로 띄워 정해 둔 장면을 찍고 끝낸다
-    let snap = std::env::var_os(crate::vm::snapshot::ENV_DIR).map(std::path::PathBuf::from);
+    // 켜짐 판단은 vm::snapshot 의 한 함수로만 한다(빈 값은 꺼짐, 폴더는 절대 경로)
+    let snap = match crate::vm::snapshot::snapshot_dir(std::env::var_os(crate::vm::snapshot::ENV_DIR)) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("i-db: {e}");
+            std::process::exit(2);
+        }
+    };
+    // 실제 원격을 찍을 때는 remote.json 의 그 원격에 붙는다(가짜 serve 를 띄우지 않는다)
+    let real = crate::vm::snapshot::real_remote(snap.is_some(), std::env::var(crate::vm::snapshot::ENV_REMOTE).ok());
     let shots = match (&snap, std::env::var_os(crate::vm::snapshot::ENV_SCRIPT).filter(|s| !s.is_empty())) {
         (None, _) => Vec::new(),
-        (Some(_), None) if std::env::var_os(crate::vm::snapshot::ENV_REMOTE).is_some() => crate::vm::snapshot::real_shots(),
+        (Some(_), None) if real.is_some() => crate::vm::snapshot::real_shots(),
         (Some(_), None) => crate::vm::snapshot::default_shots(),
         (Some(_), Some(f)) => match std::fs::read_to_string(&f)
             .map_err(|e| e.to_string())
@@ -275,11 +284,6 @@ pub fn run() {
         },
     };
     let initial = if snap.is_some() { None } else { initial };
-    // 실제 원격을 찍을 때는 remote.json 의 그 원격에 붙는다(가짜 serve 를 띄우지 않는다)
-    let real = snap
-        .as_ref()
-        .and_then(|_| std::env::var(crate::vm::snapshot::ENV_REMOTE).ok())
-        .filter(|r| !r.is_empty());
     if snap.is_some() && real.is_none() {
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
         // SAFETY: 런타임·창 스레드를 띄우기 전, 아직 스레드가 하나일 때 바꾼다

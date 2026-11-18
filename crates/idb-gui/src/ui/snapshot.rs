@@ -11,7 +11,7 @@ use gpui_component::WindowExt as _;
 use super::workspace::Workspace;
 use crate::vm::runtime::Target;
 use crate::vm::settings::ThemePref;
-use crate::vm::snapshot::{REAL_QUERY_FILE, REMOTE, Scene, Shot, pick_real};
+use crate::vm::snapshot::{REMOTE, Scene, Shot, pick_real};
 use crate::vm::tree::child_id;
 
 /// 찍을 접속 이름들이다. 가짜 serve 는 정해 둔 이름, 실제 원격은 붙은 뒤 stg·local 에서 고른다.
@@ -185,28 +185,14 @@ async fn run_shot(
             });
         }
         Scene::Files => {
+            // 실제 원격에는 아무것도 쓰지 않는다: 이미 있는 파일 하나를 읽어 열기만 한다(자동 저장도 꺼 두었다)
+            on_ws(cx, handle, ws, |w, _, cx| w.refresh_queries(cx));
+            wait_for(cx, ws, limit, |w| w.first_query().is_some()).await;
             let rel = if real.is_some() {
-                // 실제 원격은 시험 폴더에만 쓴다(찍은 뒤 serve 쪽에서 지운다)
-                let engine = ws.read_with(cx, |w, _| w.engine.clone()).ok_or("엔진 없음")?;
-                let rt = ws.read_with(cx, |w, _| w.rt.clone());
-                let job = rt.spawn(async move {
-                    crate::vm::queries::write(
-                        &engine,
-                        REAL_QUERY_FILE,
-                        "-- i-db 화면 사진 시험 파일(지워도 된다)\nselect 1;\n",
-                        None,
-                        true,
-                    )
-                    .await
-                });
-                job.rx.await.map_err(|_| "멈춤".to_string())??;
-                REAL_QUERY_FILE.to_string()
+                ws.read_with(cx, |w, _| w.first_query()).ok_or("열 쿼리 파일이 없다")?
             } else {
                 "queries/app/daily-orders.sql".to_string()
             };
-            on_ws(cx, handle, ws, |w, _, cx| w.refresh_queries(cx));
-            let r2 = rel.clone();
-            wait_for(cx, ws, limit, move |w| w.has_query(&r2)).await;
             on_ws(cx, handle, ws, move |w, window, cx| w.open_query(rel, window, cx));
             sleep(cx, 300).await;
             on_ws(cx, handle, ws, |w, _, cx| w.close_tab(0, cx));
