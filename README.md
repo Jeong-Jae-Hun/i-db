@@ -400,6 +400,10 @@ DBTUI_TEST_PG_URL=postgres://postgres:itpass@127.0.0.1:55432/postgres DBTUI_TEST
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`: tests against Postgres and Redis service containers, then builds static linux (amd64, arm64) and darwin (arm64, amd64) archives plus `i-db_darwin_arm64.zip`, and publishes them with `checksums.txt`. CLI output is pinned by `testdata/golden` (expected output recorded from the v0.x Go build).
 
+## Brand
+
+The mark is a database cylinder with a dot on top (the `i`); the wordmark is `i-db` in D2Coding Bold with only the `-` in accent teal `#0d9488`. Use the files in `assets/brand` as they are: don't stretch, recolor or rotate the mark, keep a quarter of its height clear around it, and don't use it below 16px. The accent is for one thing per screen (the dot, the primary button, focus and the active tab). Colors, files and the full rules are in [`assets/brand/README.md`](assets/brand/README.md).
+
 ## License
 
 To be decided. Until a license file is added, no license is granted.
