@@ -54,7 +54,7 @@ db mcp                                 # AI 에이전트용 읽기 전용 MCP �
 
 ## 안전장치
 
-- 이름이나 호스트에 `prod`·`prd`가 들어간 접속은 prod로 본다. prod는 세션마다 쓰기가 잠겨 있다. `Ctrl+L`(⌘L)로 잠깐 열어도 쓰기마다 다시 묻는다.
+- 이름에 `prod`·`prd`가 들어가거나 호스트를 `.`·`-`로 나눈 마디 하나가 `prod`·`prd`인 접속은 prod로 본다. prod는 세션마다 쓰기가 잠겨 있다. `Ctrl+L`(⌘L)로 잠깐 열어도 쓰기마다 다시 묻는다.
 - WHERE 없는 DELETE·UPDATE, TRUNCATE, DROP, FLUSHALL은 어디서든 먼저 묻는다.
 - CLI는 prod에 쓰지 않는다. MCP는 읽기만 한다.
 - 요청마다 요금이 붙는 AWS 조회(Athena, DynamoDB 데이터, SQS·SNS·S3)는 `DB_ALLOW_BILLED=1` 없이는 보내지 않는다.
