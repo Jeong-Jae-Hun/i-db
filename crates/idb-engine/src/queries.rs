@@ -50,9 +50,10 @@ fn real(dir: &Path, rel: &str) -> Result<PathBuf, EngineError> {
     Ok(p)
 }
 
-/// 잠금을 기다리는 상한이다(시험은 짧게)
+/// 잠금을 기다리는 상한이다. 시험은 짧게 두되, 워크스페이스 시험을 함께 돌려 디스크가 바쁠 때
+/// 앞 쓰기가 300ms 를 넘겨 동시 쓰기 시험이 잠금 오류로 깨진 적이 있어 2초로 둔다
 const LOCK_WAIT: Duration = if cfg!(test) {
-    Duration::from_millis(300)
+    Duration::from_secs(2)
 } else {
     Duration::from_secs(10)
 };
