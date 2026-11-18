@@ -19,6 +19,13 @@ use crate::vm::runtime::Runtime;
 const TYPE_NAME_W: f32 = 300.;
 const TYPE_METRICS_W: f32 = 280.;
 
+/// 흐름 그림 하나의 입력이다. compact 는 보드 카드 폭에 맞춰 종류 표의 열을 줄인다.
+struct FlowView<'a> {
+    boxes: &'a [idb_engine::FlowBox],
+    id: gpui::ElementId,
+    compact: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Health,
@@ -302,7 +309,14 @@ impl DashboardView {
                     })),
             );
         }
-        let body = flow_body(&flows[sel].boxes, &theme, ("flow-diagram", sel), false);
+        let body = flow_body(
+            FlowView {
+                boxes: &flows[sel].boxes,
+                id: ("flow-diagram", sel).into(),
+                compact: false,
+            },
+            &theme,
+        );
         h_flex()
             .gap_4()
             .items_start()
@@ -412,7 +426,14 @@ impl DashboardView {
                             }
                             card.child(t)
                         }
-                        PanelKind::Flow => card.child(flow_body(&p.boxes, &theme, ("board-flow", i), true)),
+                        PanelKind::Flow => card.child(flow_body(
+                            FlowView {
+                                boxes: &p.boxes,
+                                id: ("board-flow", i).into(),
+                                compact: true,
+                            },
+                            &theme,
+                        )),
                         PanelKind::Note => card,
                     };
                     if !p.note.is_empty() {
@@ -548,9 +569,9 @@ fn flow_card(b: &idb_engine::FlowBox, theme: &gpui_component::Theme) -> gpui::Di
 }
 
 /// 흐름 그림(R69.4)과 아웃박스 종류 표(R69.6)다. 흐름 탭과 보드의 흐름 패널(R70.3)이 같이 쓴다.
-/// compact 는 보드 카드 폭에 맞춰 종류 표의 열을 줄인다.
-fn flow_body(bs: &[idb_engine::FlowBox], theme: &gpui_component::Theme, id: impl Into<gpui::ElementId>, compact: bool) -> gpui::Div {
-    let (name_w, metrics_w) = if compact { (180., 200.) } else { (TYPE_NAME_W, TYPE_METRICS_W) };
+fn flow_body(v: FlowView, theme: &gpui_component::Theme) -> gpui::Div {
+    let bs = v.boxes;
+    let (name_w, metrics_w) = if v.compact { (180., 200.) } else { (TYPE_NAME_W, TYPE_METRICS_W) };
     let layout = dashboard::flow_layout(bs);
     let mut diagram = h_flex().gap_2().items_start();
     for (k, &i) in layout.head.iter().enumerate() {
@@ -589,7 +610,7 @@ fn flow_body(bs: &[idb_engine::FlowBox], theme: &gpui_component::Theme, id: impl
         diagram = diagram.child(col);
     }
     // 그림이 폭을 넘으면 오른쪽 상자가 잘리지 않게 그림만 가로로 스크롤한다
-    let mut body = v_flex().gap_4().child(div().id(id).overflow_x_scroll().child(diagram));
+    let mut body = v_flex().gap_4().child(div().id(v.id).overflow_x_scroll().child(diagram));
     if !layout.types.is_empty() {
         // 종류 줄(R69.6)은 서로 이어지지 않는 아웃박스 내역이라 화살표 없이 표로 보인다
         let mut table = v_flex()
