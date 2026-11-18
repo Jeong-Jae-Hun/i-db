@@ -99,7 +99,16 @@ pub fn frecency(u: &Use, now: i64) -> f64 {
     u.n as f64 * (-age / HALF_LIFE_SECS).exp2()
 }
 
+/// gui.json 에 남겨도 되는 열쇠인지. Redis 키 이름은 토큰·이메일 같은 값을 담을 수 있어 남기지 않는다
+/// (명령·접속·테이블·파일·탭만 센다).
+pub fn persistable(key: &str) -> bool {
+    !key.starts_with("key:")
+}
+
 pub fn record(uses: &mut Uses, key: &str, now: i64) {
+    if !persistable(key) {
+        return;
+    }
     let u = uses.entry(key.to_string()).or_default();
     u.n = u.n.saturating_add(1);
     u.at = now;
@@ -381,6 +390,8 @@ mod tests {
             record(&mut uses, &format!("k{i}"), i as i64);
         }
         assert_eq!(uses.len(), MAX_USES);
+        record(&mut uses, "key:cache-prod:session:abc-token", 1);
+        assert!(!uses.keys().any(|k| k.starts_with("key:")), "Redis 키는 세지 않는다");
         assert!(!uses.contains_key("k0"), "점수 낮은 것을 버린다");
     }
 }

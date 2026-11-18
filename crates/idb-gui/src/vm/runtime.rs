@@ -232,6 +232,8 @@ impl Prefs {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         p.migrate();
+        // 옛 판이 남긴 Redis 키 이름(값을 담을 수 있다)은 읽을 때 버린다
+        p.palette_uses.retain(|k, _| super::finder::persistable(k));
         p
     }
 
@@ -320,6 +322,20 @@ mod tests {
             (p.zoom, p.row_limit, p.theme),
             (1.0, 500, super::super::settings::ThemePref::System)
         );
+    }
+
+    #[test]
+    fn 팔레트_자주_씀의_Redis_키는_읽을_때_버린다() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("gui.json");
+        std::fs::write(
+            &path,
+            r#"{"palette_uses": {"cmd:Run": {"n": 3, "at": 1}, "key:cache-prod:user:a@b.com": {"n": 9, "at": 1}}}"#,
+        )
+        .unwrap();
+        let p = Prefs::load(&path);
+        assert!(p.palette_uses.contains_key("cmd:Run"));
+        assert!(!p.palette_uses.keys().any(|k| k.starts_with("key:")));
     }
 
     #[test]
