@@ -719,7 +719,7 @@ impl Render for RedisView {
                             None => div()
                                 .p_3()
                                 .text_color(theme.muted_foreground)
-                                .child("키를 고르면 값을 보인다")
+                                .child(crate::vm::copy::EMPTY_VALUE)
                                 .into_any_element(),
                         }),
                     ),

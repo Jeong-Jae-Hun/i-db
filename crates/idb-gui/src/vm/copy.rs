@@ -10,3 +10,5 @@ pub const EMPTY_READY: (&str, &str) = ("⌘↵ 로 실행한다", "커서가 든
 pub const EMPTY_ROWS: &str = "행이 없다";
 pub const EMPTY_FILTER: &str = "맞는 행이 없다";
 pub const EMPTY_KEYS: &str = "맞는 키가 없다 · 패턴을 바꿔 다시 찾는다";
+pub const EMPTY_VALUE: &str = "키를 고르면 값을 보인다";
+pub const EMPTY_SOURCE: &str = "왼쪽에서 항목을 고르거나 질의를 실행한다";

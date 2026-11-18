@@ -6,8 +6,8 @@ use std::io::{BufRead as _, Write as _};
 
 use idb_engine::{
     BoardResult, BoardSummary, Catalog, ConnSummary, EngineError, FlowBox, FlowResult, HealthInfo, Hello, LockState, Metric, Node,
-    OutboxExhausted, PROTOCOL_VERSION, PanelOut, ProjectInfo, QueryFile, QueryText, RawValue, Request, ResultSet, ScanResult, SessionState,
-    TablePage, TxState,
+    OutboxExhausted, PROTOCOL_VERSION, PanelOut, ProjectInfo, QueryFile, QueryText, QueryWritten, RawValue, Request, ResultSet, ScanResult,
+    SessionState, TablePage, TxState,
 };
 use serde_json::Value;
 
@@ -694,6 +694,16 @@ pub fn handle(req: &Request) -> Result<Value, EngineError> {
             qf("queries/billing/invoice-gap.sql", "billing-local", 2),
             qf("queries/scratch.sql", "", 1),
         ]),
+        // 쓰기는 받은 척만 한다(디스크에 아무것도 쓰지 않는다)
+        Request::QueryNew { conn, .. } => to(QueryWritten {
+            path: format!("queries/app/{conn}-20261118-093000.sql"),
+            created: true,
+            ..Default::default()
+        }),
+        Request::QueryWrite { path, .. } => to(QueryWritten {
+            path: path.clone(),
+            ..Default::default()
+        }),
         Request::QueryRead { .. } => to(QueryText {
             content: "select id, email, status\nfrom users\nwhere status = 'dormant'\norder by id;\n".into(),
             hash: String::new(),

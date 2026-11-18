@@ -16,7 +16,7 @@ impl State {
     pub fn symbol(self) -> &'static str {
         match self {
             State::Ok => "●",
-            State::Warn => "!",
+            State::Warn => "▲",
             State::Fail => "✕",
             State::Pending => "…",
         }

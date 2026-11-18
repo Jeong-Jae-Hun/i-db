@@ -92,12 +92,19 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
 pub fn open_shortcuts(window: &mut Window, cx: &mut Context<Workspace>) {
     window.open_dialog(cx, |dialog, _, cx| {
         let t = cx.theme().clone();
-        let mut body = v_flex().gap_1();
-        for m in MenuName::ALL {
-            let keyed: Vec<_> = entries_in(m).filter(|e| e.key.is_some()).collect();
-            if keyed.is_empty() {
-                continue;
-            }
+        // 두 단으로 나눠 한 화면에 다 들어가게 한다(메뉴 순서는 지킨다)
+        let menus: Vec<_> = MenuName::ALL
+            .into_iter()
+            .map(|m| (m, entries_in(m).filter(|e| e.key.is_some()).collect::<Vec<_>>()))
+            .filter(|(_, k)| !k.is_empty())
+            .collect();
+        let total: usize = menus.iter().map(|(_, k)| k.len() + 1).sum();
+        let mut cols = [v_flex().flex_1().min_w_0().gap_1(), v_flex().flex_1().min_w_0().gap_1()];
+        let mut used = 0usize;
+        for (m, keyed) in menus {
+            let c = usize::from(used * 2 >= total);
+            used += keyed.len() + 1;
+            let mut body = std::mem::replace(&mut cols[c], v_flex());
             body = body.child(div().pt_2().text_xs().text_color(t.muted_foreground).child(m.title()));
             for e in keyed {
                 body = body.child(
@@ -110,8 +117,11 @@ pub fn open_shortcuts(window: &mut Window, cx: &mut Context<Workspace>) {
                     ),
                 );
             }
+            cols[c] = body;
         }
-        dialog.title("단축키").w(px(460.)).child(body).child(
+        let [left, right] = cols;
+        let body = h_flex().items_start().gap_6().child(left).child(right);
+        dialog.title("단축키").w(px(760.)).child(body).child(
             div()
                 .pt_2()
                 .text_xs()
