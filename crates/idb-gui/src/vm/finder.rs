@@ -243,7 +243,20 @@ pub fn rank(items: &[Item], query: &str, uses: &Uses, now: i64) -> Vec<Hit> {
             ))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.index.cmp(&b.2.index)));
+    // 종류별로 묶는다(같은 종류가 두 번 나뉘어 보이지 않게). 종류 순서는 그 종류의 가장 좋은 점수 순이고, 안에서는 점수 순이다
+    let mut best: HashMap<Group, i64> = HashMap::new();
+    for (s, _, h) in &scored {
+        let b = best.entry(h.group).or_insert(*s);
+        *b = (*b).max(*s);
+    }
+    scored.sort_by(|a, b| {
+        best[&b.2.group]
+            .cmp(&best[&a.2.group])
+            .then(a.2.group.cmp(&b.2.group))
+            .then(b.0.cmp(&a.0))
+            .then(b.1.total_cmp(&a.1))
+            .then(a.2.index.cmp(&b.2.index))
+    });
     scored.into_iter().take(LIMIT).map(|(_, _, h)| h).collect()
 }
 
@@ -328,6 +341,27 @@ mod tests {
         assert_eq!(r[2].index, 2);
         assert_eq!(r.last().unwrap().index, 3, "설명에서만 맞으면 뒤");
         assert!(r[3].hits.is_empty());
+    }
+
+    #[test]
+    fn 질의_결과는_종류별로_한_번씩만_묶인다() {
+        let items = vec![
+            item(Group::Table, "orders", ""),
+            item(Group::Command, "새 order 열기", ""),
+            item(Group::Table, "zz_order_log", ""),
+            item(Group::File, "orders.sql", ""),
+        ];
+        let r = rank(&items, "order", &Uses::new(), 0);
+        let groups: Vec<Group> = r.iter().map(|h| h.group).collect();
+        let mut seen = Vec::new();
+        for g in &groups {
+            if seen.last() != Some(g) {
+                assert!(!seen.contains(g), "종류가 나뉘었다: {groups:?}");
+                seen.push(*g);
+            }
+        }
+        assert_eq!(r[0].index, 0, "가장 좋은 점수의 종류가 먼저");
+        assert_eq!(r[1].index, 2, "같은 종류는 붙어 있다");
     }
 
     #[test]

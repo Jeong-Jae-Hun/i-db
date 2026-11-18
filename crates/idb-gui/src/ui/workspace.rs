@@ -2922,6 +2922,7 @@ impl Workspace {
                         .cursor_pointer()
                         .hover(|st| st.bg(theme.sidebar_accent))
                         .debug_selector(move || format!("query-row-{i}"))
+                        .child(Icon::new(IconName::File).size(px(sc.icon())).text_color(theme.muted_foreground))
                         .child(div().flex_1().min_w_0().truncate().child(f.name.clone()))
                         .on_click(cx.listener(move |ws, _, window, cx| ws.open_query(rel.clone(), window, cx))),
                 );
