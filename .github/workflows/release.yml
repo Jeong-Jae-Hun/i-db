@@ -101,10 +101,11 @@ jobs:
           tar -C "dist/$name" -czf "dist/$name.tar.gz" db
       - run: gh release upload "$TAG" "dist/db_linux_${ARCH}.tar.gz" -R "$GITHUB_REPOSITORY" --clobber
 
+  # macOS 러너는 한 번만 잡는다(러너를 기다리는 시간이 길다). db 두 아키텍처와 i-db.app 을 한 작업에서 만든다
   darwin:
     needs: draft
     runs-on: macos-15
-    timeout-minutes: 40
+    timeout-minutes: 80
     permissions:
       contents: write
     env:
@@ -113,7 +114,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show active-toolchain || rustup toolchain install
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - name: build
+      - name: build db
         run: |
           set -euo pipefail
           bin=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "idb-cli") | .targets[] | select(.kind == ["bin"]) | .name')
@@ -129,22 +130,11 @@ jobs:
             test "$(tar -tzf "dist/$name.tar.gz")" = db
           done
           dist/db_darwin_arm64/db help >/dev/null
+      # db 를 먼저 올려 GUI 빌드가 실패해도 CLI 묶음은 초안에 남는다
       - run: gh release upload "$TAG" dist/db_darwin_arm64.tar.gz dist/db_darwin_amd64.tar.gz -R "$GITHUB_REPOSITORY" --clobber
-
-  gui:
-    needs: draft
-    runs-on: macos-15
-    timeout-minutes: 60
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup show active-toolchain || rustup toolchain install
-      - run: rustup target add aarch64-apple-darwin
       # 정보 창의 판 글(update_cmd 와 같은 IDB_VERSION)
-      - run: IDB_VERSION="$TAG" cargo build --profile release-gui --locked --target aarch64-apple-darwin -p idb-gui --bin i-db
+      - name: build i-db
+        run: IDB_VERSION="$TAG" cargo build --profile release-gui --locked --target aarch64-apple-darwin -p idb-gui --bin i-db
       - name: bundle
         run: |
           set -euo pipefail
@@ -173,7 +163,7 @@ jobs:
       - run: gh release upload "$TAG" dist/i-db_darwin_arm64.zip -R "$GITHUB_REPOSITORY" --clobber
 
   publish:
-    needs: [linux, darwin, gui]
+    needs: [linux, darwin]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
