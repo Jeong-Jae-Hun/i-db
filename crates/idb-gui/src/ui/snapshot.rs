@@ -210,6 +210,23 @@ fn ns_window(window: &Window) -> Option<objc2::rc::Retained<objc2_app_kit::NSWin
 
 fn float_window(window: &Window) {
     if let Some(w) = ns_window(window) {
+        // 마우스가 창 위에 있으면 hover·툴팁이 찍힌다. 화면 네 귀퉁이 중 마우스가 들지 않는 곳에 둔다
+        if let (Some(screen), Some(mtm)) = (w.screen(), objc2::MainThreadMarker::new()) {
+            let _ = mtm;
+            let vis = screen.visibleFrame();
+            let f = w.frame();
+            let m = objc2_app_kit::NSEvent::mouseLocation();
+            let xs = [vis.origin.x, vis.origin.x + vis.size.width - f.size.width];
+            let ys = [vis.origin.y, vis.origin.y + vis.size.height - f.size.height];
+            let inside = |x: f64, y: f64| m.x >= x && m.x <= x + f.size.width && m.y >= y && m.y <= y + f.size.height;
+            let corner = xs
+                .iter()
+                .flat_map(|&x| ys.iter().map(move |&y| (x, y)))
+                .find(|&(x, y)| !inside(x, y));
+            if let Some((x, y)) = corner {
+                w.setFrameOrigin(objc2_foundation::NSPoint::new(x, y));
+            }
+        }
         w.setLevel(objc2_app_kit::NSFloatingWindowLevel);
         // 실제 마우스가 창 위에 있어도 hover·툴팁이 찍히지 않게 한다
         w.setIgnoresMouseEvents(true);

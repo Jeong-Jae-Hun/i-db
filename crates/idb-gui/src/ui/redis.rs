@@ -330,6 +330,7 @@ impl RedisView {
                 .ok_text("지우기")
                 .ok_variant(gpui_component::button::ButtonVariant::Danger)
                 .show_cancel(true)
+                .cancel_text(crate::vm::copy::CANCEL)
                 .on_ok(move |_, window, cx| {
                     let k = key2.clone();
                     let _ = this.update(cx, |v, cx| v.apply_edit(&k, redisedit::Action::DeleteKey, window, cx));
@@ -373,6 +374,7 @@ impl RedisView {
                             .ok_text(format!("{}개 지우기", keys.len()))
                             .ok_variant(gpui_component::button::ButtonVariant::Danger)
                             .show_cancel(true)
+                            .cancel_text(crate::vm::copy::CANCEL)
                             .on_ok(move |_, window, cx| {
                                 let keys = keys.clone();
                                 let _ = this.update(cx, |v, cx| v.unlink(keys, window, cx));

@@ -107,10 +107,11 @@ impl TableDelegate for GridDelegate {
         self.grid.len()
     }
 
-    fn column(&self, col_ix: usize, _: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
         let name = &self.grid.cols[col_ix];
-        let ty = self.grid.types.get(col_ix).cloned().unwrap_or_default();
-        let w = (name.chars().count().max(ty.chars().count()) as f32 * 8.0 + 40.0).clamp(80.0, 320.0);
+        // 고정폭 반각 한 칸은 글자 크기의 절반 남짓이다. 칸 안쪽 여백·정렬 단추 몫을 더한다
+        let half = f32::from(cx.theme().mono_font_size) * 0.56;
+        let w = (self.grid.col_chars(col_ix) as f32 * half + 28.0).clamp(64.0, 480.0);
         let sort = match self.grid.sort_state() {
             Some((c, Dir::Asc)) if c == col_ix => ColumnSort::Ascending,
             Some((c, Dir::Desc)) if c == col_ix => ColumnSort::Descending,
@@ -675,6 +676,7 @@ impl ResultsView {
                         .description(sql.clone())
                         .ok_text("반영")
                         .show_cancel(true)
+                        .cancel_text(crate::vm::copy::CANCEL)
                         .on_ok(move |_, window, cx| {
                             let _ = this.update(cx, |v, cx| v.submit(cs.clone(), window, cx));
                             true

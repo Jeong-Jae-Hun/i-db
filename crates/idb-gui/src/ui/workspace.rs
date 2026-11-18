@@ -15,7 +15,6 @@ use gpui::{
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui::{ClickEvent, ClipboardItem, MouseButton, rems};
-use gpui_component::Disableable as _;
 use gpui_component::TitleBar;
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
@@ -36,6 +35,7 @@ use super::{
     About, CancelRun, CloseTab, ExplainQuery, Minimize, NewTab, OpenFile, OpenSettings, RunAll, RunQuery, SaveFile, ShowDashboard,
     ShowShortcuts, SwitchConn, ToggleProdLock, ToggleResults, ToggleSidebar, TxBegin, TxCommit, TxRollback, ZoomIn, ZoomOut, ZoomReset,
 };
+use crate::vm::copy;
 use crate::vm::font::FontChoice;
 use crate::vm::picker;
 use crate::vm::queries::{self, QueryFile};
@@ -449,6 +449,7 @@ impl Workspace {
                             ButtonVariant::Danger
                         })
                         .show_cancel(true)
+                        .cancel_text(copy::CANCEL)
                         .on_ok(move |_, window, cx| {
                             let mut c = confirms;
                             c.grant(ask);
@@ -778,6 +779,7 @@ impl Workspace {
                 .ok_text("버리고 바꾸기")
                 .ok_variant(ButtonVariant::Danger)
                 .show_cancel(true)
+                .cancel_text(copy::CANCEL)
                 .on_ok(move |_, window, cx| {
                     let _ = this.update(cx, |ws, cx| {
                         for r in ws.results_for(&conn, cx) {
@@ -2856,15 +2858,17 @@ impl Workspace {
                         .on_click(cx.listener(|ws, _, w, cx| ws.run_query(true, w, cx))),
                 )
             })
-            .child(
-                Button::new("stop")
-                    .with_size(px(sc.hit()))
-                    .ghost()
-                    .icon(IconName::Square)
-                    .disabled(!busy)
-                    .tooltip("진행 중인 요청 멈춤 (⌘.)")
-                    .on_click(cx.listener(|ws, _, _, cx| ws.cancel(cx))),
-            )
+            // 멈춤은 요청이 돌 때만 보인다(빈 사각형이 늘 떠 있으면 눌러도 되는 것처럼 보인다)
+            .when(busy, |d| {
+                d.child(
+                    Button::new("stop")
+                        .with_size(px(sc.hit()))
+                        .ghost()
+                        .icon(IconName::Square)
+                        .tooltip("진행 중인 요청 멈춤 (⌘.)")
+                        .on_click(cx.listener(|ws, _, _, cx| ws.cancel(cx))),
+                )
+            })
             .when(is_pg, |d| {
                 d.child(div().w_px().h(rems(1.0)).bg(theme.border).mx_1())
                     .child(
@@ -3013,12 +3017,21 @@ impl Workspace {
 
     fn render_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
+        let sc = self.scale();
+        // 빈 상태: 흐린 마크 + 제목 한 줄 + 할 일 한 줄(vm::copy)
         let empty = |title: &str, hint: &str| {
             v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
-                .gap_1()
+                .gap(px(sc.s8()))
+                .when(!title.is_empty(), |d| {
+                    d.child(super::brand::mark(
+                        px(sc.icon() * 2.5),
+                        theme.muted_foreground.opacity(0.35),
+                        super::brand::accent().opacity(0.6),
+                    ))
+                })
                 .child(div().text_color(theme.muted_foreground).child(title.to_string()))
                 .child(
                     div()
@@ -3029,15 +3042,15 @@ impl Workspace {
                 .into_any_element()
         };
         let Some(t) = self.tabs.active() else {
-            return empty("열린 탭이 없다", "⌘T 로 새 탭을 연다");
+            return empty(copy::EMPTY_NO_TAB.0, copy::EMPTY_NO_TAB.1);
         };
         let no_conn = t.conn.is_none();
         match self.bodies.get(&t.id) {
             Some(Body::Sql { editor, result, .. }) => {
                 let result_el = match result {
                     Some(r) => r.clone().into_any_element(),
-                    None if no_conn => empty("왼쪽에서 접속을 고르세요", "접속을 누르면 이 탭에서 쓴다"),
-                    None => empty("⌘↵ 로 실행", "커서가 든 문장(선택이 있으면 선택)을 실행한다 · ⇧⌘↵ 모두 실행"),
+                    None if no_conn => empty(copy::EMPTY_NO_CONN.0, copy::EMPTY_NO_CONN.1),
+                    None => empty(copy::EMPTY_READY.0, copy::EMPTY_READY.1),
                 };
                 v_resizable(SharedString::from("editor-split"))
                     .with_state(&self.editor_split)
@@ -3050,7 +3063,7 @@ impl Workspace {
                     .into_any_element()
             }
             Some(Body::Table { result: Some(r) }) => r.clone().into_any_element(),
-            Some(Body::Table { result: None }) => empty("읽는 중…", ""),
+            Some(Body::Table { result: None }) => empty("", "읽는 중…"),
             Some(Body::Redis { view }) => view.clone().into_any_element(),
             Some(Body::Source { view }) => view.clone().into_any_element(),
             Some(Body::Dashboard { view }) => view.clone().into_any_element(),

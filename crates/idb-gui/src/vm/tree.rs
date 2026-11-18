@@ -442,23 +442,26 @@ impl ConnTree {
             if members.is_empty() {
                 continue;
             }
-            let expanded = filtering || !self.collapsed.contains(f);
+            // 폴더 없는 접속은 머리 줄 없이 그대로 둔다(이름 없는 접힘 줄이 보이지 않게)
+            let expanded = f.is_empty() || filtering || !self.collapsed.contains(f);
             // 폴더 안에 prod 가 있으면 폴더도 빨갛게 둬 접혀 있어도 보이게 한다
             let folder_tone = if members.iter().any(|&i| tone(&self.conns[i].env) == Tone::Prod) {
                 Tone::Prod
             } else {
                 Tone::Local
             };
-            out.push(Row {
-                kind: RowKind::Folder {
-                    expanded,
-                    count: members.len(),
-                },
-                depth: 0,
-                label: f.clone(),
-                detail: String::new(),
-                tone: folder_tone,
-            });
+            if !f.is_empty() {
+                out.push(Row {
+                    kind: RowKind::Folder {
+                        expanded,
+                        count: members.len(),
+                    },
+                    depth: 0,
+                    label: f.clone(),
+                    detail: String::new(),
+                    tone: folder_tone,
+                });
+            }
             if !expanded {
                 continue;
             }
@@ -593,6 +596,15 @@ mod tests {
         let l: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(l, vec!["app", "app-local", "app-prod", "기타", "cache", "logs"]);
         assert_eq!(rows[0].kind, RowKind::Folder { expanded: true, count: 2 });
+        // 폴더 이름이 없으면 머리 줄이 없다
+        let mut bare = ConnTree::new(vec![ConnSummary {
+            name: "solo".into(),
+            ..Default::default()
+        }]);
+        let r = bare.rows();
+        assert!(matches!(r[0].kind, RowKind::Conn { .. }), "{:?}", r[0].kind);
+        bare.toggle_node("solo");
+        assert!(bare.rows().iter().all(|r| !matches!(r.kind, RowKind::Folder { .. })));
         assert_eq!(rows[2].kind, RowKind::Conn { index: 2, expanded: false });
         assert_eq!(rows[1].detail, "pg · h/d");
         assert_eq!(rows[2].tone, Tone::Prod);

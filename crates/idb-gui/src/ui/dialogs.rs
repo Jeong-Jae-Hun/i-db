@@ -21,7 +21,14 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
     let this = cx.entity().downgrade();
     window.open_dialog(cx, move |dialog, _, cx| {
         let t = cx.theme().clone();
-        let label = |s: &str| div().w(px(120.)).text_color(t.muted_foreground).child(s.to_string());
+        let label = |s: &str| {
+            div()
+                .w(px(168.))
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_color(t.muted_foreground)
+                .child(s.to_string())
+        };
         let row = |name: &str| h_flex().gap_3().py_1().child(label(name));
         let mut themes = h_flex().gap_1();
         for (i, choice) in ThemePref::ALL.into_iter().enumerate() {
@@ -62,7 +69,7 @@ pub fn open_settings(ws: &mut Workspace, window: &mut Window, cx: &mut Context<W
                     .child(div().flex_1())
                     .child(
                         Button::new("settings-cancel")
-                            .label("취소")
+                            .label(crate::vm::copy::CANCEL)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(Button::new("settings-ok").primary().label("저장").on_click(move |_, window, cx| {

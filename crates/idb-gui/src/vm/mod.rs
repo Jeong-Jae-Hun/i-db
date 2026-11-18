@@ -2,6 +2,7 @@
 
 pub mod brand;
 pub mod completion;
+pub mod copy;
 pub mod crashlog;
 pub mod dashboard;
 pub mod edits;
